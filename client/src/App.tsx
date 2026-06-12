@@ -7,6 +7,24 @@ import { useResizable, ResizeHandle } from "./hooks/useResizable";
 import type { FsEntry } from "./panes/FilesPanel";
 import { pickAndEnumerateFolder, pickAndReadFile } from "./panes/browserFs";
 
+function reportDebug(hypothesisId: string, location: string, msg: string, data: Record<string, unknown>) {
+  // #region debug-point C:app-report
+  fetch("http://127.0.0.1:7777/event", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      sessionId: "desktop-browser-crash",
+      runId: "post-fix",
+      hypothesisId,
+      location,
+      msg: `[DEBUG] ${msg}`,
+      data,
+      ts: Date.now(),
+    }),
+  }).catch(() => {});
+  // #endregion
+}
+
 export default function App() {
   const editorRef = useRef<EditorPaneHandle>(null);
   const { connected, events, runTest } = useWebSocket();
@@ -26,14 +44,20 @@ export default function App() {
   const browserIdSeq = useRef(0);
 
   const handleDetectUrl = useCallback((_sessionId: string, url: string) => {
-    console.log("[Harness] Browser URL detected:", url);
+    // #region debug-point C:handle-detect-url
+    reportDebug("C", "App.tsx:handleDetectUrl", "terminal detected browser url", {
+      sessionId: _sessionId,
+      url,
+      existingTabs: browserTabs.length,
+    });
+    // #endregion
     setBrowserTabs((prev) => {
       if (prev.some((b) => b.url === url)) return prev;
       const id = String(++browserIdSeq.current);
       const label = url.replace(/^https?:\/\//, "");
       return [...prev, { id, url, label }];
     });
-  }, []);
+  }, [browserTabs.length]);
 
   const handleAddBrowserTab = useCallback(() => {
     // Add an empty tab — user types the URL in the BrowserView address bar
@@ -44,6 +68,29 @@ export default function App() {
   const handleBrowserTabClose = useCallback((id: string) => {
     setBrowserTabs((prev) => prev.filter((b) => b.id !== id));
   }, []);
+
+  const handleBrowserTabUpdateLabel = useCallback((tabId: string, label: string) => {
+    setBrowserTabs((prev) => prev.map((b) => b.id === tabId ? { ...b, label } : b));
+  }, []);
+
+  const handleBrowserTabUpdateUrl = useCallback((tabId: string, url: string) => {
+    setBrowserTabs((prev) => prev.map((b) => b.id === tabId ? { ...b, url } : b));
+  }, []);
+
+  const handleBrowserNewTabFromLink = useCallback((url: string) => {
+    setBrowserTabs((prev) => {
+      if (prev.some((b) => b.url === url)) return prev;
+      const id = String(++browserIdSeq.current);
+      const label = url.replace(/^https?:\/\//, "");
+      return [...prev, { id, url, label }];
+    });
+  }, []);
+
+  useEffect(() => {
+    return window.harnessDesktop?.onBrowserOpenUrl?.((url: string) => {
+      handleBrowserNewTabFromLink(url);
+    });
+  }, [handleBrowserNewTabFromLink]);
 
   useEffect(() => { termVisibleRef.current = termVisible; }, [termVisible]);
   useEffect(() => { if (!termVisible) reopenTerminal.current = false; }, [termVisible]);
@@ -82,7 +129,7 @@ export default function App() {
   }, [detectProject]);
 
   const openFolderImmediate = useCallback(async () => {
-    const desktop = (window as any).harnessDesktop;
+    const desktop = window.harnessDesktop;
     const isElectronUa = navigator.userAgent.includes("Electron");
     if (desktop?.openFolder) {
       const folderPath = await desktop.openFolder();
@@ -154,7 +201,7 @@ export default function App() {
   }, [detectProject, fsBasePath]);
 
   const openFileImmediate = useCallback(async () => {
-    const desktop = (window as any).harnessDesktop;
+    const desktop = window.harnessDesktop;
     const isElectronUa = navigator.userAgent.includes("Electron");
     if (desktop?.openFile) {
       const filePath = await desktop.openFile();
@@ -259,6 +306,9 @@ export default function App() {
             browserTabs={browserTabs}
             onBrowserTabClose={handleBrowserTabClose}
             onAddBrowserTab={handleAddBrowserTab}
+            onBrowserTabUpdateLabel={handleBrowserTabUpdateLabel}
+            onBrowserTabUpdateUrl={handleBrowserTabUpdateUrl}
+            onBrowserNewTabFromLink={handleBrowserNewTabFromLink}
             onOpenFolder={() => { void openFolderImmediate(); }}
             onCreateProject={() => {
               const dir = prompt("Project folder path (absolute):");

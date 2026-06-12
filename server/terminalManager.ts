@@ -42,6 +42,18 @@ let nextId = 1;
 
 const isWin = process.platform === "win32";
 
+function getPtyDisabledReason(): string {
+  if (process.env.HARNESS_DISABLE_PTY === "1") {
+    return "disabled by HARNESS_DISABLE_PTY=1";
+  }
+  // Electron + Windows currently hits a node-pty ConPTY teardown crash
+  // (`AttachConsole failed`) when browser clients disconnect.
+  if (isWin && process.env.HARNESS_DESKTOP === "1" && process.env.HARNESS_FORCE_PTY !== "1") {
+    return "disabled on Windows desktop to avoid node-pty AttachConsole crashes";
+  }
+  return "";
+}
+
 function getShellPath(): string {
   return isWin ? "powershell.exe" : (process.env.SHELL || "/bin/bash");
 }
@@ -145,7 +157,9 @@ export function createSession(ws: WebSocket, groupKey: string, opts?: { cwd?: st
     ws.send(`term:out:${id}:[Harness] cwd=${cwd}${venvDir ? ` venvDir=${venvDir}` : ""}\r\n`);
   }
 
-  if (process.env.HARNESS_DISABLE_PTY !== "1") {
+  const ptyDisabledReason = getPtyDisabledReason();
+
+  if (!ptyDisabledReason) {
     try {
       const nodePty: { spawn: (...a: any[]) => any } = require("node-pty");
       const pty = nodePty.spawn(shell, args, {
@@ -183,6 +197,8 @@ export function createSession(ws: WebSocket, groupKey: string, opts?: { cwd?: st
         ws.send(`term:out:${id}:PTY unavailable, falling back to pipes: ${msg}\r\n`);
       }
     }
+  } else if (ws.readyState === WebSocket.OPEN) {
+    ws.send(`term:out:${id}:PTY unavailable, falling back to pipes: ${ptyDisabledReason}\r\n`);
   }
 
   const proc = spawn(shell, args, {

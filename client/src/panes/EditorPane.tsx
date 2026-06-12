@@ -28,6 +28,9 @@ interface Props {
   browserTabs: BrowserTab[];
   onBrowserTabClose: (id: string) => void;
   onAddBrowserTab: () => void;
+  onBrowserTabUpdateLabel?: (tabId: string, label: string) => void;
+  onBrowserTabUpdateUrl?: (tabId: string, url: string) => void;
+  onBrowserNewTabFromLink?: (url: string) => void;
   onOpenFolder: () => void;
   onCreateProject: () => void;
   onCreateFile: () => void;
@@ -40,6 +43,7 @@ interface Props {
 
 const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   { fsRoot, fsBasePath, terminalVenvDir, terminalActivateScript, browserTabs, onBrowserTabClose, onAddBrowserTab,
+    onBrowserTabUpdateLabel, onBrowserTabUpdateUrl, onBrowserNewTabFromLink,
     onOpenFolder, onCreateProject, onCreateFile, onOpenFile, onRefreshFs,
     terminalVisible, onCloseTerminal, onDetectUrl }, ref
 ) {
@@ -246,7 +250,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
               </div>
             )}
             {activeBrowserTab && (
-              <div style={{ height: "100%" }}><BrowserView url={activeBrowserTab.url} /></div>
+              <div style={{ height: "100%" }}><BrowserView url={activeBrowserTab.url} tabId={activeBrowserTab.id} onTitleChange={onBrowserTabUpdateLabel} onUrlChange={onBrowserTabUpdateUrl} onNewTab={onBrowserNewTabFromLink} /></div>
             )}
             {files.map((f) => (
               <div key={f.id} style={{ display: f.id === activeFileId ? "flex" : "none", height: "100%" }}>

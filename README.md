@@ -56,6 +56,34 @@ Notes:
 - `npm install` runs `electron-rebuild` for `node-pty` automatically (via `postinstall`).
 - The terminal prefers `node-pty` (ConPTY on Windows) and falls back to pipe mode if PTY isn't available.
 
+## Built-in Browser (Desktop)
+
+In Electron mode, Harness includes a full browser in the editor area powered by an Electron `webview`.
+
+### Features
+
+**Auto-detect localhost URLs** — When a terminal process starts a local server, the browser detects the URL and opens it as a new tab automatically.
+
+**Manual navigation** — Type a URL or a Bing search query in the address bar and press Enter or click Go.
+
+**Back / Forward / Refresh** — Toolbar buttons with disabled state when navigation isn't available.
+
+**Site information** — Click the security icon to see the connection status (secure/not secure), the current URL, and permission toggles.
+
+**Site permissions** — Per-origin toggles for:
+- **Geolocation** — Uses Windows native location via PowerShell `GeoCoordinateWatcher` (no Google API key required). Location is cached IDE-wide and refreshed every 5 minutes. Works across all navigation without re-granting.
+- Camera / Microphone / MIDI / Autoplay
+
+**Tabbed browsing** — Multiple browser tabs can be open at the same time, just like file tabs.
+
+**Title syncing** — The browser tab label follows the page's `<title>`.
+
+**Pop-up interception** — Links that would open a new Electron window are captured and opened as a new Harness browser tab instead.
+
+**Cross-navigation location** — `navigator.geolocation` is overridden at `dom-ready` so the page always uses Harness's native Windows location bridge, even after navigating between routes.
+
+> **Note:** Geolocation requires `https://` or `localhost`. The Windows Location API must be enabled in Windows Settings (`Privacy > Location`).
+
 ## How it works
 
 1. Write HTML/CSS/JS in the Monaco Editor
