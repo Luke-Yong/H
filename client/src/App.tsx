@@ -1,13 +1,11 @@
-import { useRef, useCallback, useState } from "react";
+import { useRef, useCallback, useState, useEffect } from "react";
 import EditorPane, { EditorPaneHandle } from "./panes/EditorPane";
 import TestConsole from "./panes/TestConsole";
 import MenuBar from "./panes/MenuBar";
-import PathDialog, { DialogResult } from "./panes/PathDialog";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { useResizable, ResizeHandle } from "./hooks/useResizable";
 import type { FsEntry } from "./panes/FilesPanel";
-
-type DialogMode = "open-folder" | "open-file" | "new-project" | "new-file" | null;
+import { pickAndEnumerateFolder, pickAndReadFile } from "./panes/browserFs";
 
 export default function App() {
   const editorRef = useRef<EditorPaneHandle>(null);
@@ -16,16 +14,34 @@ export default function App() {
   const [fsRoot, setFsRoot] = useState<FsEntry[] | null>(null);
   const [fsBasePath, setFsBasePath] = useState("");
   const isBrowserFs = useRef(false);
+  const [projectVenvDir, setProjectVenvDir] = useState<string>("");
+  const [projectActivateScript, setProjectActivateScript] = useState<string>("");
   const [goal, setGoal] = useState("Verify the app works correctly");
   const [termVisible, setTermVisible] = useState(false);
+  const termVisibleRef = useRef(false);
+  const reopenTerminal = useRef(false);
 
-  const [dialogMode, setDialogMode] = useState<DialogMode>(null);
-  const [dialogDefault, setDialogDefault] = useState("");
+  useEffect(() => { termVisibleRef.current = termVisible; }, [termVisible]);
+  useEffect(() => { if (!termVisible) reopenTerminal.current = false; }, [termVisible]);
 
   // Resizable console pane (width from right edge)
   const { size: consoleW, onMouseDown: onConsoleDrag } = useResizable(320, 200, 800, true);
 
+  const detectProject = useCallback(async (basePath: string) => {
+    try {
+      const res = await fetch(`/api/project/detect?path=${encodeURIComponent(basePath)}`);
+      const data = await res.json();
+      setProjectVenvDir(typeof data?.venvDir === "string" ? data.venvDir : "");
+      setProjectActivateScript(typeof data?.activateScript === "string" ? data.activateScript : "");
+    } catch {
+      setProjectVenvDir("");
+      setProjectActivateScript("");
+    }
+  }, []);
+
   const openFolder = useCallback(async (folderPath: string) => {
+    const wasOpen = termVisibleRef.current;
+    if (wasOpen) setTermVisible(false);
     try {
       const res = await fetch(`/api/fs/list?path=${encodeURIComponent(folderPath)}`);
       const data = await res.json();
@@ -33,8 +49,36 @@ export default function App() {
       setFsRoot(data.entries || []);
       setFsBasePath(data.path);
       isBrowserFs.current = false;
+      detectProject(data.path);
+      if (wasOpen) {
+        reopenTerminal.current = true;
+        setTimeout(() => { if (reopenTerminal.current) setTermVisible(true); }, 100);
+      }
     } catch (err) { alert(`Failed to open folder: ${err}`); }
-  }, []);
+  }, [detectProject]);
+
+  const openFolderImmediate = useCallback(async () => {
+    const desktop = (window as any).harnessDesktop;
+    const isElectronUa = navigator.userAgent.includes("Electron");
+    if (desktop?.openFolder) {
+      const folderPath = await desktop.openFolder();
+      if (typeof folderPath === "string" && folderPath.trim()) {
+        await openFolder(folderPath.trim());
+      }
+      return;
+    }
+    if (isElectronUa) {
+      alert("Desktop file picker bridge is not available. Restart Electron after rebuilding, or use an absolute path open.");
+    }
+
+    const picked = await pickAndEnumerateFolder();
+    if (!picked) return;
+    setFsRoot(picked.entries);
+    setFsBasePath(picked.name);
+    isBrowserFs.current = true;
+    setProjectVenvDir("");
+    setProjectActivateScript("");
+  }, [openFolder]);
 
   const createProject = useCallback(async (dir: string) => {
     try {
@@ -47,8 +91,10 @@ export default function App() {
       const data = await res.json();
       setFsRoot(data.entries || []);
       setFsBasePath(data.path);
+      isBrowserFs.current = false;
+      detectProject(data.path);
     } catch (err) { alert(`Failed to create project: ${err}`); }
-  }, []);
+  }, [detectProject]);
 
   const createNewFile = useCallback(async (name: string) => {
     if (!fsBasePath) return;
@@ -59,44 +105,57 @@ export default function App() {
 
   const openFileByPath = useCallback(async (filePath: string) => {
     try {
+      const dirPath = filePath.replace(/[/\\][^/\\]+$/, "");
+      const wasOpen = termVisibleRef.current;
+      if (dirPath && dirPath !== fsBasePath && wasOpen) setTermVisible(false);
       const res = await fetch(`/api/fs/read?path=${encodeURIComponent(filePath)}`);
       const data = await res.json();
       if (data.error) throw new Error(data.error);
       editorRef.current?.applyAiFiles([{ name: filePath.split(/[/\\]/).pop() || "untitled", content: data.content }]);
+      if (dirPath && dirPath !== fsBasePath) {
+        const listRes = await fetch(`/api/fs/list?path=${encodeURIComponent(dirPath)}`);
+        const listData = await listRes.json();
+        if (!listData?.error) {
+          setFsRoot(listData.entries || []);
+          setFsBasePath(listData.path || dirPath);
+          isBrowserFs.current = false;
+          detectProject(listData.path || dirPath);
+          if (wasOpen) {
+            reopenTerminal.current = true;
+            setTimeout(() => { if (reopenTerminal.current) setTermVisible(true); }, 100);
+          }
+        }
+      }
     } catch (err) { alert(`Failed to open file: ${err}`); }
-  }, []);
+  }, [detectProject, fsBasePath]);
+
+  const openFileImmediate = useCallback(async () => {
+    const desktop = (window as any).harnessDesktop;
+    const isElectronUa = navigator.userAgent.includes("Electron");
+    if (desktop?.openFile) {
+      const filePath = await desktop.openFile();
+      if (typeof filePath === "string" && filePath.trim()) {
+        await openFileByPath(filePath.trim());
+      }
+      return;
+    }
+    if (isElectronUa) {
+      alert("Desktop file picker bridge is not available. Restart Electron after rebuilding, or use an absolute path open.");
+    }
+
+    const picked = await pickAndReadFile();
+    if (!picked) return;
+    editorRef.current?.applyAiFiles([{ name: picked.name, content: picked.content }]);
+    const files = editorRef.current?.getFiles() || [];
+    const last = files[files.length - 1];
+    if (last) last._fsHandle = picked.handle;
+  }, [openFileByPath]);
 
   const refreshFs = useCallback(async () => {
     if (isBrowserFs.current || !fsBasePath) return;
     try { const res = await fetch(`/api/fs/list?path=${encodeURIComponent(fsBasePath)}`); const data = await res.json(); setFsRoot(data.entries || []); }
     catch { /* ignore */ }
   }, [fsBasePath]);
-
-  const handleDialogOk = useCallback((result: DialogResult) => {
-    setDialogMode(null);
-    if (dialogMode === "open-folder") {
-      if (result.entries) { setFsRoot(result.entries); setFsBasePath(result.path); isBrowserFs.current = true; return; }
-      if (result.path.trim()) openFolder(result.path);
-    } else if (dialogMode === "open-file") {
-      if (result.fileData) {
-        const file = result.fileData;
-        editorRef.current?.applyAiFiles([{ name: file.name, content: file.content }]);
-        const files = editorRef.current?.getFiles() || [];
-        const last = files[files.length - 1];
-        if (last) last._fsHandle = file.handle;
-        return;
-      }
-      if (result.path.trim()) openFileByPath(result.path);
-    } else if (dialogMode === "new-project") {
-      if (result.path.trim()) createProject(result.path);
-    } else if (dialogMode === "new-file") {
-      if (result.path.trim()) createNewFile(result.path);
-    }
-  }, [dialogMode, openFolder, openFileByPath, createProject, createNewFile]);
-
-  const showDialog = useCallback((mode: "open-folder" | "open-file" | "new-project" | "new-file", defaultValue = "") => {
-    setDialogDefault(defaultValue); setDialogMode(mode);
-  }, []);
 
   const handleRun = useCallback(() => {
     const code = editorRef.current?.getCode();
@@ -108,17 +167,23 @@ export default function App() {
     {
       label: "File",
       items: [
-        { label: "Open Folder...", shortcut: "Ctrl+K Ctrl+O", action: () => showDialog("open-folder") },
-        { label: "Open File...", shortcut: "Ctrl+O", action: () => showDialog("open-file") },
+        { label: "Open Folder...", shortcut: "Ctrl+K Ctrl+O", action: () => { void openFolderImmediate(); } },
+        { label: "Open File...", shortcut: "Ctrl+O", action: () => { void openFileImmediate(); } },
         "---" as const,
-        { label: "New Project...", action: () => showDialog("new-project") },
-        { label: "New File", shortcut: "Ctrl+N", action: () => showDialog("new-file") },
+        { label: "New Project...", action: () => {
+          const dir = prompt("Project folder path (absolute):");
+          if (dir?.trim()) void createProject(dir.trim());
+        } },
+        { label: "New File", shortcut: "Ctrl+N", action: () => {
+          const name = prompt("File name (e.g. utils.js):");
+          if (name?.trim()) void createNewFile(name.trim());
+        } },
         "---" as const,
         { label: "Save", shortcut: "Ctrl+S", action: () => {
           const files = editorRef.current?.getFiles(); if (files) for (const f of files) { if (f._fsPath) fetch("/api/fs/write", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: f._fsPath, content: f.content }) }).catch(() => {}); }
         }},
         "---" as const,
-        { label: "Close Folder", shortcut: "Ctrl+K F", action: () => { setFsRoot(null); setFsBasePath(""); isBrowserFs.current = false; } },
+        { label: "Close Folder", shortcut: "Ctrl+K F", action: () => { setFsRoot(null); setFsBasePath(""); isBrowserFs.current = false; setProjectVenvDir(""); setProjectActivateScript(""); setTermVisible(false); } },
       ],
     },
     {
@@ -151,14 +216,6 @@ export default function App() {
     { label: "Help", items: [{ label: "About Harness", action: () => alert("Harness - AI-powered browser test runner\nMonaco + Playwright + DeepSeek") }] },
   ];
 
-  const dialogProps: Record<string, { title: string; placeholder: string; browseDir: boolean; okLabel: string }> = {
-    "open-folder": { title: "Open Folder", placeholder: "e.g. D:/my-project", browseDir: true, okLabel: "Open Folder" },
-    "open-file":   { title: "Open File",   placeholder: "e.g. D:/project/app.js", browseDir: false, okLabel: "Open File" },
-    "new-project": { title: "New Project", placeholder: "e.g. D:/my-new-project", browseDir: false, okLabel: "Create Project" },
-    "new-file":    { title: "New File",    placeholder: "e.g. utils.js", browseDir: false, okLabel: "Create File" },
-  };
-  const dp = dialogMode ? dialogProps[dialogMode] : null;
-
   return (
     <div className="app">
       <MenuBar menus={menus} />
@@ -173,11 +230,19 @@ export default function App() {
             ref={editorRef}
             fsRoot={fsRoot}
             fsBasePath={fsBasePath}
+            terminalVenvDir={projectVenvDir}
+            terminalActivateScript={projectActivateScript}
             events={events}
-            onOpenFolder={() => showDialog("open-folder")}
-            onCreateProject={() => showDialog("new-project")}
-            onCreateFile={() => showDialog("new-file")}
-            onOpenFile={() => showDialog("open-file")}
+            onOpenFolder={() => { void openFolderImmediate(); }}
+            onCreateProject={() => {
+              const dir = prompt("Project folder path (absolute):");
+              if (dir?.trim()) void createProject(dir.trim());
+            }}
+            onCreateFile={() => {
+              const name = prompt("File name (e.g. utils.js):");
+              if (name?.trim()) void createNewFile(name.trim());
+            }}
+            onOpenFile={() => { void openFileImmediate(); }}
             onRefreshFs={refreshFs}
             terminalVisible={termVisible}
             onCloseTerminal={() => setTermVisible(false)}
@@ -196,19 +261,6 @@ export default function App() {
           />
         </div>
       </div>
-
-      {dp && (
-        <PathDialog
-          open={!!dialogMode}
-          title={dp.title}
-          defaultValue={dialogDefault}
-          placeholder={dp.placeholder}
-          browseDir={dp.browseDir}
-          okLabel={dp.okLabel}
-          onOk={handleDialogOk}
-          onCancel={() => setDialogMode(null)}
-        />
-      )}
     </div>
   );
 }

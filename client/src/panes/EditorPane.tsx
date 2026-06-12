@@ -1,4 +1,4 @@
-import { useState, forwardRef, useImperativeHandle, useCallback } from "react";
+import { useState, forwardRef, useImperativeHandle, useCallback, useEffect, useRef } from "react";
 import Editor from "@monaco-editor/react";
 import FilesPanel from "./FilesPanel";
 import BrowserView from "./BrowserView";
@@ -20,6 +20,8 @@ export interface EditorPaneHandle {
 interface Props {
   fsRoot: FsEntry[] | null;
   fsBasePath: string;
+  terminalVenvDir: string;
+  terminalActivateScript: string;
   events: LoopEvent[];
   onOpenFolder: () => void;
   onCreateProject: () => void;
@@ -31,17 +33,20 @@ interface Props {
 }
 
 const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
-  { fsRoot, fsBasePath, events, onOpenFolder, onCreateProject, onCreateFile, onOpenFile, onRefreshFs,
+  { fsRoot, fsBasePath, terminalVenvDir, terminalActivateScript, events, onOpenFolder, onCreateProject, onCreateFile, onOpenFile, onRefreshFs,
     terminalVisible, onCloseTerminal }, ref
 ) {
   const [files, setFiles] = useState<VFile[]>([]);
   const [activeFileId, setActiveFileId] = useState<string>("");
+  const activeFileIdRef = useRef(activeFileId);
   const [showBrowser, setShowBrowser] = useState(false);
   const { size: filePanelW, onMouseDown: onFilePanelDrag } = useResizable(200, 120, 500);
   const { size: termH, onMouseDown: onTermDrag } = useResizable(220, 80, 600, true);
 
   const hasContent = files.length > 0 || (fsRoot && fsRoot.length > 0) || showBrowser;
   const activeIsBrowser = activeFileId === BROWSER_TAB_ID;
+
+  useEffect(() => { activeFileIdRef.current = activeFileId; }, [activeFileId]);
 
   const getCode = useCallback(() => {
     const byExt = (ext: string) => files.find((f) => f.name.endsWith(ext))?.content || "";
@@ -116,16 +121,21 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   const closeTab = useCallback((id: string) => {
     if (id === BROWSER_TAB_ID) {
       setShowBrowser(false);
-      if (activeFileId === BROWSER_TAB_ID) setActiveFileId(files[0]?.id || "");
+      if (activeFileIdRef.current === BROWSER_TAB_ID) setActiveFileId(files[0]?.id || "");
       return;
     }
-    if (files.length <= 1) return;
     setFiles((prev) => {
+      const idx = prev.findIndex((f) => f.id === id);
       const remaining = prev.filter((f) => f.id !== id);
-      if (activeFileId === id) setActiveFileId(remaining[0]?.id || "");
+      if (activeFileIdRef.current === id) {
+        const next = remaining[Math.min(Math.max(idx, 0), Math.max(0, remaining.length - 1))];
+        setActiveFileId(next?.id || "");
+      } else if (activeFileIdRef.current && !remaining.some((f) => f.id === activeFileIdRef.current)) {
+        setActiveFileId(remaining[0]?.id || "");
+      }
       return remaining;
     });
-  }, [files, activeFileId]);
+  }, [files]);
 
   const renameFile = useCallback((id: string) => {
     const f = files.find((x) => x.id === id);
@@ -212,10 +222,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
           <div className="editor-container">
             {files.length === 0 && !showBrowser && (
               <div className="editor-empty">
-                <p>No files open.</p>
-                <button className="welcome-btn" onClick={onOpenFolder}><span className="welcome-btn-icon">📂</span> Open Folder</button>
-                <button className="welcome-btn" onClick={onOpenFile}><span className="welcome-btn-icon">📄</span> Open File</button>
-                <button className="welcome-btn" onClick={addFile}><span className="welcome-btn-icon">📝</span> New File</button>
+                <p>Select a file</p>
               </div>
             )}
             {activeIsBrowser && (
@@ -236,7 +243,13 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
           <>
             <div className="resize-handle-v" onMouseDown={onTermDrag} />
             <div className="terminal-inline" style={{ height: termH }}>
-              <TerminalPane visible={true} onClose={onCloseTerminal} cwd={fsBasePath} />
+              <TerminalPane
+                visible={true}
+                onClose={onCloseTerminal}
+                cwd={fsBasePath}
+                venvDir={terminalVenvDir}
+                activateScript={terminalActivateScript}
+              />
             </div>
           </>
         )}

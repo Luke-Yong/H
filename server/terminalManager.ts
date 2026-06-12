@@ -2,6 +2,7 @@ import { spawn } from "child_process";
 import { WebSocket } from "ws";
 import fs from "fs";
 import path from "path";
+import os from "os";
 
 type Backend = "pty" | "pipe";
 
@@ -26,6 +27,10 @@ function escapePwshSingleQuoted(value: string): string {
   return value.replace(/'/g, "''");
 }
 
+function escapePwshDoubleQuoted(value: string): string {
+  return value.replace(/`/g, "``").replace(/"/g, '`"');
+}
+
 function getPathKey(env: NodeJS.ProcessEnv): string {
   for (const k of Object.keys(env)) {
     if (k.toLowerCase() === "path") return k;
@@ -33,25 +38,37 @@ function getPathKey(env: NodeJS.ProcessEnv): string {
   return "PATH";
 }
 
-function buildEnvForCwd(cwd: string): NodeJS.ProcessEnv {
+function buildEnvForCwd(cwd: string, venvDir?: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   const pathKey = getPathKey(env);
   const delim = isWin ? ";" : ":";
 
   const extra: string[] = [];
   if (isWin) {
+    const preferredScripts = venvDir ? path.join(cwd, venvDir, "Scripts") : "";
     const venvScripts = path.join(cwd, "venv", "Scripts");
     const dotVenvScripts = path.join(cwd, ".venv", "Scripts");
+    const envScripts = path.join(cwd, "env", "Scripts");
+    const dotEnvScripts = path.join(cwd, ".env", "Scripts");
     const nodeBin = path.join(cwd, "node_modules", ".bin");
+    if (preferredScripts && fs.existsSync(preferredScripts)) extra.push(preferredScripts);
     if (fs.existsSync(venvScripts)) extra.push(venvScripts);
     if (fs.existsSync(dotVenvScripts)) extra.push(dotVenvScripts);
+    if (fs.existsSync(envScripts)) extra.push(envScripts);
+    if (fs.existsSync(dotEnvScripts)) extra.push(dotEnvScripts);
     if (fs.existsSync(nodeBin)) extra.push(nodeBin);
   } else {
+    const preferredBin = venvDir ? path.join(cwd, venvDir, "bin") : "";
     const venvBin = path.join(cwd, "venv", "bin");
     const dotVenvBin = path.join(cwd, ".venv", "bin");
+    const envBin = path.join(cwd, "env", "bin");
+    const dotEnvBin = path.join(cwd, ".env", "bin");
     const nodeBin = path.join(cwd, "node_modules", ".bin");
+    if (preferredBin && fs.existsSync(preferredBin)) extra.push(preferredBin);
     if (fs.existsSync(venvBin)) extra.push(venvBin);
     if (fs.existsSync(dotVenvBin)) extra.push(dotVenvBin);
+    if (fs.existsSync(envBin)) extra.push(envBin);
+    if (fs.existsSync(dotEnvBin)) extra.push(dotEnvBin);
     if (fs.existsSync(nodeBin)) extra.push(nodeBin);
   }
 
@@ -60,39 +77,50 @@ function buildEnvForCwd(cwd: string): NodeJS.ProcessEnv {
   return env;
 }
 
-function getShellArgs(cwd: string): string[] {
+function getShellArgs(cwd: string, venvDir?: string, activateScript?: string): string[] {
   if (isWin) {
     const c = escapePwshSingleQuoted(cwd);
+    const v = escapePwshSingleQuoted((venvDir || "").trim());
+    const act = (activateScript || "").trim();
+    const actQ = act ? escapePwshDoubleQuoted(act) : "";
     const init = [
       `Set-Location -LiteralPath '${c}'`,
-      `if (Test-Path '.\\venv\\Scripts\\Activate.ps1') { . '.\\venv\\Scripts\\Activate.ps1' } elseif (Test-Path '.\\.venv\\Scripts\\Activate.ps1') { . '.\\.venv\\Scripts\\Activate.ps1' }`,
+      actQ ? `& "${actQ}"` : ``,
+      v ? `if (Test-Path ('.\\${v}\\Scripts\\Activate.ps1')) { . ('.\\${v}\\Scripts\\Activate.ps1') }` : ``,
+      `if (Test-Path '.\\venv\\Scripts\\Activate.ps1') { . '.\\venv\\Scripts\\Activate.ps1' } elseif (Test-Path '.\\.venv\\Scripts\\Activate.ps1') { . '.\\.venv\\Scripts\\Activate.ps1' } elseif (Test-Path '.\\env\\Scripts\\Activate.ps1') { . '.\\env\\Scripts\\Activate.ps1' } elseif (Test-Path '.\\.env\\Scripts\\Activate.ps1') { . '.\\.env\\Scripts\\Activate.ps1' }`,
       `if (Test-Path '.\\node_modules\\.bin') { $env:Path = (Resolve-Path '.\\node_modules\\.bin').Path + ';' + $env:Path }`,
-    ].join("; ");
+    ].filter(Boolean).join("; ");
     return ["-NoLogo", "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", init];
   }
   const init = [
     `cd "${cwd.replace(/"/g, '\\"')}"`,
-    `if [ -f "./venv/bin/activate" ]; then . "./venv/bin/activate"; elif [ -f "./.venv/bin/activate" ]; then . "./.venv/bin/activate"; fi`,
+    venvDir ? `if [ -f "./${venvDir.replace(/"/g, '\\"')}/bin/activate" ]; then . "./${venvDir.replace(/"/g, '\\"')}/bin/activate"; fi` : ``,
+    `if [ -f "./venv/bin/activate" ]; then . "./venv/bin/activate"; elif [ -f "./.venv/bin/activate" ]; then . "./.venv/bin/activate"; elif [ -f "./env/bin/activate" ]; then . "./env/bin/activate"; elif [ -f "./.env/bin/activate" ]; then . "./.env/bin/activate"; fi`,
     `if [ -d "./node_modules/.bin" ]; then export PATH="$(pwd)/node_modules/.bin:$PATH"; fi`,
     `exec ${getShellPath()}`,
-  ].join("; ");
+  ].filter(Boolean).join("; ");
   return ["-lc", init];
 }
 
-export function createSession(ws: WebSocket, groupKey: string, opts?: { cwd?: string }): string {
+export function createSession(ws: WebSocket, groupKey: string, opts?: { cwd?: string; venvDir?: string; activateScript?: string }): string {
   const id = String(nextId++);
   const shell = getShellPath();
-  let cwd = process.cwd();
+  let cwd = os.homedir();
   if (opts?.cwd) {
     try {
       if (fs.statSync(opts.cwd).isDirectory()) cwd = opts.cwd;
     } catch {}
   }
 
-  const args = getShellArgs(cwd);
-  const env = buildEnvForCwd(cwd);
+  const venvDir = opts?.venvDir;
+  const args = getShellArgs(cwd, venvDir, opts?.activateScript);
+  const env = buildEnvForCwd(cwd, venvDir);
 
   const group = sessions.get(groupKey) || [];
+
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(`term:out:${id}:[Harness] cwd=${cwd}${venvDir ? ` venvDir=${venvDir}` : ""}\r\n`);
+  }
 
   if (process.env.HARNESS_DISABLE_PTY !== "1") {
     try {

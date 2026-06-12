@@ -577,6 +577,21 @@ body {
   flex: 1;
   display: none;
   overflow: hidden;
+  /* xterm's internal scrollbar should sit flush right, no horizontal overflow */
+}
+
+.terminal-slot .xterm-viewport {
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+  scrollbar-width: thin;
+}
+
+.terminal-slot .xterm-viewport::-webkit-scrollbar {
+  width: 8px;
+}
+
+.terminal-slot .xterm-viewport::-webkit-scrollbar-track {
+  background: #1e1e1e;
 }
 
 .terminal-slot.active {

@@ -3,7 +3,17 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 
-const WS_URL = `ws://${window.location.host}/ws`;
+const WS_URL =
+  window.location.port === "5173"
+    ? "ws://localhost:3001/ws"
+    : `ws://${window.location.host}/ws`;
+
+function isAbsolutePath(p: string): boolean {
+  if (!p) return false;
+  if (/^[a-zA-Z]:[\\/]/.test(p)) return true;
+  if (p.startsWith("/")) return true;
+  return false;
+}
 
 interface TermInstance {
   id: string;
@@ -21,9 +31,11 @@ interface Props {
   visible: boolean;
   onClose: () => void;
   cwd?: string;
+  venvDir?: string;
+  activateScript?: string;
 }
 
-export default function TerminalPane({ visible, onClose, cwd }: Props) {
+export default function TerminalPane({ visible, onClose, cwd, venvDir, activateScript }: Props) {
   const panelRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const termsRef = useRef<Map<string, TermInstance>>(new Map());
@@ -34,10 +46,19 @@ export default function TerminalPane({ visible, onClose, cwd }: Props) {
   const activeIdRef = useRef(activeId);
   const [splitMode, setSplitMode] = useState(false);
   const cwdRef = useRef<string>("");
+  const venvRef = useRef<string>("");
+  const activateRef = useRef<string>("");
+  const hasRealCwdRef = useRef<boolean>(false);
 
   // Keep ref in sync for the WS effect (which must NOT re-run on activeId changes)
   useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
-  useEffect(() => { cwdRef.current = (cwd || "").trim(); }, [cwd]);
+  useEffect(() => {
+    const c = (cwd || "").trim();
+    cwdRef.current = c;
+    hasRealCwdRef.current = isAbsolutePath(c);
+  }, [cwd]);
+  useEffect(() => { venvRef.current = (venvDir || "").trim(); }, [venvDir]);
+  useEffect(() => { activateRef.current = (activateScript || "").trim(); }, [activateScript]);
 
   const sendToServer = useCallback((id: string, data: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -206,6 +227,20 @@ export default function TerminalPane({ visible, onClose, cwd }: Props) {
       inst.historyIndex = inst.history.length;
     }
 
+    // Show diagnostic header
+    const isDesktop = !!(window as any).harnessDesktop?.isDesktop;
+    if (hasRealCwdRef.current) {
+      term.writeln(`\r\n\x1b[36m[Harness]\x1b[0m cwd=\x1b[33m${cwdRef.current}\x1b[0m  (\x1b[32mElectron\x1b[0m)\r\n`);
+    } else {
+      term.writeln("\r\n\x1b[36m[Harness]\x1b[0m \x1b[31mNo project folder detected\x1b[0m");
+      if (isDesktop) {
+        term.writeln("[Harness] You are in Electron but no folder path was provided.");
+      } else {
+        term.writeln("[Harness] You are in a \x1b[33mbrowser\x1b[0m — the file picker can't give real paths.");
+        term.writeln("[Harness] Run \x1b[33mnpm run desktop:dev\x1b[0m for real project-following terminals.\r\n");
+      }
+    }
+
     term.attachCustomKeyEventHandler((ev) => {
       const isMac = navigator.platform.toLowerCase().includes("mac");
       const ctrlOrMeta = isMac ? ev.metaKey : ev.ctrlKey;
@@ -262,8 +297,10 @@ export default function TerminalPane({ visible, onClose, cwd }: Props) {
     groupKeyRef.current = groupKey;
 
     ws.onopen = () => {
-      const c = cwdRef.current;
-      ws.send(`term:create:${groupKey}:${encodeURIComponent(c)}`);
+      const c = hasRealCwdRef.current ? cwdRef.current : "";
+      const v = venvRef.current;
+      const a = activateRef.current;
+      ws.send(`term:create:${groupKey}:${encodeURIComponent(c)}:${encodeURIComponent(v)}:${encodeURIComponent(a)}`);
     };
 
     ws.onmessage = (msg) => {
@@ -359,8 +396,10 @@ export default function TerminalPane({ visible, onClose, cwd }: Props) {
 
   const addTerminal = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      const c = cwdRef.current;
-      wsRef.current.send(`term:create:${groupKeyRef.current}:${encodeURIComponent(c)}`);
+      const c = hasRealCwdRef.current ? cwdRef.current : "";
+      const v = venvRef.current;
+      const a = activateRef.current;
+      wsRef.current.send(`term:create:${groupKeyRef.current}:${encodeURIComponent(c)}:${encodeURIComponent(v)}:${encodeURIComponent(a)}`);
     }
   }, []);
 

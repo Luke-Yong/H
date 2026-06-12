@@ -1,7 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import type { LoopEvent, LoopConfig } from "../../../server/loop";
 
-const WS_URL = `ws://${window.location.host}/ws`;
+const WS_URL =
+  window.location.port === "5173"
+    ? "ws://localhost:3001/ws"
+    : `ws://${window.location.host}/ws`;
 
 export function useWebSocket() {
   const [connected, setConnected] = useState(false);

@@ -1,4 +1,4 @@
-const { app, BrowserWindow } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog } = require("electron");
 const http = require("http");
 const path = require("path");
 
@@ -75,6 +75,24 @@ function startEmbeddedServer() {
   api.require(path.join(__dirname, "..", "server", "index.ts"), __filename);
 }
 
+function registerIpc() {
+  ipcMain.handle("harness:openFolder", async () => {
+    const result = await dialog.showOpenDialog({
+      properties: ["openDirectory"],
+    });
+    if (result.canceled) return "";
+    return result.filePaths?.[0] || "";
+  });
+
+  ipcMain.handle("harness:openFile", async () => {
+    const result = await dialog.showOpenDialog({
+      properties: ["openFile"],
+    });
+    if (result.canceled) return "";
+    return result.filePaths?.[0] || "";
+  });
+}
+
 async function loadUrlWhenReady(win, targetUrl, healthUrl, timeoutMs, title) {
   const dataUrl = `data:text/html;charset=utf-8,${encodeURIComponent(
     loadingPageHtml(title, `Waiting for ${healthUrl}...`)
@@ -104,6 +122,7 @@ async function createMainWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      preload: path.join(__dirname, "preload.cjs"),
     },
   });
 
@@ -138,6 +157,7 @@ async function createMainWindow() {
 }
 
 app.whenReady().then(async () => {
+  registerIpc();
   startEmbeddedServer();
   await createMainWindow();
 

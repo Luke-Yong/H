@@ -102,6 +102,62 @@ app.get("/api/fs/read", (req, res) => {
   }
 });
 
+// ── Project detection (venv / node_modules/.bin) ──
+app.get("/api/project/detect", (req, res) => {
+  try {
+    const basePath = safePath((req.query.path as string) || process.cwd());
+    const isWin = process.platform === "win32";
+
+    const venvCandidates = [".venv", "venv", "env", ".env"];
+    let venvDir: string | null = null;
+    let activateScript: string | null = null;
+    let pythonInterpreter: string | null = null;
+
+    for (const name of venvCandidates) {
+      const dir = path.join(basePath, name);
+      try {
+        if (!fs.statSync(dir).isDirectory()) continue;
+      } catch {
+        continue;
+      }
+
+      venvDir = name;
+      if (isWin) {
+        const act = path.join(dir, "Scripts", "Activate.ps1");
+        const py = path.join(dir, "Scripts", "python.exe");
+        activateScript = fs.existsSync(act) ? act : null;
+        pythonInterpreter = fs.existsSync(py) ? py : null;
+      } else {
+        const act = path.join(dir, "bin", "activate");
+        const py = path.join(dir, "bin", "python");
+        activateScript = fs.existsSync(act) ? act : null;
+        pythonInterpreter = fs.existsSync(py) ? py : null;
+      }
+      break;
+    }
+
+    const nodeBinDir = path.join(basePath, "node_modules", ".bin");
+    const hasNodeBin = (() => {
+      try {
+        return fs.statSync(nodeBinDir).isDirectory();
+      } catch {
+        return false;
+      }
+    })();
+
+    res.json({
+      basePath,
+      isWin,
+      venvDir,
+      activateScript,
+      pythonInterpreter,
+      nodeBinDir: hasNodeBin ? nodeBinDir : null,
+    });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 app.post("/api/fs/write", (req, res) => {
   try {
     const { path: filePath, content } = req.body;
@@ -163,14 +219,14 @@ wss.on("connection", (ws) => {
     const msg = raw.toString();
 
     if (msg.startsWith("term:create:")) {
-      // term:create:groupKey:cwdEncoded?
-      const rest = msg.slice(12);
-      const firstSep = rest.indexOf(":");
-      const nextGroupKey = firstSep === -1 ? rest : rest.slice(0, firstSep);
-      const cwdEncoded = firstSep === -1 ? "" : rest.slice(firstSep + 1);
-      const cwd = cwdEncoded ? decodeURIComponent(cwdEncoded) : undefined;
+      // term:create:groupKey:cwdEncoded:venvDirEncoded?:activateScriptEncoded?
+      const parts = msg.slice(12).split(":");
+      const nextGroupKey = parts[0] || "";
+      const cwd = parts[1] ? decodeURIComponent(parts[1]) : undefined;
+      const venvDir = parts[2] ? decodeURIComponent(parts[2]) : undefined;
+      const activateScript = parts[3] ? decodeURIComponent(parts[3]) : undefined;
       groupKey = nextGroupKey;
-      const id = createSession(ws, groupKey, { cwd });
+      const id = createSession(ws, groupKey, { cwd, venvDir, activateScript });
       activeSessions.add(id);
 
     } else if (msg.startsWith("term:write:")) {
