@@ -7,9 +7,12 @@ import { VFile, createFile, detectLanguage } from "./fileModel";
 import { readFileFromHandle, writeFileToHandle } from "./browserFs";
 import { useResizable, ResizeHandle } from "../hooks/useResizable";
 import type { FsEntry } from "./FilesPanel";
-import type { LoopEvent } from "../../../server/loop";
 
-const BROWSER_TAB_ID = "__browser__";
+interface BrowserTab {
+  id: string;
+  url: string;
+  label: string; // short display name for the tab
+}
 
 export interface EditorPaneHandle {
   getCode: () => { html: string; css: string; js: string };
@@ -22,7 +25,9 @@ interface Props {
   fsBasePath: string;
   terminalVenvDir: string;
   terminalActivateScript: string;
-  events: LoopEvent[];
+  browserTabs: BrowserTab[];
+  onBrowserTabClose: (id: string) => void;
+  onAddBrowserTab: () => void;
   onOpenFolder: () => void;
   onCreateProject: () => void;
   onCreateFile: () => void;
@@ -30,23 +35,34 @@ interface Props {
   onRefreshFs: () => void;
   terminalVisible: boolean;
   onCloseTerminal: () => void;
+  onDetectUrl?: (sessionId: string, url: string) => void;
 }
 
 const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
-  { fsRoot, fsBasePath, terminalVenvDir, terminalActivateScript, events, onOpenFolder, onCreateProject, onCreateFile, onOpenFile, onRefreshFs,
-    terminalVisible, onCloseTerminal }, ref
+  { fsRoot, fsBasePath, terminalVenvDir, terminalActivateScript, browserTabs, onBrowserTabClose, onAddBrowserTab,
+    onOpenFolder, onCreateProject, onCreateFile, onOpenFile, onRefreshFs,
+    terminalVisible, onCloseTerminal, onDetectUrl }, ref
 ) {
   const [files, setFiles] = useState<VFile[]>([]);
   const [activeFileId, setActiveFileId] = useState<string>("");
   const activeFileIdRef = useRef(activeFileId);
-  const [showBrowser, setShowBrowser] = useState(false);
   const { size: filePanelW, onMouseDown: onFilePanelDrag } = useResizable(200, 120, 500);
   const { size: termH, onMouseDown: onTermDrag } = useResizable(220, 80, 600, true);
 
-  const hasContent = files.length > 0 || (fsRoot && fsRoot.length > 0) || showBrowser;
-  const activeIsBrowser = activeFileId === BROWSER_TAB_ID;
+  const hasBrowserTabs = browserTabs.length > 0;
+  const hasContent = files.length > 0 || (fsRoot && fsRoot.length > 0) || hasBrowserTabs;
+  const activeBrowserTab = browserTabs.find((b) => b.id === activeFileId);
 
   useEffect(() => { activeFileIdRef.current = activeFileId; }, [activeFileId]);
+
+  // Auto-select newest browser tab when one is added (auto-detect or manual +)
+  const prevBrowserCount = useRef(0);
+  useEffect(() => {
+    if (browserTabs.length > prevBrowserCount.current && browserTabs.length > 0) {
+      setActiveFileId(browserTabs[browserTabs.length - 1].id);
+    }
+    prevBrowserCount.current = browserTabs.length;
+  }, [browserTabs]);
 
   const getCode = useCallback(() => {
     const byExt = (ext: string) => files.find((f) => f.name.endsWith(ext))?.content || "";
@@ -76,6 +92,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   }, [files]);
 
   const applyAiFiles = useCallback((aiFiles: { name: string; content: string }[]) => {
+    let newFileId = "";
     setFiles((prev) => {
       const updated = [...prev];
       for (const af of aiFiles) {
@@ -88,13 +105,16 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
               body: JSON.stringify({ path: existing._fsPath, content: af.content }),
             }).catch(() => {});
           }
-        } else { updated.push(createFile(af.name, af.content)); }
+        } else {
+          const f = createFile(af.name, af.content);
+          updated.push(f);
+          newFileId = newFileId || f.id;
+        }
       }
       return updated;
     });
-    const first = aiFiles[0];
-    if (first) { const m = files.find((f) => f.name === first.name); if (m) setActiveFileId(m.id); }
-  }, [files]);
+    if (newFileId) setActiveFileId(newFileId);
+  }, []);
 
   useImperativeHandle(ref, () => ({ getCode, getFiles: () => files, applyAiFiles }), [getCode, files, applyAiFiles]);
 
@@ -119,9 +139,10 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   }, []);
 
   const closeTab = useCallback((id: string) => {
-    if (id === BROWSER_TAB_ID) {
-      setShowBrowser(false);
-      if (activeFileIdRef.current === BROWSER_TAB_ID) setActiveFileId(files[0]?.id || "");
+    // Browser tab
+    if (browserTabs.some((b) => b.id === id)) {
+      onBrowserTabClose(id);
+      if (activeFileIdRef.current === id) setActiveFileId(files[0]?.id || "");
       return;
     }
     setFiles((prev) => {
@@ -135,7 +156,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
       }
       return remaining;
     });
-  }, [files]);
+  }, [browserTabs, files, onBrowserTabClose]);
 
   const renameFile = useCallback((id: string) => {
     const f = files.find((x) => x.id === id);
@@ -196,13 +217,11 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
         onOpenFsFolder={onOpenFolder}
         onRefreshFs={onRefreshFs}
         width={filePanelW}
-        showBrowser={showBrowser}
-        onShowBrowser={() => { setShowBrowser(true); setActiveFileId(BROWSER_TAB_ID); }}
       />
       <ResizeHandle onMouseDown={onFilePanelDrag} />
       <div className="ide-editor-area">
         <div className="editor-tabs">
-          {files.length === 0 && !showBrowser && (
+          {files.length === 0 && !hasBrowserTabs && (
             <div className="editor-tab tab-hint">Open a file from the sidebar to begin</div>
           )}
           {files.map((f) => (
@@ -211,22 +230,23 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
               <span className="tab-close" onClick={(e) => { e.stopPropagation(); closeTab(f.id); }}>✕</span>
             </button>
           ))}
-          {showBrowser && (
-            <button className={`editor-tab${activeIsBrowser ? " active" : ""}`} onClick={() => setActiveFileId(BROWSER_TAB_ID)}>
-              🌐 Browser
-              <span className="tab-close" onClick={(e) => { e.stopPropagation(); closeTab(BROWSER_TAB_ID); }}>✕</span>
+          {browserTabs.map((b) => (
+            <button key={b.id} className={`editor-tab${b.id === activeFileId ? " active" : ""}`} onClick={() => setActiveFileId(b.id)}>
+              🌐 {b.label}
+              <span className="tab-close" onClick={(e) => { e.stopPropagation(); closeTab(b.id); }}>✕</span>
             </button>
-          )}
+          ))}
+          <button className="editor-tab editor-tab-add" onClick={onAddBrowserTab} title="New browser tab">+ 🌐</button>
         </div>
         <div className="editor-main" style={terminalVisible ? { height: `calc(100% - ${termH}px - 4px)` } : { flex: 1 }}>
           <div className="editor-container">
-            {files.length === 0 && !showBrowser && (
+            {files.length === 0 && !hasBrowserTabs && (
               <div className="editor-empty">
                 <p>Select a file</p>
               </div>
             )}
-            {activeIsBrowser && (
-              <div style={{ height: "100%" }}><BrowserView events={events} /></div>
+            {activeBrowserTab && (
+              <div style={{ height: "100%" }}><BrowserView url={activeBrowserTab.url} /></div>
             )}
             {files.map((f) => (
               <div key={f.id} style={{ display: f.id === activeFileId ? "flex" : "none", height: "100%" }}>
@@ -249,6 +269,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
                 cwd={fsBasePath}
                 venvDir={terminalVenvDir}
                 activateScript={terminalActivateScript}
+                onDetectUrl={onDetectUrl}
               />
             </div>
           </>

@@ -33,9 +33,10 @@ interface Props {
   cwd?: string;
   venvDir?: string;
   activateScript?: string;
+  onDetectUrl?: (sessionId: string, url: string) => void;
 }
 
-export default function TerminalPane({ visible, onClose, cwd, venvDir, activateScript }: Props) {
+export default function TerminalPane({ visible, onClose, cwd, venvDir, activateScript, onDetectUrl }: Props) {
   const panelRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const termsRef = useRef<Map<string, TermInstance>>(new Map());
@@ -330,6 +331,14 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
           .replace(/(?<!\x1b)\[(?=[0-9?;]*[A-Za-z@])/g, "\x1b[");
         const inst = termsRef.current.get(id);
         inst?.term.write(clean);
+      } else if (data.startsWith("term:url:")) {
+        // term:url:sessionId:url
+        const rest = data.slice(9);
+        const idx = rest.indexOf(":");
+        if (idx === -1) return;
+        const id = rest.slice(0, idx);
+        const url = rest.slice(idx + 1);
+        onDetectUrl?.(id, url);
       } else if (data.startsWith("term:exit:")) {
         const rest = data.slice(10);
         const idx = rest.indexOf(":");

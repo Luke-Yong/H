@@ -21,6 +21,30 @@ export default function App() {
   const termVisibleRef = useRef(false);
   const reopenTerminal = useRef(false);
 
+  // Browser tabs (auto-detected from terminal + manual)
+  const [browserTabs, setBrowserTabs] = useState<Array<{ id: string; url: string; label: string }>>([]);
+  const browserIdSeq = useRef(0);
+
+  const handleDetectUrl = useCallback((_sessionId: string, url: string) => {
+    console.log("[Harness] Browser URL detected:", url);
+    setBrowserTabs((prev) => {
+      if (prev.some((b) => b.url === url)) return prev;
+      const id = String(++browserIdSeq.current);
+      const label = url.replace(/^https?:\/\//, "");
+      return [...prev, { id, url, label }];
+    });
+  }, []);
+
+  const handleAddBrowserTab = useCallback(() => {
+    // Add an empty tab — user types the URL in the BrowserView address bar
+    const id = String(++browserIdSeq.current);
+    setBrowserTabs((prev) => [...prev, { id, url: "", label: "New Tab" }]);
+  }, []);
+
+  const handleBrowserTabClose = useCallback((id: string) => {
+    setBrowserTabs((prev) => prev.filter((b) => b.id !== id));
+  }, []);
+
   useEffect(() => { termVisibleRef.current = termVisible; }, [termVisible]);
   useEffect(() => { if (!termVisible) reopenTerminal.current = false; }, [termVisible]);
 
@@ -232,7 +256,9 @@ export default function App() {
             fsBasePath={fsBasePath}
             terminalVenvDir={projectVenvDir}
             terminalActivateScript={projectActivateScript}
-            events={events}
+            browserTabs={browserTabs}
+            onBrowserTabClose={handleBrowserTabClose}
+            onAddBrowserTab={handleAddBrowserTab}
             onOpenFolder={() => { void openFolderImmediate(); }}
             onCreateProject={() => {
               const dir = prompt("Project folder path (absolute):");
@@ -246,6 +272,7 @@ export default function App() {
             onRefreshFs={refreshFs}
             terminalVisible={termVisible}
             onCloseTerminal={() => setTermVisible(false)}
+            onDetectUrl={handleDetectUrl}
           />
         </div>
 

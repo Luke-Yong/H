@@ -86,28 +86,72 @@ body {
 .resize-handle-v:hover { background: var(--accent); }
 
 /* ── Browser View ── */
-.browser-view {
+.browser-iframe-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: #fff;
+}
+
+.browser-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  background: #323233;
+  border-bottom: 1px solid #454545;
+  flex-shrink: 0;
+}
+
+.browser-btn {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 14px;
+  cursor: pointer;
+  padding: 3px 6px;
+  border-radius: 3px;
+  line-height: 1;
+}
+.browser-btn:hover { background: #3c3c3c; color: var(--text); }
+.browser-btn-go { font-size: 12px; font-weight: 600; }
+
+.browser-url-input {
+  flex: 1;
+  padding: 3px 8px;
+  font-size: 12px;
+  background: #1e1e1e;
+  border: 1px solid #454545;
+  border-radius: 3px;
+  color: var(--text);
+  outline: none;
+  font-family: monospace;
+}
+.browser-url-input:focus { border-color: var(--accent); }
+
+.browser-iframe {
+  flex: 1;
+  border: none;
+  width: 100%;
+}
+
+.browser-placeholder {
   flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #fff;
-  position: relative;
-  overflow: hidden;
-}
-
-.browser-view img {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-}
-
-.browser-placeholder {
   color: #999;
   font-size: 14px;
-  text-align: center;
-  padding: 20px;
 }
+
+/* ── Editor tab add button ── */
+.editor-tab-add {
+  font-size: 14px;
+  padding: 6px 8px;
+  cursor: pointer;
+  opacity: 0.6;
+}
+.editor-tab-add:hover { opacity: 1; }
 
 /* ── Test Console ── */
 .console-list {

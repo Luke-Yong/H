@@ -24,8 +24,6 @@ interface Props {
   onRefreshFs: () => void;
   /** Resizable width */
   width?: number;
-  showBrowser?: boolean;
-  onShowBrowser?: () => void;
 }
 
 const FILE_ICONS: Record<string, string> = {
@@ -120,7 +118,7 @@ function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth }: {
 export default function FilesPanel({
   files, activeFileId, onSelect, onAdd, onDelete, onRename,
   fsRoot, fsBasePath, onOpenFsFile, onRefreshFs,
-  width, showBrowser, onShowBrowser,
+  width,
 }: Props) {
   return (
     <div className="files-panel" style={width ? { width, minWidth: width } : {}}>
@@ -129,9 +127,6 @@ export default function FilesPanel({
           <div className="files-header">
             <span>{fsBasePath ? fsBasePath.split(/[/\\]/).pop() || "FOLDER" : "FOLDER"}</span>
             <div className="files-header-actions">
-              {onShowBrowser && !showBrowser && (
-                <button className="files-add-btn" onClick={onShowBrowser} title="Browser">🌐</button>
-              )}
               <button className="files-add-btn" onClick={onRefreshFs} title="Refresh">↻</button>
               <button className="files-add-btn" onClick={onAdd} title="New file">+</button>
             </div>
@@ -151,9 +146,6 @@ export default function FilesPanel({
           <div className="files-header">
             <span>FILES</span>
             <div className="files-header-actions">
-              {onShowBrowser && !showBrowser && (
-                <button className="files-add-btn" onClick={onShowBrowser} title="Browser">🌐</button>
-              )}
               <button className="files-add-btn" onClick={onAdd} title="New file">+</button>
             </div>
           </div>

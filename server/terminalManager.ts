@@ -6,6 +6,29 @@ import os from "os";
 
 type Backend = "pty" | "pipe";
 
+// Detect localhost URLs in terminal output (e.g. Flask "Running on http://127.0.0.1:5000")
+const LOCALHOST_URL_RE = /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]):\d{2,5}/gi;
+const groupSeenUrls = new Map<string, Set<string>>();
+
+function scanAndEmitUrl(ws: WebSocket, groupKey: string, sessionId: string, chunk: string) {
+  const matches = chunk.match(LOCALHOST_URL_RE);
+  if (!matches) return;
+  let set = groupSeenUrls.get(groupKey);
+  if (!set) {
+    set = new Set<string>();
+    groupSeenUrls.set(groupKey, set);
+  }
+  for (const url of matches) {
+    const normalized = url.replace(/\/+$/, "").toLowerCase();
+    if (set.has(normalized)) continue;
+    set.add(normalized);
+    console.log(`[Harness] Detected URL: ${normalized} (session=${sessionId})`);
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(`term:url:${sessionId}:${normalized}`);
+    }
+  }
+}
+
 interface Session {
   id: string;
   backend: Backend;
@@ -141,6 +164,7 @@ export function createSession(ws: WebSocket, groupKey: string, opts?: { cwd?: st
       pty.onData((data: string) => {
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(`term:out:${id}:${data}`);
+          scanAndEmitUrl(ws, groupKey, id, data);
         }
       });
 
@@ -173,12 +197,14 @@ export function createSession(ws: WebSocket, groupKey: string, opts?: { cwd?: st
   proc.stdout?.on("data", (data: Buffer) => {
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(`term:out:${id}:${data.toString()}`);
+      scanAndEmitUrl(ws, groupKey, id, data.toString());
     }
   });
 
   proc.stderr?.on("data", (data: Buffer) => {
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(`term:out:${id}:${data.toString()}`);
+      scanAndEmitUrl(ws, groupKey, id, data.toString());
     }
   });
 
@@ -247,6 +273,7 @@ export function killAllInGroup(groupKey: string) {
       }
     }
     sessions.delete(groupKey);
+    groupSeenUrls.delete(groupKey);
   }
 }
 
