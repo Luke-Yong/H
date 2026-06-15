@@ -7,6 +7,12 @@ import { useResizable, ResizeHandle } from "./hooks/useResizable";
 import type { FsEntry } from "./panes/FilesPanel";
 import { pickAndEnumerateFolder, pickAndReadFile } from "./panes/browserFs";
 
+interface BrowserTab {
+  id: string;
+  url: string;
+  label: string;
+}
+
 function reportDebug(hypothesisId: string, location: string, msg: string, data: Record<string, unknown>) {
   // #region debug-point C:app-report
   fetch("http://127.0.0.1:7777/event", {
@@ -25,6 +31,28 @@ function reportDebug(hypothesisId: string, location: string, msg: string, data: 
   // #endregion
 }
 
+function normalizeBrowserOpenUrl(rawUrl: string): string {
+  const trimmedUrl = rawUrl.trim();
+  if (!trimmedUrl) return "";
+  try {
+    const parsed = new URL(trimmedUrl);
+    if (
+      parsed.hostname.endsWith("bing.com") &&
+      parsed.pathname.startsWith("/ck/a")
+    ) {
+      const encodedTarget = parsed.searchParams.get("u");
+      if (encodedTarget) {
+        const base64Payload = encodedTarget.startsWith("a1") ? encodedTarget.slice(2) : encodedTarget;
+        const decodedTarget = atob(base64Payload);
+        if (/^https?:\/\//i.test(decodedTarget)) return decodedTarget;
+      }
+    }
+  } catch {
+    return trimmedUrl;
+  }
+  return trimmedUrl;
+}
+
 export default function App() {
   const editorRef = useRef<EditorPaneHandle>(null);
   const { connected, events, runTest } = useWebSocket();
@@ -39,9 +67,29 @@ export default function App() {
   const termVisibleRef = useRef(false);
   const reopenTerminal = useRef(false);
 
-  // Browser tabs (auto-detected from terminal + manual)
-  const [browserTabs, setBrowserTabs] = useState<Array<{ id: string; url: string; label: string }>>([]);
+  // A single top-level browser editor tab hosts multiple child browser tabs.
+  const [browserTabs, setBrowserTabs] = useState<BrowserTab[]>([]);
+  const [activeBrowserTabId, setActiveBrowserTabId] = useState("");
   const browserIdSeq = useRef(0);
+
+  const openBrowserTabForUrl = useCallback((url: string) => {
+    const normalizedUrl = normalizeBrowserOpenUrl(url);
+    if (!normalizedUrl) return;
+    const existing = browserTabs.find((b) => b.url === normalizedUrl);
+    if (existing) {
+      setActiveBrowserTabId(existing.id);
+      return;
+    }
+    const id = String(++browserIdSeq.current);
+    setBrowserTabs((prev) => [...prev, { id, url: normalizedUrl, label: normalizedUrl.replace(/^https?:\/\//, "") }]);
+    setActiveBrowserTabId(id);
+  }, [browserTabs]);
+
+  const createBrowserTab = useCallback((url = "", label = "New Tab") => {
+    const id = String(++browserIdSeq.current);
+    setBrowserTabs((prev) => [...prev, { id, url, label }]);
+    setActiveBrowserTabId(id);
+  }, []);
 
   const handleDetectUrl = useCallback((_sessionId: string, url: string) => {
     // #region debug-point C:handle-detect-url
@@ -51,22 +99,30 @@ export default function App() {
       existingTabs: browserTabs.length,
     });
     // #endregion
-    setBrowserTabs((prev) => {
-      if (prev.some((b) => b.url === url)) return prev;
-      const id = String(++browserIdSeq.current);
-      const label = url.replace(/^https?:\/\//, "");
-      return [...prev, { id, url, label }];
-    });
+    openBrowserTabForUrl(url);
   }, [browserTabs.length]);
 
   const handleAddBrowserTab = useCallback(() => {
-    // Add an empty tab — user types the URL in the BrowserView address bar
-    const id = String(++browserIdSeq.current);
-    setBrowserTabs((prev) => [...prev, { id, url: "", label: "New Tab" }]);
-  }, []);
+    createBrowserTab();
+  }, [createBrowserTab]);
 
   const handleBrowserTabClose = useCallback((id: string) => {
-    setBrowserTabs((prev) => prev.filter((b) => b.id !== id));
+    setBrowserTabs((prev) => {
+      const idx = prev.findIndex((b) => b.id === id);
+      if (idx === -1) return prev;
+      const remaining = prev.filter((b) => b.id !== id);
+      setActiveBrowserTabId((current) => {
+        if (current !== id) return current;
+        const nextIdx = Math.min(idx, Math.max(remaining.length - 1, 0));
+        return remaining[nextIdx]?.id || "";
+      });
+      return remaining;
+    });
+  }, []);
+
+  const handleBrowserClose = useCallback(() => {
+    setBrowserTabs([]);
+    setActiveBrowserTabId("");
   }, []);
 
   const handleBrowserTabUpdateLabel = useCallback((tabId: string, label: string) => {
@@ -78,13 +134,8 @@ export default function App() {
   }, []);
 
   const handleBrowserNewTabFromLink = useCallback((url: string) => {
-    setBrowserTabs((prev) => {
-      if (prev.some((b) => b.url === url)) return prev;
-      const id = String(++browserIdSeq.current);
-      const label = url.replace(/^https?:\/\//, "");
-      return [...prev, { id, url, label }];
-    });
-  }, []);
+    openBrowserTabForUrl(url);
+  }, [openBrowserTabForUrl]);
 
   useEffect(() => {
     return window.harnessDesktop?.onBrowserOpenUrl?.((url: string) => {
@@ -304,6 +355,9 @@ export default function App() {
             terminalVenvDir={projectVenvDir}
             terminalActivateScript={projectActivateScript}
             browserTabs={browserTabs}
+            activeBrowserTabId={activeBrowserTabId}
+            onActiveBrowserTabChange={setActiveBrowserTabId}
+            onCloseBrowser={handleBrowserClose}
             onBrowserTabClose={handleBrowserTabClose}
             onAddBrowserTab={handleAddBrowserTab}
             onBrowserTabUpdateLabel={handleBrowserTabUpdateLabel}

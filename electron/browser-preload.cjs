@@ -43,3 +43,16 @@ reportHost("browser preload initialized", {
   hasNavigator: !!window.navigator,
   locationHref: window.location.href,
 });
+
+window.addEventListener("click", (event) => {
+  try {
+    let el = event.target;
+    while (el && el.tagName !== "A") el = el.parentElement;
+    if (!el) return;
+    if (el.target === "_blank" && el.href && !String(el.href).startsWith("javascript:")) {
+      event.preventDefault();
+      event.stopPropagation();
+      ipcRenderer.sendToHost("harness:browserOpenUrl", el.href);
+    }
+  } catch {}
+}, true);

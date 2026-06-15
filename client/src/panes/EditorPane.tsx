@@ -14,6 +14,8 @@ interface BrowserTab {
   label: string; // short display name for the tab
 }
 
+const BROWSER_EDITOR_TAB_ID = "browser";
+
 export interface EditorPaneHandle {
   getCode: () => { html: string; css: string; js: string };
   getFiles: () => VFile[];
@@ -26,6 +28,9 @@ interface Props {
   terminalVenvDir: string;
   terminalActivateScript: string;
   browserTabs: BrowserTab[];
+  activeBrowserTabId: string;
+  onActiveBrowserTabChange: (id: string) => void;
+  onCloseBrowser: () => void;
   onBrowserTabClose: (id: string) => void;
   onAddBrowserTab: () => void;
   onBrowserTabUpdateLabel?: (tabId: string, label: string) => void;
@@ -42,7 +47,8 @@ interface Props {
 }
 
 const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
-  { fsRoot, fsBasePath, terminalVenvDir, terminalActivateScript, browserTabs, onBrowserTabClose, onAddBrowserTab,
+  { fsRoot, fsBasePath, terminalVenvDir, terminalActivateScript, browserTabs, activeBrowserTabId,
+    onActiveBrowserTabChange, onCloseBrowser, onBrowserTabClose, onAddBrowserTab,
     onBrowserTabUpdateLabel, onBrowserTabUpdateUrl, onBrowserNewTabFromLink,
     onOpenFolder, onCreateProject, onCreateFile, onOpenFile, onRefreshFs,
     terminalVisible, onCloseTerminal, onDetectUrl }, ref
@@ -60,18 +66,21 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     !hasContent &&
     !fsBasePath &&
     (!fsRoot || fsRoot.length === 0);
-  const activeBrowserTab = browserTabs.find((b) => b.id === activeFileId);
+  const activeBrowserTab = browserTabs.find((b) => b.id === activeBrowserTabId) || browserTabs[0];
 
   useEffect(() => { activeFileIdRef.current = activeFileId; }, [activeFileId]);
 
-  // Auto-select newest browser tab when one is added (auto-detect or manual +)
+  // Keep browser pages under one top-level editor tab and focus it when a child tab is added.
   const prevBrowserCount = useRef(0);
   useEffect(() => {
     if (browserTabs.length > prevBrowserCount.current && browserTabs.length > 0) {
-      setActiveFileId(browserTabs[browserTabs.length - 1].id);
+      setActiveFileId(BROWSER_EDITOR_TAB_ID);
+    }
+    if (browserTabs.length === 0 && activeFileIdRef.current === BROWSER_EDITOR_TAB_ID) {
+      setActiveFileId(files[0]?.id || "");
     }
     prevBrowserCount.current = browserTabs.length;
-  }, [browserTabs]);
+  }, [browserTabs, files]);
 
   const getCode = useCallback(() => {
     const byExt = (ext: string) => files.find((f) => f.name.endsWith(ext))?.content || "";
@@ -148,9 +157,8 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   }, []);
 
   const closeTab = useCallback((id: string) => {
-    // Browser tab
-    if (browserTabs.some((b) => b.id === id)) {
-      onBrowserTabClose(id);
+    if (id === BROWSER_EDITOR_TAB_ID) {
+      onCloseBrowser();
       if (activeFileIdRef.current === id) setActiveFileId(files[0]?.id || "");
       return;
     }
@@ -160,12 +168,16 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
       if (activeFileIdRef.current === id) {
         const next = remaining[Math.min(Math.max(idx, 0), Math.max(0, remaining.length - 1))];
         setActiveFileId(next?.id || "");
-      } else if (activeFileIdRef.current && !remaining.some((f) => f.id === activeFileIdRef.current)) {
+      } else if (
+        activeFileIdRef.current &&
+        activeFileIdRef.current !== BROWSER_EDITOR_TAB_ID &&
+        !remaining.some((f) => f.id === activeFileIdRef.current)
+      ) {
         setActiveFileId(remaining[0]?.id || "");
       }
       return remaining;
     });
-  }, [browserTabs, files, onBrowserTabClose]);
+  }, [files, onCloseBrowser]);
 
   const renameFile = useCallback((id: string) => {
     const f = files.find((x) => x.id === id);
@@ -239,13 +251,18 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
               <span className="tab-close" onClick={(e) => { e.stopPropagation(); closeTab(f.id); }}>✕</span>
             </button>
           ))}
-          {browserTabs.map((b) => (
-            <button key={b.id} className={`editor-tab${b.id === activeFileId ? " active" : ""}`} onClick={() => setActiveFileId(b.id)}>
-              🌐 {b.label}
-              <span className="tab-close" onClick={(e) => { e.stopPropagation(); closeTab(b.id); }}>✕</span>
+          {hasBrowserTabs && (
+            <button
+              className={`editor-tab${activeFileId === BROWSER_EDITOR_TAB_ID ? " active" : ""}`}
+              onClick={() => setActiveFileId(BROWSER_EDITOR_TAB_ID)}
+            >
+              🌐 browser
+              <span className="tab-close" onClick={(e) => { e.stopPropagation(); closeTab(BROWSER_EDITOR_TAB_ID); }}>✕</span>
             </button>
-          ))}
-          <button className="editor-tab editor-tab-add" onClick={onAddBrowserTab} title="New browser tab">+ 🌐</button>
+          )}
+          {!hasBrowserTabs && (
+            <button className="editor-tab editor-tab-add" onClick={onAddBrowserTab} title="Open browser">+ 🌐</button>
+          )}
         </div>
         <div className="editor-main" style={terminalVisible ? { height: `calc(100% - ${termH}px - 4px)` } : { flex: 1 }}>
           <div className="editor-container">
@@ -283,8 +300,19 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
                 <p>Select a file</p>
               </div>
             )}
-            {activeBrowserTab && (
-              <div style={{ height: "100%" }}><BrowserView url={activeBrowserTab.url} tabId={activeBrowserTab.id} onTitleChange={onBrowserTabUpdateLabel} onUrlChange={onBrowserTabUpdateUrl} onNewTab={onBrowserNewTabFromLink} /></div>
+            {hasBrowserTabs && activeFileId === BROWSER_EDITOR_TAB_ID && (
+              <div style={{ height: "100%" }}>
+                <BrowserView
+                  tabs={browserTabs}
+                  activeTabId={activeBrowserTab?.id || ""}
+                  onSelectTab={onActiveBrowserTabChange}
+                  onCloseTab={onBrowserTabClose}
+                  onAddTab={onAddBrowserTab}
+                  onTitleChange={onBrowserTabUpdateLabel}
+                  onUrlChange={onBrowserTabUpdateUrl}
+                  onNewTab={onBrowserNewTabFromLink}
+                />
+              </div>
             )}
             {files.map((f) => (
               <div key={f.id} style={{ display: f.id === activeFileId ? "flex" : "none", height: "100%" }}>

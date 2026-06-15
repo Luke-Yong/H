@@ -1,8 +1,17 @@
 import { useRef, useCallback, useState, useEffect } from "react";
 
-interface Props {
+interface BrowserTab {
+  id: string;
   url: string;
-  tabId: string;
+  label: string;
+}
+
+interface Props {
+  tabs: BrowserTab[];
+  activeTabId: string;
+  onSelectTab: (tabId: string) => void;
+  onCloseTab: (tabId: string) => void;
+  onAddTab: () => void;
   onTitleChange?: (tabId: string, title: string) => void;
   onUrlChange?: (tabId: string, url: string) => void;
   onNewTab?: (url: string) => void;
@@ -86,11 +95,24 @@ function reportDebug(hypothesisId: string, location: string, msg: string, data: 
   // #endregion
 }
 
-export default function BrowserView({ url, tabId, onTitleChange, onUrlChange, onNewTab }: Props) {
+export default function BrowserView({
+  tabs,
+  activeTabId,
+  onSelectTab,
+  onCloseTab,
+  onAddTab,
+  onTitleChange,
+  onUrlChange,
+  onNewTab,
+}: Props) {
   const isDesktop = !!window.harnessDesktop?.isDesktop;
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const webviewRef = useRef<BrowserGuest | null>(null);
   const webviewReadyRef = useRef(false);
+  const activeTab = tabs.find((tab) => tab.id === activeTabId) || tabs[0] || null;
+  const tabId = activeTab?.id || "";
+  const url = activeTab?.url || "";
+  const [navTabId, setNavTabId] = useState(tabId);
   const [navUrl, setNavUrl] = useState(url);
   const [currentUrl, setCurrentUrl] = useState(url);
   const [inputUrl, setInputUrl] = useState(url);
@@ -109,11 +131,13 @@ export default function BrowserView({ url, tabId, onTitleChange, onUrlChange, on
   useEffect(() => {
     // Keep the address bar in sync with parent state, but do not re-drive the
     // guest src for SPA route changes that originated inside the webview.
+    setNavTabId(tabId);
+    setNavUrl(url);
     setCurrentUrl(url);
     setInputUrl(url);
     setSecure(isHttps(url));
     liveUrlRef.current = url;
-  }, [url]);
+  }, [tabId, url]);
 
   const handleWebviewRef = useCallback((node: HTMLElement | null) => {
     webviewRef.current = node as BrowserGuest | null;
@@ -130,7 +154,7 @@ export default function BrowserView({ url, tabId, onTitleChange, onUrlChange, on
       liveUrl: liveUrlRef.current,
     });
     // #endregion
-    if (!view) return;
+    if (!view || !tabId) return;
     if (!webviewReadyRef.current) {
       // #region debug-point A:sync-skipped-not-ready
       reportDebug("A", "BrowserView.tsx:syncDesktopState", "skip syncDesktopState before dom-ready", {
@@ -196,15 +220,16 @@ export default function BrowserView({ url, tabId, onTitleChange, onUrlChange, on
     const onDidNavigateInPage = () => syncDesktopState("did-navigate-in-page");
     const onPageTitleUpdated = () => syncDesktopState("page-title-updated");
     const handleNewWindow = (event: Event) => {
-      const urlFromEvent =
-        (event as Event & { url?: string }).url ||
-        (event as Event & { detail?: { url?: string } }).detail?.url ||
-        "";
-      if (urlFromEvent && urlFromEvent !== "about:blank") {
-        onNewTab?.(urlFromEvent);
-      }
+      const details = event as Event & {
+        preventDefault?: () => void;
+        url?: string;
+        detail?: { url?: string };
+      };
+      const popupUrl = details.url || details.detail?.url || "";
+      if (!popupUrl || popupUrl === "about:blank") return;
+      details.preventDefault?.();
+      onNewTab?.(popupUrl);
     };
-
     const handleDomReady = () => {
       webviewReadyRef.current = true;
       // #region debug-point A:dom-ready
@@ -237,6 +262,13 @@ export default function BrowserView({ url, tabId, onTitleChange, onUrlChange, on
         channel?: string;
         args?: unknown[];
       };
+      if (details.channel === "harness:browserOpenUrl") {
+        const popupUrl = typeof details.args?.[0] === "string" ? details.args[0] : "";
+        if (popupUrl && popupUrl !== "about:blank") {
+          onNewTab?.(popupUrl);
+        }
+        return;
+      }
       if (details.channel !== "harness:browserPreloadDebug") return;
       const payload = (Array.isArray(details.args) ? details.args[0] : null) as
         | { msg?: string; data?: Record<string, unknown>; ts?: number }
@@ -276,7 +308,7 @@ export default function BrowserView({ url, tabId, onTitleChange, onUrlChange, on
       view.removeEventListener("did-fail-load", handleDidFailLoad);
       view.removeEventListener("ipc-message", handleIpcMessage);
     };
-  }, [isDesktop, onNewTab, syncDesktopState]);
+  }, [isDesktop, onNewTab, syncDesktopState, tabId, url]);
 
   useEffect(() => {
     if (!isDesktop) return;
@@ -302,7 +334,7 @@ export default function BrowserView({ url, tabId, onTitleChange, onUrlChange, on
   const handleIframeLoad = useCallback(() => {
     if (isDesktop) return;
     const iframe = iframeRef.current;
-    if (!iframe) return;
+    if (!iframe || !tabId) return;
     try {
       const doc = iframe.contentDocument;
       if (doc) {
@@ -355,7 +387,7 @@ export default function BrowserView({ url, tabId, onTitleChange, onUrlChange, on
     } catch { /* cross-origin — silently ignored */ }
     setCanGoBack(true);
     setCanGoForward(true);
-  }, [isDesktop, tabId, onTitleChange, onUrlChange, onNewTab]);
+  }, [isDesktop, onNewTab, onTitleChange, onUrlChange, tabId]);
 
   // Close dropdown when clicking the backdrop
   const closeStatus = useCallback(() => setStatusOpen(false), []);
@@ -374,6 +406,7 @@ export default function BrowserView({ url, tabId, onTitleChange, onUrlChange, on
   const sandboxAttr = "allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-downloads-without-user-activation allow-modals allow-orientation-lock allow-pointer-lock allow-presentation allow-top-navigation-by-user-activation";
 
   const navigate = useCallback(() => {
+    if (!tabId) return;
     const raw = inputUrl.trim();
     if (!raw) return;
     let final: string;
@@ -388,7 +421,7 @@ export default function BrowserView({ url, tabId, onTitleChange, onUrlChange, on
     setInputUrl(final);
     setSecure(isHttps(final));
     onUrlChange?.(tabId, final);
-  }, [inputUrl, isDesktop, tabId, onUrlChange]);
+  }, [inputUrl, onUrlChange, tabId]);
 
   const refresh = useCallback(() => {
     if (isDesktop) {
@@ -434,9 +467,23 @@ export default function BrowserView({ url, tabId, onTitleChange, onUrlChange, on
   }, [currentUrl, isDesktop, tabId]);
 
   const geolocationNeedsSecureContext = perms.geolocation && currentUrl && !supportsGeolocation(currentUrl);
+  const desktopSrc = navTabId === tabId ? navUrl : url;
 
   return (
     <div className="browser-iframe-container">
+      <div className="browser-tabs">
+        {tabs.map((tab) => (
+          <button
+            key={tab.id}
+            className={`browser-tab${tab.id === tabId ? " active" : ""}`}
+            onClick={() => onSelectTab(tab.id)}
+          >
+            <span className="browser-tab-label">{tab.label || "New Tab"}</span>
+            <span className="tab-close" onClick={(e) => { e.stopPropagation(); onCloseTab(tab.id); }}>✕</span>
+          </button>
+        ))}
+        <button className="browser-tab browser-tab-add" onClick={onAddTab} title="New browser tab">+</button>
+      </div>
       <div className="browser-toolbar">
         <button className="browser-btn" onClick={goBack} title="Back" disabled={isDesktop && !canGoBack}>◀</button>
         <button className="browser-btn" onClick={goForward} title="Forward" disabled={isDesktop && !canGoForward}>▶</button>
@@ -490,13 +537,17 @@ export default function BrowserView({ url, tabId, onTitleChange, onUrlChange, on
       </div>
       {/* Backdrop: clicking anywhere outside the dropdown closes it */}
       {statusOpen && <div className="browser-status-backdrop" onClick={closeStatus} />}
-      {currentUrl ? (
+      {!tabId ? (
+        <div className="browser-placeholder">
+          Open a browser tab to begin.
+        </div>
+      ) : currentUrl ? (
         isDesktop ? (
           <webview
             ref={handleWebviewRef}
             key={tabId}
             className="browser-iframe"
-            src={navUrl}
+            src={desktopSrc}
             preload={window.harnessDesktop?.browserPreloadUrl}
             partition="harness-browser"
             allowpopups={true}

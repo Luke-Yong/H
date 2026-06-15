@@ -94,6 +94,51 @@ body {
   position: relative;
 }
 
+.browser-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 6px 0;
+  background: #252526;
+  border-bottom: 1px solid #454545;
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+
+.browser-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 220px;
+  padding: 6px 12px;
+  font-size: 12px;
+  border: none;
+  border-top-left-radius: 6px;
+  border-top-right-radius: 6px;
+  background: #2d2d2d;
+  color: var(--text-dim);
+  cursor: pointer;
+  min-width: 0;
+}
+
+.browser-tab.active {
+  background: #323233;
+  color: var(--text);
+}
+
+.browser-tab-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browser-tab-add {
+  padding: 6px 10px;
+  font-size: 14px;
+  line-height: 1;
+}
+
 /* Backdrop: clicking it closes the site-info dropdown */
 .browser-status-backdrop {
   position: fixed;
@@ -405,7 +450,7 @@ body {
   overflow: hidden;
 }
 
-.tab-close { margin-left: 8px; font-size: 10px; opacity: 0.5; }
+.tab-close { margin-left: 8px; font-size: 10px; opacity: 0.5; flex-shrink: 0; }
 .tab-close:hover { opacity: 1; }
 
 .tab-dot { color: #6a9955; font-size: 10px; }
