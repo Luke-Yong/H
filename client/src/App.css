@@ -939,20 +939,183 @@ body {
   flex: 1;
   display: none;
   overflow: hidden;
+  align-items: stretch;
+}
+
+.terminal-slot-gutter {
+  width: 18px;
+  flex-shrink: 0;
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(37, 37, 38, 0.92);
+  position: relative;
+  overflow: hidden;
+}
+
+.terminal-screen-host {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  overflow: visible;
+}
+
+.terminal-screen-host .xterm,
+.terminal-screen-host .xterm-screen {
+  overflow: visible;
+}
+
+.terminal-gutter-marker {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(37, 37, 38, 0.96);
+}
+
+.terminal-gutter-marker-idle .term-command-action-dot {
+  border: 2px solid rgba(160, 160, 160, 0.95);
+  background: transparent;
+}
+
+.terminal-gutter-marker-success {
+  background: rgba(55, 148, 255, 0.12);
+}
+
+.terminal-gutter-marker-success .term-command-action-dot {
+  background: rgb(55, 148, 255);
+  box-shadow: 0 0 0 2px rgba(55, 148, 255, 0.18);
+}
+
+.terminal-gutter-marker-error {
+  background: rgba(244, 71, 71, 0.12);
+}
+
+.terminal-gutter-marker-error .term-command-action-dot {
+  border: 2px solid rgb(244, 71, 71);
+  background: transparent;
+}
+
+.terminal-gutter-marker-error .term-command-action-dot::before,
+.terminal-gutter-marker-error .term-command-action-dot::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 2px;
+  height: 8px;
+  background: rgb(244, 71, 71);
+  transform-origin: center;
+  border-radius: 999px;
+}
+
+.terminal-gutter-marker-error .term-command-action-dot::before {
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+
+.terminal-gutter-marker-error .term-command-action-dot::after {
+  transform: translate(-50%, -50%) rotate(-45deg);
 }
 
 .terminal-slot .xterm-viewport {
   overflow-y: auto !important;
   overflow-x: hidden !important;
   scrollbar-width: thin;
+  scrollbar-color: rgba(140, 140, 140, 0.7) transparent;
 }
 
 .terminal-slot .xterm-viewport::-webkit-scrollbar {
-  width: 8px;
+  width: 10px;
 }
 
 .terminal-slot .xterm-viewport::-webkit-scrollbar-track {
-  background: #1e1e1e;
+  background: transparent;
+}
+
+.terminal-slot .xterm-viewport::-webkit-scrollbar-thumb {
+  background: rgba(140, 140, 140, 0.65);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+
+.terminal-slot .xterm-viewport::-webkit-scrollbar-thumb:hover {
+  background: rgba(160, 160, 160, 0.8);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+
+.xterm .term-command-action {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: default;
+  user-select: none;
+  background: rgba(37, 37, 38, 0.96);
+  box-sizing: border-box;
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  padding-right: 1px;
+  overflow: hidden;
+}
+
+.xterm .term-command-action-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  position: relative;
+  box-sizing: border-box;
+  flex-shrink: 0;
+}
+
+.xterm .term-command-action-idle .term-command-action-dot {
+  border: 2px solid rgba(160, 160, 160, 0.95);
+  background: transparent;
+}
+
+.xterm .term-command-action-success {
+  background: rgba(55, 148, 255, 0.12);
+}
+
+.xterm .term-command-action-success .term-command-action-dot {
+  background: rgb(55, 148, 255);
+  box-shadow: 0 0 0 2px rgba(55, 148, 255, 0.18);
+}
+
+.xterm .term-command-action-error {
+  background: rgba(244, 71, 71, 0.12);
+}
+
+.xterm .term-command-action-error .term-command-action-dot {
+  border: 2px solid rgb(244, 71, 71);
+  background: transparent;
+}
+
+.xterm .term-command-action-error .term-command-action-dot::before,
+.xterm .term-command-action-error .term-command-action-dot::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 2px;
+  height: 8px;
+  background: rgb(244, 71, 71);
+  transform-origin: center;
+  border-radius: 999px;
+}
+
+.xterm .term-command-action-error .term-command-action-dot::before {
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+
+.xterm .term-command-action-error .term-command-action-dot::after {
+  transform: translate(-50%, -50%) rotate(-45deg);
+}
+
+.xterm-screen .xterm-decoration-container .term-command-action {
+  z-index: 2;
 }
 
 .terminal-slot.active {

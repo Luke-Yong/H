@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback, useMemo, useState } from "react";
-import { Terminal } from "@xterm/xterm";
+import { Terminal, type IMarker } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { useResizable } from "../hooks/useResizable";
@@ -23,9 +23,16 @@ interface TermInstance {
   container: HTMLDivElement;
   backend: "pty" | "pipe";
   input: string;
+  cursor: number;
   history: string[];
   historyIndex: number;
   historyKey: string;
+  commandRunning: boolean;
+  commandSawError: boolean;
+  currentPromptMarker?: IMarker;
+  lastCommandMarker?: IMarker;
+  promptMarkers: Array<{ id: number; marker: IMarker; kind: "idle" | "success" | "error" }>;
+  writeChain: Promise<void>;
 }
 
 interface Props {
@@ -98,6 +105,7 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
   const [wsConnected, setWsConnected] = useState(false);
   const termsRef = useRef<Map<string, TermInstance>>(new Map());
   const pendingOutputRef = useRef<Map<string, string[]>>(new Map()); // buffer output before xterm is ready
+  const [gutterVersion, setGutterVersion] = useState(0);
   const onDetectUrlRef = useRef(onDetectUrl);
   const groupKeyRef = useRef("");
   const openedOnceRef = useRef(false);
@@ -175,10 +183,11 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
 
   const setInputLine = useCallback((inst: TermInstance, next: string) => {
     const prev = inst.input;
-    if (prev.length) {
-      inst.term.write("\b \b".repeat(prev.length));
-    }
+    const toEnd = prev.length - inst.cursor;
+    if (toEnd > 0) inst.term.write(`\x1b[${toEnd}C`);
+    if (prev.length) inst.term.write("\b \b".repeat(prev.length));
     inst.input = next;
+    inst.cursor = next.length;
     if (next.length) inst.term.write(next);
   }, []);
 
@@ -191,12 +200,83 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
     }
     inst.historyIndex = inst.history.length;
     inst.input = "";
+    inst.cursor = 0;
     sendToServer(inst.id, `${line}\r\n`);
     if (inst.backend === "pipe") {
+      inst.commandRunning = true;
+      inst.commandSawError = false;
+      inst.lastCommandMarker = inst.currentPromptMarker;
       const label = getCommandLabel(line);
       if (label) setLabelById((prev) => ({ ...prev, [inst.id]: label }));
     }
   }, [saveHistory, sendToServer]);
+
+  const bumpGutter = useCallback(() => {
+    setGutterVersion((v) => v + 1);
+  }, []);
+
+  const setCommandDecorationKind = useCallback((inst: TermInstance, marker: IMarker | undefined, kind: "idle" | "success" | "error") => {
+    if (!marker) return;
+    inst.promptMarkers = inst.promptMarkers.map((entry) => (
+      entry.marker.id === marker.id ? { ...entry, kind } : entry
+    ));
+    bumpGutter();
+  }, [bumpGutter]);
+
+  const createPromptDecoration = useCallback((inst: TermInstance) => {
+    const marker = inst.term.registerMarker(0);
+    if (!marker) return;
+    inst.currentPromptMarker = marker;
+    inst.promptMarkers = [...inst.promptMarkers, { id: marker.id, marker, kind: "idle" }];
+    bumpGutter();
+  }, [bumpGutter]);
+
+  const termWrite = useCallback((term: Terminal, data: string) => {
+    return new Promise<void>((resolve) => term.write(data, resolve));
+  }, []);
+
+  const writeWithPromptHandling = useCallback((inst: TermInstance, chunk: string) => {
+    inst.writeChain = inst.writeChain.then(async () => {
+      const promptRe = /(^|\r?\n|\r)((?:\x1b\[[0-9;?]*[ -/]*[@-~])*)(PS [^\r\n]*?> ?)/g;
+      let last = 0;
+      let match: RegExpExecArray | null;
+      let matchCount = 0;
+      while ((match = promptRe.exec(chunk))) {
+        matchCount += 1;
+        const start = match.index;
+        const full = match[0];
+        const prefix = match[1] || "";
+        const ansi = match[2] || "";
+        const prompt = match[3] || "";
+        const before = chunk.slice(last, start);
+        if (before) await termWrite(inst.term, before);
+        await termWrite(inst.term, `${prefix}${ansi}${prompt}`);
+        if (inst.commandRunning) {
+          setCommandDecorationKind(inst, inst.lastCommandMarker, inst.commandSawError ? "error" : "success");
+          inst.commandRunning = false;
+          inst.commandSawError = false;
+          inst.lastCommandMarker = undefined;
+        }
+        createPromptDecoration(inst);
+        last = start + full.length;
+      }
+      const tail = chunk.slice(last);
+      if (tail) await termWrite(inst.term, tail);
+    }).catch(() => {});
+  }, [createPromptDecoration, setCommandDecorationKind, termWrite]);
+
+  const insertAtCursor = useCallback((inst: TermInstance, text: string) => {
+    if (!text) return;
+    const before = inst.input.slice(0, inst.cursor);
+    const after = inst.input.slice(inst.cursor);
+    inst.input = before + text + after;
+    inst.cursor += text.length;
+    if (after.length) {
+      inst.term.write(text + after + `\x1b[${after.length}D`);
+    } else {
+      inst.term.write(text);
+    }
+  }, []);
 
   const handlePasteText = useCallback((inst: TermInstance, text: string) => {
     if (inst.backend === "pty") {
@@ -207,18 +287,20 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
     const parts = normalized.split("\n");
     for (let i = 0; i < parts.length; i++) {
       const part = parts[i];
-      if (part) {
-        inst.input += part;
-        inst.term.write(part);
-      }
+      if (part) insertAtCursor(inst, part);
       if (i < parts.length - 1) {
         runLine(inst);
       }
     }
-  }, [runLine, sendToServer]);
+  }, [insertAtCursor, runLine, sendToServer]);
 
   const handleInput = useCallback((inst: TermInstance, data: string) => {
     if (inst.backend === "pty") {
+      if (data === "\r") {
+        inst.commandRunning = true;
+        inst.commandSawError = false;
+        inst.lastCommandMarker = inst.currentPromptMarker;
+      }
       sendToServer(inst.id, data);
       return;
     }
@@ -251,25 +333,64 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
     if (data === "\x03") {
       inst.term.write("^C\r\n");
       inst.input = "";
+      inst.cursor = 0;
       inst.historyIndex = inst.history.length;
       sendToServer(inst.id, "\x03");
       return;
     }
 
     if (data === "\x7f" || data === "\x08") {
-      if (!inst.input.length) return;
-      inst.input = inst.input.slice(0, -1);
-      inst.term.write("\b \b");
+      if (inst.cursor <= 0) return;
+      const before = inst.input.slice(0, inst.cursor - 1);
+      const after = inst.input.slice(inst.cursor);
+      inst.input = before + after;
+      inst.cursor -= 1;
+      inst.term.write("\x1b[D" + after + " " + `\x1b[${after.length + 1}D`);
       return;
     }
 
-    if (data.startsWith("\x1b")) {
+    if (data === "\x1b[D") {
+      if (inst.cursor <= 0) return;
+      inst.cursor -= 1;
+      inst.term.write("\x1b[D");
       return;
     }
 
-    inst.input += data;
-    inst.term.write(data);
-  }, [handlePasteText, runLine, sendToServer, setInputLine]);
+    if (data === "\x1b[C") {
+      if (inst.cursor >= inst.input.length) return;
+      inst.cursor += 1;
+      inst.term.write("\x1b[C");
+      return;
+    }
+
+    if (data === "\x1b[H" || data === "\x1b[1~") {
+      if (inst.cursor <= 0) return;
+      inst.term.write(`\x1b[${inst.cursor}D`);
+      inst.cursor = 0;
+      return;
+    }
+
+    if (data === "\x1b[F" || data === "\x1b[4~") {
+      const delta = inst.input.length - inst.cursor;
+      if (delta <= 0) return;
+      inst.term.write(`\x1b[${delta}C`);
+      inst.cursor = inst.input.length;
+      return;
+    }
+
+    if (data === "\x1b[3~") {
+      if (inst.cursor >= inst.input.length) return;
+      const before = inst.input.slice(0, inst.cursor);
+      const after = inst.input.slice(inst.cursor + 1);
+      inst.input = before + after;
+      inst.term.write(after + " " + `\x1b[${after.length + 1}D`);
+      return;
+    }
+
+    if (data.startsWith("\x1b")) return;
+
+    insertAtCursor(inst, data);
+  }, [handlePasteText, insertAtCursor, runLine, sendToServer, setInputLine]);
 
   const createTerminal = useCallback((id: string, container: HTMLDivElement, backend: "pty" | "pipe") => {
     const term = new Terminal({
@@ -304,9 +425,14 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
       container,
       backend,
       input: "",
+      cursor: 0,
       history: [],
       historyIndex: 0,
       historyKey: "",
+      commandRunning: false,
+      commandSawError: false,
+      promptMarkers: [],
+      writeChain: Promise.resolve(),
     };
 
     inst.historyKey = getHistoryKey();
@@ -365,9 +491,14 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
     });
 
     term.onData((data) => handleInput(inst, data));
+    term.onScroll(() => bumpGutter());
+    const viewportEl = term.element?.querySelector(".xterm-viewport");
+    const handleViewportScroll = () => bumpGutter();
+    viewportEl?.addEventListener("scroll", handleViewportScroll);
 
     term.onResize(({ cols, rows }) => {
       fit.fit();
+      bumpGutter();
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(`term:resize:${id}:${cols}:${rows}`);
       }
@@ -378,12 +509,15 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
     if (buffered) {
       pendingOutputRef.current.delete(id);
       for (const chunk of buffered) {
-        term.write(chunk);
+        if (inst.commandRunning && /error|exception|failed|not recognized|cannot/i.test(chunk)) {
+          inst.commandSawError = true;
+        }
+        writeWithPromptHandling(inst, chunk);
       }
     }
 
     termsRef.current.set(id, inst);
-  }, [getHistoryKey, handleInput, handlePasteText, loadHistory]);
+  }, [bumpGutter, getHistoryKey, handleInput, handlePasteText, loadHistory, writeWithPromptHandling]);
 
   // Auto-close pane when all terminals are gone (and WS was established)
   useEffect(() => {
@@ -436,15 +570,16 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
         if (idx === -1) return;
         const id = rest.slice(0, idx);
         const output = rest.slice(idx + 1);
-        // Clean Windows console output for xterm.js compatibility:
-        // - DEL (\x7f) → BS (\x08)
-        // - Stray CSI sequences without proper ESC prefix (broken by pipe)
         const clean = output
           .replace(/\x7f/g, "\x08")
           .replace(/(?<!\x1b)\[(?=[0-9?;]*[A-Za-z@])/g, "\x1b[");
         const inst = termsRef.current.get(id);
         if (inst) {
-          inst.term.write(clean);
+          if (inst.commandRunning && /error|exception|failed|not recognized|cannot/i.test(clean)) {
+            inst.commandSawError = true;
+          }
+          writeWithPromptHandling(inst, clean);
+          return;
         } else {
           // Terminal not yet created — buffer output
           const buf = pendingOutputRef.current.get(id) || [];
@@ -495,7 +630,7 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
     let raf: number;
     raf = requestAnimationFrame(() => {
       for (const id of activeGroupMembers) {
-        const el = document.getElementById(`term-${id}`);
+        const el = document.getElementById(`term-host-${id}`);
         if (!el) continue;
         const existing = termsRef.current.get(id);
         if (existing) {
@@ -546,11 +681,12 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
       for (const [, inst] of termsRef.current) {
         try { inst.fit.fit(); } catch {}
       }
+      bumpGutter();
     };
     const obs = new ResizeObserver(handler);
     if (panelRef.current) obs.observe(panelRef.current);
     return () => obs.disconnect();
-  }, [visible]);
+  }, [bumpGutter, visible]);
 
   const requestTerminal = useCallback((groupIndex: number) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -641,6 +777,31 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
     { key: "terminal", label: "Terminal" },
   ];
 
+  const renderGutterMarkers = (id: string) => {
+    void gutterVersion;
+    const inst = termsRef.current.get(id);
+    const screen = inst?.term.element?.querySelector(".xterm-screen") as HTMLDivElement | null;
+    if (!inst || !screen || inst.term.rows <= 0) return null;
+    const viewportY = inst.term.buffer.active.viewportY;
+    const cellHeight = screen.clientHeight / inst.term.rows;
+    return inst.promptMarkers
+      .filter((entry) => entry.marker.line >= 0)
+      .map((entry) => {
+        const row = entry.marker.line - viewportY;
+        if (row < 0 || row >= inst.term.rows) return null;
+        return (
+          <div
+            key={`${id}-${entry.id}`}
+            className={`terminal-gutter-marker terminal-gutter-marker-${entry.kind}`}
+            style={{ top: `${Math.round(row * cellHeight)}px`, height: `${Math.ceil(cellHeight)}px` }}
+            title="Show Command Actions"
+          >
+            <span className="term-command-action-dot" />
+          </div>
+        );
+      });
+  };
+
   return (
     <div className="terminal-pane">
       <div className="pane-header terminal-pane-header">
@@ -688,11 +849,15 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
               {activeGroupMembers.map((id) => (
                 <div
                   key={id}
-                  id={`term-${id}`}
                   className={`terminal-slot active${id === activeId ? " focused" : ""}`}
                   style={{ display: "flex", flex: 1, minWidth: 0 }}
                   onClick={() => setActiveId(id)}
-                />
+                >
+                  <div className="terminal-slot-gutter" aria-hidden="true">
+                    {renderGutterMarkers(id)}
+                  </div>
+                  <div id={`term-host-${id}`} className="terminal-screen-host" />
+                </div>
               ))}
             </div>
           </div>
