@@ -91,7 +91,7 @@ export default function BrowserView({ url, tabId, onTitleChange, onUrlChange, on
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const webviewRef = useRef<BrowserGuest | null>(null);
   const webviewReadyRef = useRef(false);
-  const pendingPermissionReloadRef = useRef(false);
+  const [navUrl, setNavUrl] = useState(url);
   const [currentUrl, setCurrentUrl] = useState(url);
   const [inputUrl, setInputUrl] = useState(url);
   const [secure, setSecure] = useState(false);
@@ -107,6 +107,8 @@ export default function BrowserView({ url, tabId, onTitleChange, onUrlChange, on
 
   // Sync the displayed URL when the prop changes (new tab, detected URL, etc.)
   useEffect(() => {
+    // Keep the address bar in sync with parent state, but do not re-drive the
+    // guest src for SPA route changes that originated inside the webview.
     setCurrentUrl(url);
     setInputUrl(url);
     setSecure(isHttps(url));
@@ -117,13 +119,14 @@ export default function BrowserView({ url, tabId, onTitleChange, onUrlChange, on
     webviewRef.current = node as BrowserGuest | null;
   }, []);
 
-  const syncDesktopState = useCallback(() => {
+  const syncDesktopState = useCallback((reason: string) => {
     const view = webviewRef.current;
     // #region debug-point A:sync-enter
     reportDebug("A", "BrowserView.tsx:syncDesktopState", "enter syncDesktopState", {
       tabId,
       hasView: !!view,
       isDesktop,
+      reason,
       liveUrl: liveUrlRef.current,
     });
     // #endregion
@@ -132,6 +135,7 @@ export default function BrowserView({ url, tabId, onTitleChange, onUrlChange, on
       // #region debug-point A:sync-skipped-not-ready
       reportDebug("A", "BrowserView.tsx:syncDesktopState", "skip syncDesktopState before dom-ready", {
         tabId,
+        reason,
         liveUrl: liveUrlRef.current,
       });
       // #endregion
@@ -145,6 +149,7 @@ export default function BrowserView({ url, tabId, onTitleChange, onUrlChange, on
       // #region debug-point A:sync-get-url-error
       reportDebug("A", "BrowserView.tsx:syncDesktopState", "getURL threw", {
         tabId,
+        reason,
         error: err instanceof Error ? err.message : String(err),
       });
       // #endregion
@@ -156,6 +161,9 @@ export default function BrowserView({ url, tabId, onTitleChange, onUrlChange, on
       setInputUrl(nextUrl);
       setSecure(isHttps(nextUrl));
       onUrlChange?.(tabId, nextUrl);
+      if (reason !== "did-navigate-in-page") {
+        setNavUrl(nextUrl);
+      }
     }
 
     try {
@@ -183,7 +191,10 @@ export default function BrowserView({ url, tabId, onTitleChange, onUrlChange, on
     // #endregion
     if (!view) return;
 
-    const handleSync = () => syncDesktopState();
+    const onDidFinishLoad = () => syncDesktopState("did-finish-load");
+    const onDidNavigate = () => syncDesktopState("did-navigate");
+    const onDidNavigateInPage = () => syncDesktopState("did-navigate-in-page");
+    const onPageTitleUpdated = () => syncDesktopState("page-title-updated");
     const handleNewWindow = (event: Event) => {
       const urlFromEvent =
         (event as Event & { url?: string }).url ||
@@ -202,169 +213,7 @@ export default function BrowserView({ url, tabId, onTitleChange, onUrlChange, on
         url,
       });
       // #endregion
-
-      // --- Phase 1: immediately override navigator.geolocation (sync, no await) ---
-      //             This MUST complete before the page's <script> tags execute.
-      void view.executeJavaScript?.(
-        `(() => {
-          try {
-            const bridge = window.__harnessGeoBridge;
-            if (!bridge || typeof bridge.getCurrentPosition !== "function") {
-              return { ok: false, reason: "bridge-missing" };
-            }
-
-            const fakeGeo = {
-              getCurrentPosition(success, error, options) {
-                bridge.getCurrentPosition(options).then((result) => {
-                  if (result && result.ok) {
-                    success && success({
-                      coords: {
-                        latitude: Number(result.latitude),
-                        longitude: Number(result.longitude),
-                        accuracy: Number(result.accuracy || 0),
-                        altitude: result.altitude ?? null,
-                        altitudeAccuracy: null,
-                        heading: result.heading ?? null,
-                        speed: result.speed ?? null,
-                      },
-                      timestamp: Number(result.timestamp || Date.now()),
-                    });
-                  } else {
-                    error && error({
-                      code: typeof result?.code === "number" ? result.code : 2,
-                      message: result?.message || "Failed to get location.",
-                      PERMISSION_DENIED: 1,
-                      POSITION_UNAVAILABLE: 2,
-                      TIMEOUT: 3,
-                    });
-                  }
-                }).catch((err) => {
-                  error && error({
-                    code: 2,
-                    message: err?.message || "Failed to get location.",
-                    PERMISSION_DENIED: 1,
-                    POSITION_UNAVAILABLE: 2,
-                    TIMEOUT: 3,
-                  });
-                });
-              },
-              watchPosition(success, error, options) {
-                const id = Math.floor(Math.random() * 1e9);
-                fakeGeo.getCurrentPosition(success, error, options);
-                return id;
-              },
-              clearWatch() {},
-            };
-
-            // Override instance-level first
-            Object.defineProperty(window.navigator, "geolocation", {
-              configurable: true,
-              enumerable: true,
-              get() { return fakeGeo; },
-            });
-
-            // Also patch prototype if possible (covers edge cases)
-            try {
-              if (window.Navigator && window.Navigator.prototype) {
-                Object.defineProperty(window.Navigator.prototype, "geolocation", {
-                  configurable: true,
-                  enumerable: true,
-                  get() { return fakeGeo; },
-                });
-              }
-            } catch {}
-
-            return {
-              ok: true,
-              replaced: window.navigator.geolocation === fakeGeo,
-            };
-          } catch (err) {
-            return { ok: false, reason: err?.message || String(err) };
-          }
-        })();`,
-        true
-      ).catch(() => {});
-
-      // --- Phase 2 (async): warm LocationCache with actual coordinates ---
-      void view.executeJavaScript?.(
-        `(async () => {
-          const LOG = (msg, data) => {
-            try {
-              const hb = window.__harnessGeoBridge;
-              if (hb && hb._debugLog) hb._debugLog(msg, data);
-            } catch {}
-          };
-
-          let geoResult = null;
-          try {
-            const bridge = window.__harnessGeoBridge;
-            if (bridge && typeof bridge.getCurrentPosition === "function") {
-              geoResult = await bridge.getCurrentPosition();
-            }
-          } catch (e) {
-            LOG("warmLocationCache bridge failed", { error: e?.message || String(e) });
-          }
-
-          LOG("warmLocationCache bridge result", {
-            ok: !!geoResult?.ok,
-            provider: geoResult?.provider,
-          });
-
-          const lat = geoResult?.latitude;
-          const lng = geoResult?.longitude;
-          if (typeof lat !== "number" || typeof lng !== "number") return { ok: false, reason: "no-coords" };
-
-          // Pre-fill LocationCache so ensure() returns immediately
-          try {
-            if (window.LocationCache) {
-              const orig = window.LocationCache;
-              window.LocationCache = {
-                ensure: async () => ({ lat, lng, label: orig.getCached?.().label || "" }),
-                getCached: () => ({ lat, lng, label: orig.getCached?.().label || "" }),
-                isReady: () => true,
-              };
-              LOG("LocationCache rewritten", { lat, lng });
-            }
-          } catch {}
-
-          // Route re-run with URL guard
-          let popstateFired = false;
-          const savedHref = window.location.href;
-          try {
-            window.dispatchEvent(new PopStateEvent("popstate", { state: history.state }));
-            popstateFired = true;
-          } catch {
-            try { window.dispatchEvent(new Event("popstate")); popstateFired = true; } catch {}
-          }
-
-          setTimeout(() => {
-            try {
-              if (popstateFired && window.location.href !== savedHref) {
-                history.replaceState(history.state, "", savedHref);
-                LOG("restored url after popstate", { to: savedHref });
-              }
-            } catch {}
-          }, 200);
-
-          return { ok: true, lat, lng, popstateFired };
-        })();`,
-        true
-      ).then((result) => {
-        // #region debug-point D:dom-ready-inject
-        reportDebug("D", "BrowserView.tsx:dom-ready", "dom-ready location inject result", {
-          tabId,
-          result: typeof result === "object" && result ? result as Record<string, unknown> : { value: String(result) },
-        });
-        // #endregion
-      }).catch((err) => {
-        // #region debug-point D:dom-ready-inject-error
-        reportDebug("D", "BrowserView.tsx:dom-ready", "dom-ready location inject failed", {
-          tabId,
-          message: err instanceof Error ? err.message : String(err),
-        });
-        // #endregion
-      });
-      handleSync();
+      syncDesktopState("dom-ready");
     };
 
     const handleDidFailLoad = (event: Event) => {
@@ -401,10 +250,10 @@ export default function BrowserView({ url, tabId, onTitleChange, onUrlChange, on
     };
 
     view.addEventListener("dom-ready", handleDomReady);
-    view.addEventListener("did-finish-load", handleSync);
-    view.addEventListener("did-navigate", handleSync);
-    view.addEventListener("did-navigate-in-page", handleSync);
-    view.addEventListener("page-title-updated", handleSync);
+    view.addEventListener("did-finish-load", onDidFinishLoad);
+    view.addEventListener("did-navigate", onDidNavigate);
+    view.addEventListener("did-navigate-in-page", onDidNavigateInPage);
+    view.addEventListener("page-title-updated", onPageTitleUpdated);
     view.addEventListener("new-window", handleNewWindow);
     view.addEventListener("did-fail-load", handleDidFailLoad);
     view.addEventListener("ipc-message", handleIpcMessage);
@@ -419,10 +268,10 @@ export default function BrowserView({ url, tabId, onTitleChange, onUrlChange, on
     return () => {
       webviewReadyRef.current = false;
       view.removeEventListener("dom-ready", handleDomReady);
-      view.removeEventListener("did-finish-load", handleSync);
-      view.removeEventListener("did-navigate", handleSync);
-      view.removeEventListener("did-navigate-in-page", handleSync);
-      view.removeEventListener("page-title-updated", handleSync);
+      view.removeEventListener("did-finish-load", onDidFinishLoad);
+      view.removeEventListener("did-navigate", onDidNavigate);
+      view.removeEventListener("did-navigate-in-page", onDidNavigateInPage);
+      view.removeEventListener("page-title-updated", onPageTitleUpdated);
       view.removeEventListener("new-window", handleNewWindow);
       view.removeEventListener("did-fail-load", handleDidFailLoad);
       view.removeEventListener("ipc-message", handleIpcMessage);
@@ -437,7 +286,6 @@ export default function BrowserView({ url, tabId, onTitleChange, onUrlChange, on
     reportDebug("D", "BrowserView.tsx:setSitePermissions", "push site permissions to desktop bridge", {
       origin,
       perms,
-      pendingReload: pendingPermissionReloadRef.current,
     });
     // #endregion
     void window.harnessDesktop?.setSitePermissions?.(origin, { ...perms }).then((ok) => {
@@ -445,15 +293,8 @@ export default function BrowserView({ url, tabId, onTitleChange, onUrlChange, on
       reportDebug("D", "BrowserView.tsx:setSitePermissions", "desktop bridge site permissions result", {
         origin,
         ok: !!ok,
-        pendingReload: pendingPermissionReloadRef.current,
       });
       // #endregion
-      if (pendingPermissionReloadRef.current && webviewReadyRef.current) {
-        pendingPermissionReloadRef.current = false;
-        try {
-          webviewRef.current?.reload?.();
-        } catch {}
-      }
     }).catch(() => {});
   }, [currentUrl, isDesktop, perms]);
 
@@ -542,15 +383,11 @@ export default function BrowserView({ url, tabId, onTitleChange, onUrlChange, on
       final = `https://www.bing.com/search?q=${encodeURIComponent(raw)}`;
     }
     liveUrlRef.current = final;
+    setNavUrl(final);
     setCurrentUrl(final);
     setInputUrl(final);
     setSecure(isHttps(final));
     onUrlChange?.(tabId, final);
-    if (isDesktop) {
-      const view = webviewRef.current;
-      if (view?.loadURL) view.loadURL(final);
-      else if (view) view.setAttribute("src", final);
-    }
   }, [inputUrl, isDesktop, tabId, onUrlChange]);
 
   const refresh = useCallback(() => {
@@ -592,9 +429,6 @@ export default function BrowserView({ url, tabId, onTitleChange, onUrlChange, on
         currentUrl,
       });
       // #endregion
-      if (isDesktop && currentUrl) {
-        pendingPermissionReloadRef.current = true;
-      }
       return next;
     });
   }, [currentUrl, isDesktop, tabId]);
@@ -662,7 +496,7 @@ export default function BrowserView({ url, tabId, onTitleChange, onUrlChange, on
             ref={handleWebviewRef}
             key={tabId}
             className="browser-iframe"
-            src={currentUrl}
+            src={navUrl}
             preload={window.harnessDesktop?.browserPreloadUrl}
             partition="harness-browser"
             allowpopups={true}

@@ -116,8 +116,63 @@ function getNativeWindowsLocation(timeoutMs = 35000) {
   });
 }
 
-// getBestAvailableLocation is now windows-only
-const getBestAvailableLocation = getNativeWindowsLocation;
+async function getIpWhoIsLocation(timeoutMs = 12000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch("https://ipwho.is/", {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      signal: controller.signal,
+    });
+    const json = await res.json().catch(() => null);
+    if (!json || json.success !== true) {
+      return {
+        ok: false,
+        code: 2,
+        provider: "ipwhois",
+        message: String(json?.message || "Failed to get IP-based location."),
+      };
+    }
+    const latitude = Number(json.latitude);
+    const longitude = Number(json.longitude);
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+      return {
+        ok: false,
+        code: 2,
+        provider: "ipwhois",
+        message: "IP-based location did not return valid coordinates.",
+      };
+    }
+    return {
+      ok: true,
+      provider: "ipwhois",
+      latitude,
+      longitude,
+      accuracy: 50_000,
+      altitude: null,
+      heading: null,
+      speed: null,
+      timestamp: Date.now(),
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      code: 2,
+      provider: "ipwhois",
+      message: err instanceof Error ? err.message : String(err),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function getBestAvailableLocation(timeoutMs = 35000) {
+  const windows = await getNativeWindowsLocation(timeoutMs);
+  if (windows?.ok) return windows;
+  if (windows?.code === 1) return windows;
+  return await getIpWhoIsLocation(Math.min(15000, Math.max(6000, Math.floor(timeoutMs / 2))));
+}
 
 module.exports = {
   getNativeWindowsLocation,

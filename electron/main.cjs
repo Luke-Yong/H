@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, session } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, session, webContents } = require("electron");
 const http = require("http");
 const path = require("path");
 const { getBestAvailableLocation } = require("./native-location.cjs");
@@ -12,6 +12,7 @@ let cachedLocation = null;
 let cachedLocationUpdatedAt = 0;
 let locationRefreshPromise = null;
 let locationRefreshTimer = null;
+const geoOverrideDebounce = new Map();
 
 function reportDebugMain(hypothesisId, location, msg, data) {
   fetch("http://127.0.0.1:7777/event", {
@@ -117,11 +118,17 @@ function emitBrowserOpenUrl(contents, targetUrl) {
   ownerContents.send("harness:browserOpenUrl", targetUrl);
 }
 
-function isPermissionEnabled(requestingOrigin, permission, details) {
-  const origin =
+function resolvePermissionOrigin(requestingOrigin, details) {
+  return (
     normalizeOrigin(requestingOrigin) ||
     normalizeOrigin(details?.requestingUrl) ||
-    normalizeOrigin(details?.embeddingOrigin);
+    normalizeOrigin(details?.embeddingOrigin) ||
+    ""
+  );
+}
+
+function isPermissionEnabled(requestingOrigin, permission, details) {
+  const origin = resolvePermissionOrigin(requestingOrigin, details);
   if (!origin) return false;
 
   const allowed = sitePermissions.get(origin);
@@ -146,31 +153,55 @@ function isPermissionEnabled(requestingOrigin, permission, details) {
   }
 }
 
+function scheduleGeolocationOverride(contents, reason) {
+  if (!isBrowserContents(contents)) return;
+  const key = contents.id;
+  const prev = geoOverrideDebounce.get(key);
+  if (prev) clearTimeout(prev);
+  geoOverrideDebounce.set(
+    key,
+    setTimeout(() => {
+      geoOverrideDebounce.delete(key);
+      void ensureGeolocationOverride(contents, reason);
+    }, 50)
+  );
+}
+
 function setupBrowserSession() {
-  const browserSession = session.fromPartition(HARNESS_BROWSER_PARTITION);
+  const browserSession = getBrowserSession();
 
   browserSession.setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => {
     const allowed = isPermissionEnabled(requestingOrigin, permission, details);
+    const resolvedOrigin = resolvePermissionOrigin(requestingOrigin, details);
     reportDebugMain("D", "electron/main.cjs:permissionCheck", "permission check", {
       permission,
       requestingOrigin,
       requestingUrl: details?.requestingUrl,
       embeddingOrigin: details?.embeddingOrigin,
+      resolvedOrigin,
       allowed,
     });
+    if (allowed && permission === "geolocation") {
+      scheduleGeolocationOverride(webContents, "permission-check");
+    }
     return allowed;
   });
 
   browserSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
-    const allowed = isPermissionEnabled(details?.requestingOrigin, permission, details);
+    const allowed = isPermissionEnabled(details?.requestingUrl, permission, details);
+    const resolvedOrigin = resolvePermissionOrigin(details?.requestingUrl, details);
     reportDebugMain("D", "electron/main.cjs:permissionRequest", "permission request", {
       permission,
       requestingOrigin: details?.requestingOrigin,
       requestingUrl: details?.requestingUrl,
       embeddingOrigin: details?.embeddingOrigin,
       mediaTypes: details?.mediaTypes,
+      resolvedOrigin,
       allowed,
     });
+    if (allowed && permission === "geolocation") {
+      scheduleGeolocationOverride(webContents, "permission-request");
+    }
     callback(allowed);
   });
 }
@@ -182,6 +213,88 @@ function attachPopupInterception(contents) {
     }
     return { action: "deny" };
   });
+}
+
+function getBrowserSession() {
+  return session.fromPartition(HARNESS_BROWSER_PARTITION);
+}
+
+function isBrowserContents(contents) {
+  try {
+    return contents && !contents.isDestroyed() && contents.session === getBrowserSession();
+  } catch {
+    return false;
+  }
+}
+
+function getAllBrowserContents() {
+  const browserSession = getBrowserSession();
+  return webContents.getAllWebContents().filter((c) => {
+    try {
+      return c && !c.isDestroyed() && c.session === browserSession;
+    } catch {
+      return false;
+    }
+  });
+}
+
+async function ensureGeolocationOverride(contents, reason = "") {
+  if (!isBrowserContents(contents)) return;
+
+  const currentUrl = contents.getURL?.() || "";
+  const origin = normalizeOrigin(currentUrl);
+
+  let loc = cachedLocation;
+  if (!loc?.ok) {
+    loc = await getIdeWideLocation(35_000);
+  }
+  if (!loc?.ok) {
+    reportDebugMain("D", "electron/main.cjs:geoOverride", "no ide-wide location available; cannot override", {
+      id: contents.id,
+      origin,
+      url: currentUrl,
+      reason,
+      code: loc?.code,
+      message: loc?.message,
+    });
+    return;
+  }
+
+  try {
+    if (!contents.debugger.isAttached()) {
+      contents.debugger.attach("1.3");
+    }
+  } catch (err) {
+    reportDebugMain("D", "electron/main.cjs:geoOverride", "debugger attach failed", {
+      id: contents.id,
+      url: currentUrl,
+      message: err instanceof Error ? err.message : String(err),
+    });
+    return;
+  }
+
+  try {
+    await contents.debugger.sendCommand("Emulation.setGeolocationOverride", {
+      latitude: Number(loc.latitude),
+      longitude: Number(loc.longitude),
+      accuracy: Math.max(1, Number(loc.accuracy || 100)),
+    });
+    reportDebugMain("D", "electron/main.cjs:geoOverride", "geolocation override set", {
+      id: contents.id,
+      origin,
+      reason,
+      provider: loc.provider,
+      latitude: loc.latitude,
+      longitude: loc.longitude,
+      accuracy: loc.accuracy,
+    });
+  } catch (err) {
+    reportDebugMain("D", "electron/main.cjs:geoOverride", "geolocation override failed", {
+      id: contents.id,
+      origin,
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 async function refreshSharedLocation(reason, timeoutMs) {
@@ -201,6 +314,11 @@ async function refreshSharedLocation(reason, timeoutMs) {
       message: result?.message,
       usedCachedFallback: !!(!result?.ok && cachedLocation?.ok),
     });
+    if (result?.ok) {
+      for (const contents of getAllBrowserContents()) {
+        void ensureGeolocationOverride(contents);
+      }
+    }
     return result;
   })().finally(() => {
     locationRefreshPromise = null;
@@ -281,6 +399,9 @@ function registerIpc() {
       origin,
       permissions: Array.from(next.values()),
     });
+    for (const contents of getAllBrowserContents()) {
+      void ensureGeolocationOverride(contents);
+    }
     return true;
   });
 
@@ -394,6 +515,31 @@ app.whenReady().then(async () => {
 
   app.on("web-contents-created", (_event, contents) => {
     attachPopupInterception(contents);
+    if (!isBrowserContents(contents)) return;
+    const apply = () => void ensureGeolocationOverride(contents);
+    const applySoon = () => setTimeout(apply, 0);
+    applySoon();
+    contents.on("did-start-navigation", applySoon);
+    contents.on("did-finish-load", apply);
+    contents.on("did-navigate", apply);
+    contents.on("did-navigate-in-page", apply);
+    try {
+      contents.debugger.on("detach", (_event, reason) => {
+        reportDebugMain("D", "electron/main.cjs:geoOverride", "debugger detached", {
+          id: contents.id,
+          url: contents.getURL?.() || "",
+          reason,
+        });
+        scheduleGeolocationOverride(contents, "debugger-detach");
+      });
+    } catch {}
+    contents.on("destroyed", () => {
+      try {
+        if (contents.debugger && contents.debugger.isAttached()) {
+          contents.debugger.detach();
+        }
+      } catch {}
+    });
   });
 
   await createMainWindow();

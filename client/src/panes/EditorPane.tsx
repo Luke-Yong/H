@@ -55,6 +55,11 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
 
   const hasBrowserTabs = browserTabs.length > 0;
   const hasContent = files.length > 0 || (fsRoot && fsRoot.length > 0) || hasBrowserTabs;
+  const showWelcomeInEditor =
+    terminalVisible &&
+    !hasContent &&
+    !fsBasePath &&
+    (!fsRoot || fsRoot.length === 0);
   const activeBrowserTab = browserTabs.find((b) => b.id === activeFileId);
 
   useEffect(() => { activeFileIdRef.current = activeFileId; }, [activeFileId]);
@@ -244,7 +249,36 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
         </div>
         <div className="editor-main" style={terminalVisible ? { height: `calc(100% - ${termH}px - 4px)` } : { flex: 1 }}>
           <div className="editor-container">
-            {files.length === 0 && !hasBrowserTabs && (
+            {showWelcomeInEditor && (
+              <div className="editor-welcome">
+                <div className="welcome-logo">Harness</div>
+                <div className="welcome-subtitle">AI-Powered Browser Test IDE</div>
+                <div className="welcome-actions">
+                  <button className="welcome-btn" onClick={onOpenFolder}>
+                    <span className="welcome-btn-icon">📂</span>
+                    <span className="welcome-btn-text"><strong>Open Folder</strong><small>Open an existing project from your drive</small></span>
+                  </button>
+                  <button className="welcome-btn" onClick={onOpenFile}>
+                    <span className="welcome-btn-icon">📄</span>
+                    <span className="welcome-btn-text"><strong>Open File</strong><small>Open a single file from your drive</small></span>
+                  </button>
+                  <button className="welcome-btn" onClick={onCreateProject}>
+                    <span className="welcome-btn-icon">🆕</span>
+                    <span className="welcome-btn-text"><strong>New Project</strong><small>Create a new folder with index.html, style.css, app.js</small></span>
+                  </button>
+                  <button className="welcome-btn" onClick={onCreateFile}>
+                    <span className="welcome-btn-icon">📝</span>
+                    <span className="welcome-btn-text"><strong>New File</strong><small>Create a new file in the current folder</small></span>
+                  </button>
+                </div>
+                <div className="welcome-shortcuts">
+                  <span>Ctrl+K Ctrl+O — Open Folder</span>
+                  <span>Ctrl+O — Open File</span>
+                  <span>Ctrl+N — New File</span>
+                </div>
+              </div>
+            )}
+            {!showWelcomeInEditor && files.length === 0 && !hasBrowserTabs && (
               <div className="editor-empty">
                 <p>Select a file</p>
               </div>
