@@ -38,7 +38,7 @@ interface Session {
 }
 
 const sessions = new Map<string, Session[]>();
-let nextId = 1;
+const groupIdCounters = new Map<string, number>();
 
 const isWin = process.platform === "win32";
 
@@ -138,7 +138,9 @@ function getShellArgs(cwd: string, venvDir?: string, activateScript?: string): s
 }
 
 export function createSession(ws: WebSocket, groupKey: string, opts?: { cwd?: string; venvDir?: string; activateScript?: string }): string {
-  const id = String(nextId++);
+  const next = (groupIdCounters.get(groupKey) || 0) + 1;
+  groupIdCounters.set(groupKey, next);
+  const id = String(next);
   const shell = getShellPath();
   let cwd = os.homedir();
   if (opts?.cwd) {
@@ -290,6 +292,7 @@ export function killAllInGroup(groupKey: string) {
     }
     sessions.delete(groupKey);
     groupSeenUrls.delete(groupKey);
+    groupIdCounters.delete(groupKey);
   }
 }
 

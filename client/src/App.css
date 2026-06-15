@@ -712,21 +712,34 @@ body {
   flex-shrink: 0;
 }
 
-.terminal-pane .pane-header {
+.terminal-pane-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 4px;
+  gap: 6px;
+  overflow: hidden;
+  text-transform: none;
+  font-weight: normal;
+  padding: 4px 8px;
+  flex-shrink: 0;
 }
 
-.terminal-tabs {
+.terminal-header-actions {
   display: flex;
+  align-items: center;
   gap: 2px;
-  overflow-x: auto;
+  flex-shrink: 0;
 }
 
-.terminal-tab {
-  padding: 3px 10px;
+/* left: category tabs */
+.terminal-category-tabs {
+  display: flex;
+  gap: 0;
+  flex-shrink: 0;
+}
+
+.terminal-category-tab {
+  padding: 5px 12px;
   font-size: 11px;
   cursor: pointer;
   border: none;
@@ -734,16 +747,155 @@ body {
   color: var(--text-dim);
   border-bottom: 2px solid transparent;
   white-space: nowrap;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
 }
-.terminal-tab.active {
+.terminal-category-tab:hover { color: var(--text); }
+.terminal-category-tab.active {
   color: var(--text);
   border-bottom-color: var(--accent);
 }
 
-.terminal-actions {
+/* body: grid + right sidebar */
+.terminal-body {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+.terminal-sidebar-resize {
+  flex-shrink: 0;
+}
+
+/* right sidebar: vertical instance tabs */
+.terminal-instance-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px;
+  background: var(--bg-pane);
+  border-left: 1px solid var(--border);
+  overflow-y: auto;
+  overflow-x: hidden;
+  flex-shrink: 0;
+  min-width: 32px;
+}
+
+.terminal-instance-sidebar.collapsed {
+  align-items: center;
+}
+
+.terminal-instance-tab {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 6px;
+  border-radius: 3px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  flex-shrink: 0;
+  min-width: 0;
+}
+.terminal-instance-tab:hover { background: #2a2d2e; }
+.terminal-instance-tab.in-view {
+  background: rgba(255, 255, 255, 0.03);
+}
+.terminal-instance-tab.active {
+  border-color: var(--accent);
+  background: rgba(0, 122, 204, 0.1);
+}
+
+.terminal-instance-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.terminal-instance-label {
+  font-size: 10px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.terminal-instance-controls {
   display: flex;
   align-items: center;
   gap: 2px;
+  flex-shrink: 0;
+}
+.terminal-instance-tab.active .terminal-instance-label { color: var(--text); }
+
+.terminal-instance-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  cursor: pointer;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  border-radius: 2px;
+  line-height: 1;
+}
+.terminal-instance-btn:hover { background: #3c3c3c; color: var(--text); }
+
+.terminal-header-btn {
+  width: 22px;
+  height: 22px;
+}
+
+.terminal-instance-sidebar.collapsed .terminal-instance-tab {
+  justify-content: center;
+  width: 100%;
+}
+
+/* split-paired bracket — connects two tabs shown together in split view */
+.terminal-instance-tab.split-paired-top {
+  border-left: 2px solid var(--accent);
+  border-bottom: 1px solid transparent;
+  border-bottom-left-radius: 0;
+  padding-left: 4px;
+}
+.terminal-instance-tab.split-paired-bottom {
+  border-left: 2px solid var(--accent);
+  border-top: 1px solid transparent;
+  border-top-left-radius: 0;
+  padding-left: 4px;
+}
+.terminal-instance-tab.split-paired-middle {
+  border-left: 2px solid var(--accent);
+  border-radius: 0;
+  padding-left: 4px;
+}
+/* if the top of a pair directly precedes the bottom, merge them */
+.terminal-instance-tab.split-paired-top + .terminal-instance-tab.split-paired-bottom,
+.terminal-instance-tab.split-paired-top + .terminal-instance-tab.split-paired-middle,
+.terminal-instance-tab.split-paired-middle + .terminal-instance-tab.split-paired-bottom,
+.terminal-instance-tab.split-paired-middle + .terminal-instance-tab.split-paired-middle {
+  border-top: none;
+  margin-top: -2px;
+  padding-top: 0;
+}
+
+.terminal-icon {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+}
+
+.terminal-icon-prompt {
+  width: 14px;
+}
+
+.terminal-icon-connector {
+  width: 10px;
+  color: var(--text-dim);
+  flex-shrink: 0;
 }
 
 .terminal-close-btn {
@@ -754,10 +906,20 @@ body {
   font-size: 14px;
   padding: 0 4px;
   line-height: 1;
+  flex-shrink: 0;
 }
 .terminal-close-btn:hover { color: var(--text); }
 
 .terminal-container { flex: 1; overflow: hidden; }
+
+.terminal-placeholder {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+  font-size: 13px;
+}
 
 .terminal-grid {
   display: flex;
@@ -768,11 +930,15 @@ body {
   flex-direction: row;
 }
 
+.terminal-split-resize {
+  height: 100%;
+  flex-shrink: 0;
+}
+
 .terminal-slot {
   flex: 1;
   display: none;
   overflow: hidden;
-  /* xterm's internal scrollbar should sit flush right, no horizontal overflow */
 }
 
 .terminal-slot .xterm-viewport {
@@ -796,6 +962,11 @@ body {
 .terminal-grid.split .terminal-slot {
   display: flex;
   min-width: 0;
+}
+
+.terminal-slot.focused {
+  border: 1px solid var(--accent);
+  border-radius: 2px;
 }
 
 /* ── Path Dialog ── */

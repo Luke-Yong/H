@@ -1,7 +1,8 @@
-import { useEffect, useRef, useCallback, useState } from "react";
+import { useEffect, useRef, useCallback, useMemo, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
+import { useResizable } from "../hooks/useResizable";
 
 const WS_URL =
   window.location.port === "5173"
@@ -36,23 +37,105 @@ interface Props {
   onDetectUrl?: (sessionId: string, url: string) => void;
 }
 
+type Category = "problems" | "output" | "debugConsole" | "terminal";
+
+function getDefaultShellLabel(): string {
+  const platform = (navigator.platform || "").toLowerCase();
+  if (platform.includes("win")) return "powershell";
+  return "bash";
+}
+
+function getCommandLabel(line: string): string {
+  const trimmed = line.trim();
+  if (!trimmed) return "";
+  return trimmed.split(/\s+/)[0] || "";
+}
+
+function PromptIcon() {
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true" className="terminal-icon terminal-icon-prompt">
+      <path d="M3 4l4 4-4 4" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M9 12h4" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function SplitIcon() {
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true" className="terminal-icon">
+      <rect x="2.5" y="3" width="11" height="10" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M8 3.5v9" fill="none" stroke="currentColor" strokeWidth="1.2" />
+    </svg>
+  );
+}
+
+function TreeConnector({ shape }: { shape: "none" | "top" | "middle" | "bottom" }) {
+  if (shape === "none") return null;
+  const d =
+    shape === "top"
+      ? "M8 14V6.5a2 2 0 0 1 2-2H13"       // ┌  from bottom up, arm → right
+      : shape === "bottom"
+        ? "M8 2v7.5a2 2 0 0 0 2 2H13"       // └  from top down, arm → right
+        : "M13 8H8M8 2v12";                   // ├  arm → right + vertical through
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true" className="terminal-icon terminal-icon-connector">
+      <path d={d} fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function TrashIcon() {
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true" className="terminal-icon">
+      <path d="M5 5.5v5M8 5.5v5M11 5.5v5M3.5 4.5h9M6 2.8h4l.5 1.7h-5zM4.5 4.5l.5 8h6l.5-8" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 export default function TerminalPane({ visible, onClose, cwd, venvDir, activateScript, onDetectUrl }: Props) {
   const panelRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const [wsConnected, setWsConnected] = useState(false);
   const termsRef = useRef<Map<string, TermInstance>>(new Map());
+  const pendingOutputRef = useRef<Map<string, string[]>>(new Map()); // buffer output before xterm is ready
+  const onDetectUrlRef = useRef(onDetectUrl);
   const groupKeyRef = useRef("");
+  const openedOnceRef = useRef(false);
   const [termIds, setTermIds] = useState<string[]>([]);
+  const termIdsRef = useRef<string[]>([]);
   const [backendById, setBackendById] = useState<Record<string, "pty" | "pipe">>({});
+  const [labelById, setLabelById] = useState<Record<string, string>>({});
   const [activeId, setActiveId] = useState<string>("");
   const activeIdRef = useRef(activeId);
-  const [splitMode, setSplitMode] = useState(false);
+  // 2-level nested: [[A], [B, B2, B3], [C]] — "+" adds a group, split adds to a group
+  const [terminalGroups, setTerminalGroups] = useState<string[][]>([]);
+  const terminalGroupsRef = useRef<string[][]>([]);
+  const [activeGroupIndex, setActiveGroupIndex] = useState(0);
+  const activeGroupIndexRef = useRef(0);
+  const pendingCreateForGroupRef = useRef(-1); // -1 = new group, >=0 = append to group
   const cwdRef = useRef<string>("");
   const venvRef = useRef<string>("");
   const activateRef = useRef<string>("");
   const hasRealCwdRef = useRef<boolean>(false);
+  const [activeCategory, setActiveCategory] = useState<Category>("terminal");
+  const { size: sidebarWidth, onMouseDown: onSidebarResize } = useResizable(164, 44, 280, true);
+  const sidebarCollapsed = sidebarWidth <= 72;
+
+  const envTooltip = [
+    cwd ? `cwd: ${cwd}` : "",
+    venvDir ? `venv: ${venvDir}` : "",
+    activateScript ? `activate: ${activateScript}` : "",
+  ].filter(Boolean).join("\n") || "No environment configured";
+  const defaultShellLabel = useMemo(() => getDefaultShellLabel(), []);
+  // Current active group's members displayed in the grid
+  const activeGroupMembers = terminalGroups[activeGroupIndex] || [];
 
   // Keep ref in sync for the WS effect (which must NOT re-run on activeId changes)
   useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
+  useEffect(() => { termIdsRef.current = termIds; }, [termIds]);
+  useEffect(() => { terminalGroupsRef.current = terminalGroups; }, [terminalGroups]);
+  useEffect(() => { activeGroupIndexRef.current = activeGroupIndex; }, [activeGroupIndex]);
+  useEffect(() => { onDetectUrlRef.current = onDetectUrl; }, [onDetectUrl]);
   useEffect(() => {
     const c = (cwd || "").trim();
     cwdRef.current = c;
@@ -109,6 +192,10 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
     inst.historyIndex = inst.history.length;
     inst.input = "";
     sendToServer(inst.id, `${line}\r\n`);
+    if (inst.backend === "pipe") {
+      const label = getCommandLabel(line);
+      if (label) setLabelById((prev) => ({ ...prev, [inst.id]: label }));
+    }
   }, [saveHistory, sendToServer]);
 
   const handlePasteText = useCallback((inst: TermInstance, text: string) => {
@@ -286,23 +373,37 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
       }
     });
 
+    // Flush any output buffered before the xterm was ready
+    const buffered = pendingOutputRef.current.get(id);
+    if (buffered) {
+      pendingOutputRef.current.delete(id);
+      for (const chunk of buffered) {
+        term.write(chunk);
+      }
+    }
+
     termsRef.current.set(id, inst);
   }, [getHistoryKey, handleInput, handlePasteText, loadHistory]);
 
+  // Auto-close pane when all terminals are gone (and WS was established)
   useEffect(() => {
     if (!visible) return;
+    if (termIds.length > 0) return;
+    if (!groupKeyRef.current) return;
+    if (!openedOnceRef.current) return;
+    const timer = setTimeout(() => {
+      onClose();
+    }, 200);
+    return () => clearTimeout(timer);
+  }, [visible, termIds.length, onClose]);
 
+  useEffect(() => {
     const ws = new WebSocket(WS_URL);
     wsRef.current = ws;
     const groupKey = `term-${Date.now()}`;
     groupKeyRef.current = groupKey;
-
-    ws.onopen = () => {
-      const c = hasRealCwdRef.current ? cwdRef.current : "";
-      const v = venvRef.current;
-      const a = activateRef.current;
-      ws.send(`term:create:${groupKey}:${encodeURIComponent(c)}:${encodeURIComponent(v)}:${encodeURIComponent(a)}`);
-    };
+    ws.onopen = () => setWsConnected(true);
+    ws.onclose = () => setWsConnected(false);
 
     ws.onmessage = (msg) => {
       const data = msg.data as string;
@@ -311,12 +412,24 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
         const sep = rest.indexOf(":");
         const id = sep === -1 ? rest : rest.slice(0, sep);
         const backend = (sep === -1 ? "pipe" : rest.slice(sep + 1)) === "pty" ? "pty" : "pipe";
+        const forGroupIdx = pendingCreateForGroupRef.current;
+        pendingCreateForGroupRef.current = -1;
+        openedOnceRef.current = true;
         setBackendById((prev) => ({ ...prev, [id]: backend }));
-        setTermIds((prev) => {
-          const next = [...prev, id];
-          if (!activeIdRef.current) setActiveId(id);
-          return next;
-        });
+        setLabelById((prev) => ({ ...prev, [id]: defaultShellLabel }));
+        setTermIds((prev) => [...prev, id]);
+        if (forGroupIdx >= 0 && terminalGroupsRef.current[forGroupIdx]) {
+          setTerminalGroups((prev) => {
+            const next = prev.map((g) => [...g]);
+            next[forGroupIdx] = [...next[forGroupIdx], id];
+            return next;
+          });
+          setActiveGroupIndex(forGroupIdx);
+        } else {
+          setTerminalGroups((prev) => [...prev, [id]]);
+          setActiveGroupIndex(terminalGroupsRef.current.length);
+        }
+        setActiveId(id);
       } else if (data.startsWith("term:out:")) {
         const rest = data.slice(9);
         const idx = rest.indexOf(":");
@@ -330,7 +443,14 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
           .replace(/\x7f/g, "\x08")
           .replace(/(?<!\x1b)\[(?=[0-9?;]*[A-Za-z@])/g, "\x1b[");
         const inst = termsRef.current.get(id);
-        inst?.term.write(clean);
+        if (inst) {
+          inst.term.write(clean);
+        } else {
+          // Terminal not yet created — buffer output
+          const buf = pendingOutputRef.current.get(id) || [];
+          buf.push(clean);
+          pendingOutputRef.current.set(id, buf);
+        }
       } else if (data.startsWith("term:url:")) {
         // term:url:sessionId:url
         const rest = data.slice(9);
@@ -338,7 +458,7 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
         if (idx === -1) return;
         const id = rest.slice(0, idx);
         const url = rest.slice(idx + 1);
-        onDetectUrl?.(id, url);
+        onDetectUrlRef.current?.(id, url);
       } else if (data.startsWith("term:exit:")) {
         const rest = data.slice(10);
         const idx = rest.indexOf(":");
@@ -347,48 +467,77 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
         const code = rest.slice(idx + 1);
         const inst = termsRef.current.get(id);
         inst?.term.writeln(`\r\n[Process exited code=${code}]`);
-        setTermIds((prev) => {
-          const next = prev.filter((x) => x !== id);
-          if (activeIdRef.current === id) {
-            const currentIdx = prev.indexOf(id);
-            // Pick next tab, or previous if we were at the end
-            const newActiveIdx = currentIdx < next.length ? currentIdx : Math.max(0, next.length - 1);
-            const newActive = next[newActiveIdx] || "";
-            setActiveId(newActive);
-          }
-          return next;
+        setTermIds((prev) => prev.filter((x) => x !== id));
+        setTerminalGroups((prev) => prev.map((g) => g.filter((x) => x !== id)).filter((g) => g.length > 0));
+        if (activeIdRef.current === id) {
+          const groups = terminalGroupsRef.current.map((g) => g.filter((x) => x !== id)).filter((g) => g.length > 0);
+          const gi = Math.min(activeGroupIndexRef.current, groups.length - 1);
+          const members = gi >= 0 ? (groups[gi] || []) : [];
+          const allLeft = termIdsRef.current.filter((x) => x !== id);
+          setActiveId(members[0] || allLeft[0] || "");
+        }
+        setLabelById((labels) => {
+          const { [id]: _, ...rest } = labels;
+          return rest;
         });
       }
     };
 
     return () => {
+      pendingOutputRef.current.clear();
       ws.close();
     };
-  }, [visible]); // <-- activeId removed from deps
+  }, []);
 
-  // Attach terminals to DOM when termIds change
+  // Attach terminals when their DOM container becomes available
   useEffect(() => {
     if (!visible) return;
-    // Give React time to render containers
-    const timer = setTimeout(() => {
-      for (const id of termIds) {
-        if (termsRef.current.has(id)) continue;
+    let raf: number;
+    raf = requestAnimationFrame(() => {
+      for (const id of activeGroupMembers) {
         const el = document.getElementById(`term-${id}`);
-        if (el && el.childElementCount === 0) {
-          createTerminal(id, el as HTMLDivElement, backendById[id] || "pipe");
+        if (!el) continue;
+        const existing = termsRef.current.get(id);
+        if (existing) {
+          if (existing.container !== el) {
+            while (el.firstChild) el.removeChild(el.firstChild);
+            const termEl = existing.term.element;
+            if (termEl) {
+              el.appendChild(termEl);
+            } else {
+              existing.term.open(el as HTMLDivElement);
+            }
+            existing.container = el as HTMLDivElement;
+          }
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              try { existing.fit.fit(); } catch {}
+            });
+          });
+          continue;
         }
+        createTerminal(id, el as HTMLDivElement, backendById[id] || "pipe");
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            const inst = termsRef.current.get(id);
+            try { inst?.fit.fit(); } catch {}
+          });
+        });
       }
-      // Remove disposed
-      for (const [id] of termsRef.current) {
-        if (!termIds.includes(id)) {
-          const inst = termsRef.current.get(id);
-          inst?.term.dispose();
-          termsRef.current.delete(id);
-        }
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [backendById, visible, createTerminal, activeGroupMembers, activeId]);
+
+  useEffect(() => {
+    for (const [id] of termsRef.current) {
+      if (!termIds.includes(id)) {
+        const inst = termsRef.current.get(id);
+        try { inst?.term.dispose(); } catch {}
+        termsRef.current.delete(id);
+        pendingOutputRef.current.delete(id);
       }
-    }, 60);
-    return () => clearTimeout(timer);
-  }, [termIds, backendById, visible, createTerminal]);
+    }
+  }, [termIds]);
 
   // Re-fit on panel resize
   useEffect(() => {
@@ -403,8 +552,9 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
     return () => obs.disconnect();
   }, [visible]);
 
-  const addTerminal = useCallback(() => {
+  const requestTerminal = useCallback((groupIndex: number) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
+      pendingCreateForGroupRef.current = groupIndex;
       const c = hasRealCwdRef.current ? cwdRef.current : "";
       const v = venvRef.current;
       const a = activateRef.current;
@@ -412,68 +562,212 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
     }
   }, []);
 
+  // "+" — new terminal group
+  const addTerminal = useCallback(() => {
+    requestTerminal(-1);
+  }, [requestTerminal]);
+
+  // Split — append to an existing group
+  const createSplitTerminal = useCallback((id: string) => {
+    // Find which group this terminal belongs to
+    const gi = terminalGroupsRef.current.findIndex((g) => g.includes(id));
+    requestTerminal(gi >= 0 ? gi : -1);
+  }, [requestTerminal]);
+
+  // Click a sidebar tab → switch to its group
+  const selectTerminal = useCallback((id: string) => {
+    const gi = terminalGroupsRef.current.findIndex((g) => g.includes(id));
+    if (gi >= 0) {
+      setActiveGroupIndex(gi);
+    }
+    setActiveId(id);
+    setActiveCategory("terminal");
+  }, []);
+
   const killTerminal = useCallback((id: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(`term:kill:${id}`);
     }
-    setTermIds((prev) => {
-      const next = prev.filter((x) => x !== id);
-      if (activeIdRef.current === id) {
-        const currentIdx = prev.indexOf(id);
-        const newActiveIdx = currentIdx < next.length ? currentIdx : Math.max(0, next.length - 1);
-        setActiveId(next[newActiveIdx] || "");
-      }
-      return next;
+    setTermIds((prev) => prev.filter((x) => x !== id));
+    setTerminalGroups((prev) => prev.map((g) => g.filter((x) => x !== id)).filter((g) => g.length > 0));
+    if (activeIdRef.current === id) {
+      const groups = terminalGroupsRef.current.map((g) => g.filter((x) => x !== id)).filter((g) => g.length > 0);
+      const gi = Math.min(activeGroupIndexRef.current, groups.length - 1);
+      const members = gi >= 0 ? (groups[gi] || []) : [];
+      const allLeft = termIdsRef.current.filter((x) => x !== id);
+      setActiveId(members[0] || allLeft[0] || "");
+    }
+    setLabelById((labels) => {
+      const { [id]: _, ...rest } = labels;
+      return rest;
     });
-  }, []);
+    // Schedule close check after this state update commits
+    const nextAll = termIdsRef.current.filter((x) => x !== id);
+    if (nextAll.length === 0 && openedOnceRef.current) {
+      setTimeout(() => onClose(), 0);
+    }
+  }, [onClose]);
+
+  // Auto-open one terminal when pane becomes visible
+  useEffect(() => {
+    if (!visible) return;
+    if (termIds.length > 0) return;
+    if (!wsConnected) return;
+    requestTerminal(-1);
+  }, [visible, termIds.length, requestTerminal, wsConnected]);
+
+  useEffect(() => {
+    if (!activeGroupMembers.length) return;
+    // Double rAF ensures CSS flex layout has fully settled before fitting xterm dimensions
+    let raf1: number;
+    let raf2: number;
+    raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => {
+        for (const id of activeGroupMembers) {
+          const inst = termsRef.current.get(id);
+          try { inst?.fit.fit(); } catch {}
+        }
+      });
+    });
+    return () => { cancelAnimationFrame(raf1); cancelAnimationFrame(raf2); };
+  }, [activeGroupMembers]);
 
   if (!visible) return null;
 
+  const categories: { key: Category; label: string }[] = [
+    { key: "problems", label: "Problems" },
+    { key: "output", label: "Output" },
+    { key: "debugConsole", label: "Debug Console" },
+    { key: "terminal", label: "Terminal" },
+  ];
+
   return (
     <div className="terminal-pane">
-      <div className="pane-header">
-        <div className="terminal-tabs">
-          {termIds.map((id, i) => (
+      <div className="pane-header terminal-pane-header">
+        <div className="terminal-category-tabs">
+          {categories.map((cat) => (
             <button
-              key={id}
-              className={`terminal-tab${id === activeId ? " active" : ""}`}
-              onClick={() => setActiveId(id)}
+              key={cat.key}
+              className={`terminal-category-tab${activeCategory === cat.key ? " active" : ""}`}
+              onClick={() => setActiveCategory(cat.key)}
             >
-              Term {i + 1}
-              <span
-                className="tab-close"
-                onClick={(e) => { e.stopPropagation(); killTerminal(id); }}
-              >✕</span>
+              {cat.label}
             </button>
           ))}
         </div>
-        <div className="terminal-actions">
-          <button className="files-add-btn" onClick={addTerminal} title="New Terminal">+</button>
-          <button
-            className="files-add-btn"
-            onClick={() => setSplitMode(!splitMode)}
-            title="Split Terminal"
-            style={{ color: splitMode ? "var(--accent)" : undefined }}
+        <div className="terminal-header-actions">
+          {activeCategory === "terminal" && (
+            <>
+              {sidebarCollapsed && activeId && (
+                <button className="terminal-instance-btn terminal-header-btn" onClick={() => createSplitTerminal(activeId)} title="Split terminal">
+                  <SplitIcon />
+                </button>
+              )}
+              {sidebarCollapsed && activeId && (
+                <button className="terminal-instance-btn terminal-header-btn" onClick={() => killTerminal(activeId)} title="Kill terminal">
+                  <TrashIcon />
+                </button>
+              )}
+            </>
+          )}
+          {activeCategory === "terminal" && (
+            <button className="terminal-instance-btn terminal-header-btn" onClick={() => { setActiveCategory("terminal"); addTerminal(); }} title="New terminal">
+              <span style={{ fontSize: 14, lineHeight: 1 }}>+</span>
+            </button>
+          )}
+          <button className="terminal-close-btn" onClick={onClose} title="Close panel">✕</button>
+        </div>
+      </div>
+      {activeCategory === "terminal" && (
+        <div className="terminal-body">
+          <div className="terminal-container" ref={panelRef}>
+            <div className={`terminal-grid${activeGroupMembers.length > 1 ? " split" : ""}`}>
+              {activeGroupMembers.length === 0 && (
+                <div className="terminal-placeholder">No terminal selected</div>
+              )}
+              {activeGroupMembers.map((id) => (
+                <div
+                  key={id}
+                  id={`term-${id}`}
+                  className={`terminal-slot active${id === activeId ? " focused" : ""}`}
+                  style={{ display: "flex", flex: 1, minWidth: 0 }}
+                  onClick={() => setActiveId(id)}
+                />
+              ))}
+            </div>
+          </div>
+          <div className="resize-handle terminal-sidebar-resize" onMouseDown={onSidebarResize} />
+          <div
+            className={`terminal-instance-sidebar${sidebarCollapsed ? " collapsed" : ""}`}
+            style={{ width: sidebarWidth }}
           >
-            ▣
-          </button>
-          <button className="terminal-close-btn" onClick={onClose}>✕</button>
+            {terminalGroups.flatMap((group, gi) => {
+              const isMulti = group.length > 1;
+              return group.map((id, rank) => {
+                let treeShape: "none" | "top" | "middle" | "bottom" = "none";
+                let splitClass = "";
+                if (isMulti) {
+                  if (rank === 0) {
+                    treeShape = "top";
+                    splitClass = " split-paired-top";
+                  } else if (rank === group.length - 1) {
+                    treeShape = "bottom";
+                    splitClass = " split-paired-bottom";
+                  } else {
+                    treeShape = "middle";
+                    splitClass = " split-paired-middle";
+                  }
+                } else {
+                  splitClass = " in-view";
+                }
+                return (
+                <div
+                  key={id}
+                  className={`terminal-instance-tab${id === activeId ? " active" : ""}${splitClass}`}
+                  title={envTooltip}
+                  onClick={() => selectTerminal(id)}
+                >
+                  <span className="terminal-instance-main">
+                    <TreeConnector shape={treeShape} />
+                    <PromptIcon />
+                    {!sidebarCollapsed && (
+                      <span className="terminal-instance-label">
+                        {labelById[id] || `${defaultShellLabel} ${rank + 1}`}
+                      </span>
+                    )}
+                  </span>
+                  {!sidebarCollapsed && (
+                    <span className="terminal-instance-controls">
+                      <button
+                        className="terminal-instance-btn"
+                        onClick={(e) => { e.stopPropagation(); createSplitTerminal(id); }}
+                        title="Split terminal"
+                      >
+                        <SplitIcon />
+                      </button>
+                      <button
+                        className="terminal-instance-btn"
+                        onClick={(e) => { e.stopPropagation(); killTerminal(id); }}
+                        title="Kill terminal"
+                      >
+                        <TrashIcon />
+                      </button>
+                    </span>
+                  )}
+                </div>
+                );
+              });
+            })}
+          </div>
         </div>
-      </div>
-      <div className="terminal-container" ref={panelRef}>
-        <div className={`terminal-grid${splitMode ? " split" : ""}`}>
-          {termIds
-            .filter((id) => !splitMode || id === activeId || id === termIds[1] || id === termIds[0])
-            .map((id) => (
-              <div
-                key={id}
-                id={`term-${id}`}
-                className={`terminal-slot${id === activeId ? " active" : ""}`}
-                style={{ display: splitMode || id === activeId ? "flex" : "none" }}
-              />
-            ))}
+      )}
+      {activeCategory !== "terminal" && (
+        <div className="terminal-placeholder">
+          {activeCategory === "problems" && "No problems detected."}
+          {activeCategory === "output" && "No output."}
+          {activeCategory === "debugConsole" && "Debug console not connected."}
         </div>
-      </div>
+      )}
     </div>
   );
 }
