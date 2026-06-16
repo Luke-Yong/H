@@ -44,9 +44,24 @@ interface Props {
   venvDir?: string;
   activateScript?: string;
   onDetectUrl?: (sessionId: string, url: string) => void;
+  debugEntries?: DebugConsoleEntry[];
+  onClearDebugEntries?: () => void;
 }
 
 type Category = "problems" | "output" | "debugConsole" | "terminal";
+type DebugSource = DebugConsoleEntry["source"];
+type DebugLevel = DebugConsoleEntry["level"];
+
+const DEBUG_SOURCES: DebugSource[] = ["app", "runtime", "server"];
+const DEBUG_LEVELS: DebugLevel[] = ["log", "info", "warn", "error"];
+
+export interface DebugConsoleEntry {
+  id: string;
+  level: "log" | "info" | "warn" | "error";
+  source: "app" | "runtime" | "server";
+  text: string;
+  time: number;
+}
 
 function getDefaultShellLabel(): string {
   const platform = (navigator.platform || "").toLowerCase();
@@ -101,7 +116,7 @@ function TrashIcon() {
   );
 }
 
-export default function TerminalPane({ visible, onClose, cwd, venvDir, activateScript, onDetectUrl }: Props) {
+export default function TerminalPane({ visible, onClose, cwd, venvDir, activateScript, onDetectUrl, debugEntries = [], onClearDebugEntries }: Props) {
   const panelRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
@@ -130,6 +145,17 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
   const activateRef = useRef<string>("");
   const hasRealCwdRef = useRef<boolean>(false);
   const [activeCategory, setActiveCategory] = useState<Category>("terminal");
+  const [debugSourceFilters, setDebugSourceFilters] = useState<Record<DebugSource, boolean>>({
+    app: true,
+    runtime: true,
+    server: true,
+  });
+  const [debugLevelFilters, setDebugLevelFilters] = useState<Record<DebugLevel, boolean>>({
+    log: true,
+    info: true,
+    warn: true,
+    error: true,
+  });
   const { size: sidebarWidth, onMouseDown: onSidebarResize } = useResizable(164, 44, 280, true);
   const sidebarCollapsed = sidebarWidth <= 72;
 
@@ -139,6 +165,10 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
     activateScript ? `activate: ${activateScript}` : "",
   ].filter(Boolean).join("\n") || "No environment configured";
   const defaultShellLabel = useMemo(() => getDefaultShellLabel(), []);
+  const filteredDebugEntries = useMemo(
+    () => debugEntries.filter((entry) => debugSourceFilters[entry.source] && debugLevelFilters[entry.level]),
+    [debugEntries, debugLevelFilters, debugSourceFilters]
+  );
   // Current active group's members displayed in the grid
   const activeGroupMembers = terminalGroups[activeGroupIndex] || [];
 
@@ -172,6 +202,19 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
       : (nextGroup.includes(activeIdRef.current) ? activeIdRef.current : (nextGroup[0] || allLeft[0] || ""));
 
     return { groups, nextGroupIndex, nextActiveId };
+  }, []);
+
+  const toggleDebugSourceFilter = useCallback((source: DebugSource) => {
+    setDebugSourceFilters((prev) => ({ ...prev, [source]: !prev[source] }));
+  }, []);
+
+  const toggleDebugLevelFilter = useCallback((level: DebugLevel) => {
+    setDebugLevelFilters((prev) => ({ ...prev, [level]: !prev[level] }));
+  }, []);
+
+  const resetDebugFilters = useCallback(() => {
+    setDebugSourceFilters({ app: true, runtime: true, server: true });
+    setDebugLevelFilters({ log: true, info: true, warn: true, error: true });
   }, []);
 
   // Keep ref in sync for the WS effect (which must NOT re-run on activeId changes)
@@ -994,6 +1037,11 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
               )}
             </>
           )}
+          {activeCategory === "debugConsole" && onClearDebugEntries && (
+            <button className="terminal-instance-btn terminal-header-btn" onClick={onClearDebugEntries} title="Clear debug console">
+              <TrashIcon />
+            </button>
+          )}
           {activeCategory === "terminal" && (
             <button className="terminal-instance-btn terminal-header-btn" onClick={() => { setActiveCategory("terminal"); addTerminal(); }} title="New terminal">
               <span style={{ fontSize: 14, lineHeight: 1 }}>+</span>
@@ -1090,10 +1138,57 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
         </div>
       )}
       {activeCategory !== "terminal" && (
-        <div className="terminal-placeholder">
+        <div className={`terminal-placeholder${activeCategory === "debugConsole" ? " terminal-debug-console" : ""}`}>
           {activeCategory === "problems" && "No problems detected."}
           {activeCategory === "output" && "No output."}
-          {activeCategory === "debugConsole" && "Debug console not connected."}
+          {activeCategory === "debugConsole" && (
+            <div className="debug-console-panel">
+              <div className="debug-console-toolbar">
+                <div className="debug-console-filter-group">
+                  <span className="debug-console-filter-label">Source</span>
+                  {DEBUG_SOURCES.map((source) => (
+                    <button
+                      key={source}
+                      className={`debug-console-filter-chip${debugSourceFilters[source] ? " active" : ""}`}
+                      onClick={() => toggleDebugSourceFilter(source)}
+                    >
+                      {source}
+                    </button>
+                  ))}
+                </div>
+                <div className="debug-console-filter-group">
+                  <span className="debug-console-filter-label">Level</span>
+                  {DEBUG_LEVELS.map((level) => (
+                    <button
+                      key={level}
+                      className={`debug-console-filter-chip debug-console-filter-chip-${level}${debugLevelFilters[level] ? " active" : ""}`}
+                      onClick={() => toggleDebugLevelFilter(level)}
+                    >
+                      {level}
+                    </button>
+                  ))}
+                </div>
+                <button className="debug-console-reset" onClick={resetDebugFilters}>
+                  Reset Filters
+                </button>
+              </div>
+              {debugEntries.length === 0 ? (
+                <div className="debug-console-empty">No debug output.</div>
+              ) : filteredDebugEntries.length === 0 ? (
+                <div className="debug-console-empty">No debug output matches the current filters.</div>
+              ) : (
+                <div className="debug-console-list">
+                  {filteredDebugEntries.map((entry) => (
+                    <div key={entry.id} className={`debug-console-entry debug-console-entry-${entry.level}`}>
+                      <span className="debug-console-time">{new Date(entry.time).toLocaleTimeString()}</span>
+                      <span className={`debug-console-badge debug-console-badge-${entry.source}`}>{entry.source}</span>
+                      <span className="debug-console-text">{entry.text}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>

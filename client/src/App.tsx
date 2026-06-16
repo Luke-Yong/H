@@ -5,6 +5,7 @@ import MenuBar from "./panes/MenuBar";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { useResizable, ResizeHandle } from "./hooks/useResizable";
 import type { FsEntry } from "./panes/FilesPanel";
+import type { DebugConsoleEntry } from "./panes/TerminalPane";
 import { pickAndEnumerateFolder, pickAndReadFile } from "./panes/browserFs";
 
 interface BrowserTab {
@@ -56,6 +57,9 @@ function normalizeBrowserOpenUrl(rawUrl: string): string {
 export default function App() {
   const editorRef = useRef<EditorPaneHandle>(null);
   const { connected, events, runTest } = useWebSocket();
+  const [debugEntries, setDebugEntries] = useState<DebugConsoleEntry[]>([]);
+  const debugIdRef = useRef(0);
+  const wsEventCountRef = useRef(0);
 
   const [fsRoot, setFsRoot] = useState<FsEntry[] | null>(null);
   const [fsBasePath, setFsBasePath] = useState("");
@@ -136,6 +140,103 @@ export default function App() {
   const handleBrowserNewTabFromLink = useCallback((url: string) => {
     openBrowserTabForUrl(url);
   }, [openBrowserTabForUrl]);
+
+  const appendDebugEntry = useCallback((entry: Omit<DebugConsoleEntry, "id" | "time"> & { time?: number }) => {
+    const next: DebugConsoleEntry = {
+      id: `dbg-${++debugIdRef.current}`,
+      time: entry.time ?? Date.now(),
+      level: entry.level,
+      source: entry.source,
+      text: entry.text,
+    };
+    setDebugEntries((prev) => [...prev.slice(-399), next]);
+  }, []);
+
+  const clearDebugEntries = useCallback(() => {
+    setDebugEntries([]);
+  }, []);
+
+  useEffect(() => {
+    if (events.length <= wsEventCountRef.current) return;
+    for (const event of events.slice(wsEventCountRef.current)) {
+      const level: DebugConsoleEntry["level"] =
+        event.type === "error" ? "error" :
+        event.type === "log" ? "log" :
+        event.type === "assistant" ? "info" :
+        "info";
+      let text = "";
+      if (typeof event.data === "string") {
+        text = event.data;
+      } else {
+        try {
+          text = JSON.stringify(event.data);
+        } catch {
+          text = String(event.data);
+        }
+      }
+      appendDebugEntry({ level, source: "server", text: `${event.type}: ${text}` });
+    }
+    wsEventCountRef.current = events.length;
+  }, [appendDebugEntry, events]);
+
+  useEffect(() => {
+    const stringifyArgs = (args: unknown[]) => args.map((arg) => {
+      if (typeof arg === "string") return arg;
+      if (arg instanceof Error) return arg.stack || arg.message;
+      try {
+        return JSON.stringify(arg);
+      } catch {
+        return String(arg);
+      }
+    }).join(" ");
+
+    const original = {
+      log: console.log,
+      info: console.info,
+      warn: console.warn,
+      error: console.error,
+    };
+
+    console.log = (...args: unknown[]) => {
+      appendDebugEntry({ level: "log", source: "app", text: stringifyArgs(args) });
+      original.log(...args);
+    };
+    console.info = (...args: unknown[]) => {
+      appendDebugEntry({ level: "info", source: "app", text: stringifyArgs(args) });
+      original.info(...args);
+    };
+    console.warn = (...args: unknown[]) => {
+      appendDebugEntry({ level: "warn", source: "app", text: stringifyArgs(args) });
+      original.warn(...args);
+    };
+    console.error = (...args: unknown[]) => {
+      appendDebugEntry({ level: "error", source: "app", text: stringifyArgs(args) });
+      original.error(...args);
+    };
+
+    const onError = (event: ErrorEvent) => {
+      appendDebugEntry({
+        level: "error",
+        source: "runtime",
+        text: event.error?.stack || event.message || "Unhandled error",
+      });
+    };
+    const onRejection = (event: PromiseRejectionEvent) => {
+      const reason = event.reason instanceof Error ? (event.reason.stack || event.reason.message) : String(event.reason);
+      appendDebugEntry({ level: "error", source: "runtime", text: `Unhandled rejection: ${reason}` });
+    };
+
+    window.addEventListener("error", onError);
+    window.addEventListener("unhandledrejection", onRejection);
+    return () => {
+      console.log = original.log;
+      console.info = original.info;
+      console.warn = original.warn;
+      console.error = original.error;
+      window.removeEventListener("error", onError);
+      window.removeEventListener("unhandledrejection", onRejection);
+    };
+  }, [appendDebugEntry]);
 
   useEffect(() => {
     return window.harnessDesktop?.onBrowserOpenUrl?.((url: string) => {
@@ -377,6 +478,8 @@ export default function App() {
             terminalVisible={termVisible}
             onCloseTerminal={() => setTermVisible(false)}
             onDetectUrl={handleDetectUrl}
+            debugEntries={debugEntries}
+            onClearDebugEntries={clearDebugEntries}
           />
         </div>
 

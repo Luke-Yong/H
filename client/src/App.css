@@ -960,6 +960,172 @@ body {
   font-size: 13px;
 }
 
+.terminal-debug-console {
+  display: block;
+  padding: 0;
+  overflow: auto;
+  background: #1e1e1e;
+}
+
+.debug-console-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+.debug-console-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  background: #252526;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.debug-console-filter-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.debug-console-filter-label {
+  font-size: 11px;
+  color: #8c8c8c;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.debug-console-filter-chip,
+.debug-console-reset {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: transparent;
+  color: #cccccc;
+  border-radius: 999px;
+  padding: 3px 9px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.debug-console-filter-chip:hover,
+.debug-console-reset:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.debug-console-filter-chip.active {
+  background: rgba(0, 122, 204, 0.2);
+  border-color: rgba(0, 122, 204, 0.55);
+  color: #ffffff;
+}
+
+.debug-console-filter-chip-error.active {
+  background: rgba(244, 71, 71, 0.18);
+  border-color: rgba(244, 71, 71, 0.45);
+}
+
+.debug-console-filter-chip-warn.active {
+  background: rgba(255, 204, 0, 0.16);
+  border-color: rgba(255, 204, 0, 0.4);
+}
+
+.debug-console-filter-chip-info.active {
+  background: rgba(55, 148, 255, 0.18);
+  border-color: rgba(55, 148, 255, 0.45);
+}
+
+.debug-console-filter-chip-log.active {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+.debug-console-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  min-height: 120px;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.debug-console-list {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+.debug-console-entry {
+  display: grid;
+  grid-template-columns: 74px 54px 1fr;
+  gap: 8px;
+  align-items: start;
+  padding: 6px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  font-family: "Cascadia Code", "Fira Code", "Consolas", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #d4d4d4;
+}
+
+.debug-console-entry-log {
+  background: transparent;
+}
+
+.debug-console-entry-info {
+  background: rgba(55, 148, 255, 0.05);
+}
+
+.debug-console-entry-warn {
+  background: rgba(255, 204, 0, 0.06);
+}
+
+.debug-console-entry-error {
+  background: rgba(244, 71, 71, 0.08);
+}
+
+.debug-console-time {
+  color: #8c8c8c;
+  white-space: nowrap;
+}
+
+.debug-console-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #d4d4d4;
+}
+
+.debug-console-badge-app {
+  background: rgba(55, 148, 255, 0.16);
+  color: #9cdcfe;
+}
+
+.debug-console-badge-runtime {
+  background: rgba(244, 71, 71, 0.16);
+  color: #f48771;
+}
+
+.debug-console-badge-server {
+  background: rgba(106, 153, 85, 0.16);
+  color: #b5cea8;
+}
+
+.debug-console-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .terminal-grid {
   display: flex;
   height: 100%;
