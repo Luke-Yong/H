@@ -48,16 +48,20 @@ interface Props {
   onClearDebugEntries?: () => void;
   outputEntries?: OutputEntry[];
   onClearOutputEntries?: () => void;
+  problemEntries?: ProblemEntry[];
+  onSelectProblem?: (problem: ProblemEntry) => void;
 }
 
 type Category = "problems" | "output" | "debugConsole" | "terminal";
 type DebugSource = DebugConsoleEntry["source"];
 type DebugLevel = DebugConsoleEntry["level"];
 type OutputKind = OutputEntry["kind"];
+type ProblemSeverity = ProblemEntry["severity"];
 
 const DEBUG_SOURCES: DebugSource[] = ["app", "runtime", "server"];
 const DEBUG_LEVELS: DebugLevel[] = ["log", "info", "warn", "error"];
 const OUTPUT_KINDS: OutputKind[] = ["log", "action", "dom", "result", "error", "assistant", "code", "screenshot"];
+const PROBLEM_SEVERITIES: ProblemSeverity[] = ["error", "warning", "info", "hint"];
 
 export interface DebugConsoleEntry {
   id: string;
@@ -72,6 +76,21 @@ export interface OutputEntry {
   kind: "log" | "action" | "dom" | "result" | "error" | "assistant" | "code" | "screenshot";
   text: string;
   time: number;
+}
+
+export interface ProblemEntry {
+  id: string;
+  fileId: string;
+  fileName: string;
+  filePath?: string;
+  severity: "error" | "warning" | "info" | "hint";
+  message: string;
+  line: number;
+  column: number;
+  endLine: number;
+  endColumn: number;
+  source?: string;
+  code?: string;
 }
 
 function getDefaultShellLabel(): string {
@@ -138,6 +157,8 @@ export default function TerminalPane({
   onClearDebugEntries,
   outputEntries = [],
   onClearOutputEntries,
+  problemEntries = [],
+  onSelectProblem,
 }: Props) {
   const panelRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -205,6 +226,33 @@ export default function TerminalPane({
     () => outputEntries.filter((entry) => outputKindFilters[entry.kind]),
     [outputEntries, outputKindFilters]
   );
+  const sortedProblemEntries = useMemo(() => {
+    const severityOrder: Record<ProblemSeverity, number> = {
+      error: 0,
+      warning: 1,
+      info: 2,
+      hint: 3,
+    };
+    return [...problemEntries].sort((a, b) => {
+      const bySeverity = severityOrder[a.severity] - severityOrder[b.severity];
+      if (bySeverity !== 0) return bySeverity;
+      const byFile = a.fileName.localeCompare(b.fileName);
+      if (byFile !== 0) return byFile;
+      const byLine = a.line - b.line;
+      if (byLine !== 0) return byLine;
+      return a.column - b.column;
+    });
+  }, [problemEntries]);
+  const problemCounts = useMemo(() => {
+    const counts: Record<ProblemSeverity, number> = {
+      error: 0,
+      warning: 0,
+      info: 0,
+      hint: 0,
+    };
+    for (const entry of problemEntries) counts[entry.severity] += 1;
+    return counts;
+  }, [problemEntries]);
   // Current active group's members displayed in the grid
   const activeGroupMembers = terminalGroups[activeGroupIndex] || [];
 
@@ -798,6 +846,7 @@ export default function TerminalPane({
   // Attach terminals when their DOM container becomes available
   useEffect(() => {
     if (!visible) return;
+    if (activeCategory !== "terminal") return;
     let raf: number;
     raf = requestAnimationFrame(() => {
       for (const id of activeGroupMembers) {
@@ -832,7 +881,7 @@ export default function TerminalPane({
       }
     });
     return () => cancelAnimationFrame(raf);
-  }, [backendById, visible, createTerminal, activeGroupMembers, activeId]);
+  }, [activeCategory, backendById, visible, createTerminal, activeGroupMembers, activeId]);
 
   useEffect(() => {
     for (const [id] of termsRef.current) {
@@ -1090,16 +1139,6 @@ export default function TerminalPane({
               )}
             </>
           )}
-          {activeCategory === "debugConsole" && onClearDebugEntries && (
-            <button className="terminal-instance-btn terminal-header-btn" onClick={onClearDebugEntries} title="Clear debug console">
-              <TrashIcon />
-            </button>
-          )}
-          {activeCategory === "output" && onClearOutputEntries && (
-            <button className="terminal-instance-btn terminal-header-btn" onClick={onClearOutputEntries} title="Clear output">
-              <TrashIcon />
-            </button>
-          )}
           {activeCategory === "terminal" && (
             <button className="terminal-instance-btn terminal-header-btn" onClick={() => { setActiveCategory("terminal"); addTerminal(); }} title="New terminal">
               <span style={{ fontSize: 14, lineHeight: 1 }}>+</span>
@@ -1196,8 +1235,52 @@ export default function TerminalPane({
         </div>
       )}
       {activeCategory !== "terminal" && (
-        <div className={`terminal-placeholder${activeCategory === "debugConsole" ? " terminal-debug-console" : ""}`}>
-          {activeCategory === "problems" && "No problems detected."}
+        <div className="terminal-placeholder terminal-debug-console">
+          {activeCategory === "problems" && (
+            <div className="debug-console-panel">
+              <div className="debug-console-toolbar">
+                <div className="debug-console-filter-group">
+                  <span className="debug-console-filter-label">Problems</span>
+                  {PROBLEM_SEVERITIES.map((severity) => (
+                    <span key={severity} className={`debug-console-badge debug-console-badge-problem debug-console-badge-problem-${severity}`}>
+                      {severity} {problemCounts[severity]}
+                    </span>
+                  ))}
+                </div>
+              </div>
+              {sortedProblemEntries.length === 0 ? (
+                <div className="debug-console-empty">No problems detected.</div>
+              ) : (
+                <div className="debug-console-list">
+                  {sortedProblemEntries.map((entry) => (
+                    <button
+                      key={entry.id}
+                      type="button"
+                      className={`debug-console-entry debug-console-entry-${entry.severity === "warning" ? "warn" : entry.severity === "error" ? "error" : "info"} problem-entry`}
+                      onClick={() => onSelectProblem?.(entry)}
+                      title={`Open ${entry.fileName}:${entry.line}:${entry.column}`}
+                    >
+                      <span className="problem-entry-location" title={entry.filePath || entry.fileName}>
+                        {entry.fileName}:{entry.line}:{entry.column}
+                      </span>
+                      <span className={`debug-console-badge debug-console-badge-problem debug-console-badge-problem-${entry.severity}`}>
+                        {entry.severity}
+                      </span>
+                      <span className="debug-console-text">
+                        {entry.message}
+                        {(entry.source || entry.code) && (
+                          <span className="problem-entry-meta">
+                            {entry.source ? ` ${entry.source}` : ""}
+                            {entry.code ? `${entry.source ? " " : " "}${entry.code}` : ""}
+                          </span>
+                        )}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           {activeCategory === "output" && (
             <div className="debug-console-panel">
               <div className="debug-console-toolbar">

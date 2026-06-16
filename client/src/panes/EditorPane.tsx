@@ -1,8 +1,8 @@
-import { useState, forwardRef, useImperativeHandle, useCallback, useEffect, useRef } from "react";
+import { useState, forwardRef, useImperativeHandle, useCallback, useEffect, useRef, useMemo } from "react";
 import Editor from "@monaco-editor/react";
 import FilesPanel from "./FilesPanel";
 import BrowserView from "./BrowserView";
-import TerminalPane, { type DebugConsoleEntry, type OutputEntry } from "./TerminalPane";
+import TerminalPane, { type DebugConsoleEntry, type OutputEntry, type ProblemEntry } from "./TerminalPane";
 import { VFile, createFile, detectLanguage } from "./fileModel";
 import { readFileFromHandle, writeFileToHandle } from "./browserFs";
 import { useResizable, ResizeHandle } from "../hooks/useResizable";
@@ -50,6 +50,23 @@ interface Props {
   onClearOutputEntries?: () => void;
 }
 
+interface MarkerSnapshot {
+  message: string;
+  severity: number;
+  startLineNumber: number;
+  startColumn: number;
+  endLineNumber: number;
+  endColumn: number;
+  source?: string;
+  code?: string | { value: string };
+}
+
+interface EditorViewHandle {
+  focus: () => void;
+  setPosition: (position: { lineNumber: number; column: number }) => void;
+  revealPositionInCenter: (position: { lineNumber: number; column: number }) => void;
+}
+
 const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   { fsRoot, fsBasePath, terminalVenvDir, terminalActivateScript, browserTabs, activeBrowserTabId,
     onActiveBrowserTabChange, onCloseBrowser, onBrowserTabClose, onAddBrowserTab,
@@ -58,8 +75,11 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     terminalVisible, onCloseTerminal, onDetectUrl, debugEntries, onClearDebugEntries, outputEntries, onClearOutputEntries }, ref
 ) {
   const [files, setFiles] = useState<VFile[]>([]);
+  const [markersByFileId, setMarkersByFileId] = useState<Record<string, MarkerSnapshot[]>>({});
   const [activeFileId, setActiveFileId] = useState<string>("");
   const activeFileIdRef = useRef(activeFileId);
+  const editorByFileIdRef = useRef<Record<string, EditorViewHandle | null>>({});
+  const pendingProblemSelectionRef = useRef<{ fileId: string; line: number; column: number } | null>(null);
   const { size: filePanelW, onMouseDown: onFilePanelDrag } = useResizable(200, 120, 500);
   const { size: termH, onMouseDown: onTermDrag } = useResizable(220, 80, 600, true);
 
@@ -71,8 +91,47 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     !fsBasePath &&
     (!fsRoot || fsRoot.length === 0);
   const activeBrowserTab = browserTabs.find((b) => b.id === activeBrowserTabId) || browserTabs[0];
+  const problemEntries = useMemo<ProblemEntry[]>(() => {
+    const severityMap: Record<number, ProblemEntry["severity"]> = {
+      8: "error",
+      4: "warning",
+      2: "info",
+      1: "hint",
+    };
+    return files.flatMap((file) => {
+      const markers = markersByFileId[file.id] || [];
+      return markers.map((marker, index) => ({
+        id: `${file.id}-${index}-${marker.startLineNumber}-${marker.startColumn}-${marker.message}`,
+        fileId: file.id,
+        fileName: file.name,
+        filePath: file._fsPath,
+        severity: severityMap[marker.severity] || "info",
+        message: marker.message,
+        line: marker.startLineNumber,
+        column: marker.startColumn,
+        endLine: marker.endLineNumber,
+        endColumn: marker.endColumn,
+        source: marker.source,
+        code: typeof marker.code === "string" ? marker.code : marker.code?.value,
+      }));
+    });
+  }, [files, markersByFileId]);
 
   useEffect(() => { activeFileIdRef.current = activeFileId; }, [activeFileId]);
+
+  useEffect(() => {
+    const pending = pendingProblemSelectionRef.current;
+    if (!pending || pending.fileId !== activeFileId) return;
+    const editor = editorByFileIdRef.current[pending.fileId];
+    if (!editor) return;
+    const position = { lineNumber: pending.line, column: pending.column };
+    requestAnimationFrame(() => {
+      editor.revealPositionInCenter(position);
+      editor.setPosition(position);
+      editor.focus();
+      pendingProblemSelectionRef.current = null;
+    });
+  }, [activeFileId]);
 
   // Keep browser pages under one top-level editor tab and focus it when a child tab is added.
   const prevBrowserCount = useRef(0);
@@ -154,6 +213,33 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     }));
   }, []);
 
+  const updateProblemMarkers = useCallback((fileId: string, markers: readonly MarkerSnapshot[]) => {
+    setMarkersByFileId((prev) => ({
+      ...prev,
+      [fileId]: [...markers],
+    }));
+  }, []);
+
+  const handleSelectProblem = useCallback((problem: ProblemEntry) => {
+    pendingProblemSelectionRef.current = {
+      fileId: problem.fileId,
+      line: problem.line,
+      column: problem.column,
+    };
+    setActiveFileId(problem.fileId);
+
+    const editor = editorByFileIdRef.current[problem.fileId];
+    if (editor && activeFileIdRef.current === problem.fileId) {
+      const position = { lineNumber: problem.line, column: problem.column };
+      requestAnimationFrame(() => {
+        editor.revealPositionInCenter(position);
+        editor.setPosition(position);
+        editor.focus();
+        pendingProblemSelectionRef.current = null;
+      });
+    }
+  }, []);
+
   const addFile = useCallback(() => {
     const name = prompt("File name (e.g. utils.js):");
     if (!name) return;
@@ -165,6 +251,15 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
       onCloseBrowser();
       if (activeFileIdRef.current === id) setActiveFileId(files[0]?.id || "");
       return;
+    }
+    setMarkersByFileId((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+    delete editorByFileIdRef.current[id];
+    if (pendingProblemSelectionRef.current?.fileId === id) {
+      pendingProblemSelectionRef.current = null;
     }
     setFiles((prev) => {
       const idx = prev.findIndex((f) => f.id === id);
@@ -323,6 +418,10 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
                 <Editor
                   height="100%" language={f.language} theme="vs-dark"
                   value={f.content} onChange={(val) => updateFile(f.id, val || "")}
+                  onMount={(editor) => {
+                    editorByFileIdRef.current[f.id] = editor as EditorViewHandle;
+                  }}
+                  onValidate={(markers) => updateProblemMarkers(f.id, markers)}
                   options={{ minimap: { enabled: false }, fontSize: 13, wordWrap: "on", scrollBeyondLastLine: false, automaticLayout: true, tabSize: 2, lineNumbers: "on", renderWhitespace: "selection" }}
                 />
               </div>
@@ -344,6 +443,8 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
                 onClearDebugEntries={onClearDebugEntries}
                 outputEntries={outputEntries}
                 onClearOutputEntries={onClearOutputEntries}
+                problemEntries={problemEntries}
+                onSelectProblem={handleSelectProblem}
               />
             </div>
           </>

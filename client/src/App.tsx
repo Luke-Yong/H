@@ -279,6 +279,18 @@ export default function App() {
   // Resizable console pane (width from right edge)
   const { size: consoleW, onMouseDown: onConsoleDrag } = useResizable(320, 200, 800, true);
 
+  const ensureTerminalVisible = useCallback((restart: boolean) => {
+    reopenTerminal.current = true;
+    if (restart && termVisibleRef.current) {
+      setTermVisible(false);
+      setTimeout(() => {
+        if (reopenTerminal.current) setTermVisible(true);
+      }, 100);
+      return;
+    }
+    setTermVisible(true);
+  }, []);
+
   const detectProject = useCallback(async (basePath: string) => {
     try {
       const res = await fetch(`/api/project/detect?path=${encodeURIComponent(basePath)}`);
@@ -292,8 +304,8 @@ export default function App() {
   }, []);
 
   const openFolder = useCallback(async (folderPath: string) => {
-    const wasOpen = termVisibleRef.current;
-    if (wasOpen) setTermVisible(false);
+    const shouldRestartTerminal = termVisibleRef.current;
+    if (shouldRestartTerminal) setTermVisible(false);
     try {
       const res = await fetch(`/api/fs/list?path=${encodeURIComponent(folderPath)}`);
       const data = await res.json();
@@ -301,13 +313,10 @@ export default function App() {
       setFsRoot(data.entries || []);
       setFsBasePath(data.path);
       isBrowserFs.current = false;
-      detectProject(data.path);
-      if (wasOpen) {
-        reopenTerminal.current = true;
-        setTimeout(() => { if (reopenTerminal.current) setTermVisible(true); }, 100);
-      }
+      await detectProject(data.path);
+      ensureTerminalVisible(shouldRestartTerminal);
     } catch (err) { alert(`Failed to open folder: ${err}`); }
-  }, [detectProject]);
+  }, [detectProject, ensureTerminalVisible]);
 
   const openFolderImmediate = useCallback(async () => {
     const desktop = window.harnessDesktop;
@@ -330,7 +339,8 @@ export default function App() {
     isBrowserFs.current = true;
     setProjectVenvDir("");
     setProjectActivateScript("");
-  }, [openFolder]);
+    ensureTerminalVisible(false);
+  }, [ensureTerminalVisible, openFolder]);
 
   const createProject = useCallback(async (dir: string) => {
     try {
@@ -348,18 +358,32 @@ export default function App() {
     } catch (err) { alert(`Failed to create project: ${err}`); }
   }, [detectProject]);
 
+  const refreshFs = useCallback(async () => {
+    if (isBrowserFs.current || !fsBasePath) return;
+    try { const res = await fetch(`/api/fs/list?path=${encodeURIComponent(fsBasePath)}`); const data = await res.json(); setFsRoot(data.entries || []); }
+    catch { /* ignore */ }
+  }, [fsBasePath]);
+
   const createNewFile = useCallback(async (name: string) => {
     if (!fsBasePath) return;
     const filePath = fsBasePath + (fsBasePath.includes("/") ? "/" : "\\") + name;
-    try { await fetch("/api/fs/create-file", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: filePath, content: "" }) }); await refreshFs(); }
+    try {
+      await fetch("/api/fs/create-file", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: filePath, content: "" }),
+      });
+      await refreshFs();
+      ensureTerminalVisible(false);
+    }
     catch (err) { alert(`Failed to create file: ${err}`); }
-  }, [fsBasePath]);
+  }, [ensureTerminalVisible, fsBasePath, refreshFs]);
 
   const openFileByPath = useCallback(async (filePath: string) => {
     try {
       const dirPath = filePath.replace(/[/\\][^/\\]+$/, "");
-      const wasOpen = termVisibleRef.current;
-      if (dirPath && dirPath !== fsBasePath && wasOpen) setTermVisible(false);
+      const shouldRestartTerminal = !!(dirPath && dirPath !== fsBasePath && termVisibleRef.current);
+      if (shouldRestartTerminal) setTermVisible(false);
       const res = await fetch(`/api/fs/read?path=${encodeURIComponent(filePath)}`);
       const data = await res.json();
       if (data.error) throw new Error(data.error);
@@ -371,15 +395,12 @@ export default function App() {
           setFsRoot(listData.entries || []);
           setFsBasePath(listData.path || dirPath);
           isBrowserFs.current = false;
-          detectProject(listData.path || dirPath);
-          if (wasOpen) {
-            reopenTerminal.current = true;
-            setTimeout(() => { if (reopenTerminal.current) setTermVisible(true); }, 100);
-          }
+          await detectProject(listData.path || dirPath);
         }
       }
+      ensureTerminalVisible(shouldRestartTerminal);
     } catch (err) { alert(`Failed to open file: ${err}`); }
-  }, [detectProject, fsBasePath]);
+  }, [detectProject, ensureTerminalVisible, fsBasePath]);
 
   const openFileImmediate = useCallback(async () => {
     const desktop = window.harnessDesktop;
@@ -401,13 +422,8 @@ export default function App() {
     const files = editorRef.current?.getFiles() || [];
     const last = files[files.length - 1];
     if (last) last._fsHandle = picked.handle;
-  }, [openFileByPath]);
-
-  const refreshFs = useCallback(async () => {
-    if (isBrowserFs.current || !fsBasePath) return;
-    try { const res = await fetch(`/api/fs/list?path=${encodeURIComponent(fsBasePath)}`); const data = await res.json(); setFsRoot(data.entries || []); }
-    catch { /* ignore */ }
-  }, [fsBasePath]);
+    ensureTerminalVisible(false);
+  }, [ensureTerminalVisible, openFileByPath]);
 
   const handleRun = useCallback(() => {
     const code = editorRef.current?.getCode();
@@ -435,7 +451,7 @@ export default function App() {
           const files = editorRef.current?.getFiles(); if (files) for (const f of files) { if (f._fsPath) fetch("/api/fs/write", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: f._fsPath, content: f.content }) }).catch(() => {}); }
         }},
         "---" as const,
-        { label: "Close Folder", shortcut: "Ctrl+K F", action: () => { setFsRoot(null); setFsBasePath(""); isBrowserFs.current = false; setProjectVenvDir(""); setProjectActivateScript(""); setTermVisible(false); } },
+        { label: "Close Folder", shortcut: "Ctrl+K F", action: () => { setFsRoot(null); setFsBasePath(""); isBrowserFs.current = false; setProjectVenvDir(""); setProjectActivateScript(""); handleBrowserClose(); setTermVisible(false); } },
       ],
     },
     {

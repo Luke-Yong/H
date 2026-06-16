@@ -1,4 +1,4 @@
-import { useRef, useCallback, useState, useEffect } from "react";
+import { useRef, useCallback, useState, useEffect, useLayoutEffect } from "react";
 
 interface BrowserTab {
   id: string;
@@ -24,6 +24,34 @@ interface Permissions {
   midi: boolean;
   autoplay: boolean;
 }
+
+interface ViewportPreset {
+  id: string;
+  label: string;
+  width: number;
+  height: number;
+}
+
+const VIEWPORT_PRESETS: ViewportPreset[] = [
+  { id: "desktop-hd", label: "Laptop 1280 x 800", width: 1280, height: 800 },
+  { id: "desktop-wide", label: "Desktop 1440 x 900", width: 1440, height: 900 },
+  { id: "desktop-fullhd", label: "Full HD 1920 x 1080", width: 1920, height: 1080 },
+  { id: "desktop-qhd", label: "QHD 2560 x 1440", width: 2560, height: 1440 },
+  { id: "desktop-4k", label: "4K 3840 x 2160", width: 3840, height: 2160 },
+  { id: "phone-iphone-17-pro-max", label: "iPhone 17 Pro Max 440 x 956", width: 440, height: 956 },
+  { id: "phone-iphone-17-pro", label: "iPhone 17 Pro 402 x 874", width: 402, height: 874 },
+  { id: "phone-iphone-16-pro-max", label: "iPhone 16 Pro Max 430 x 932", width: 430, height: 932 },
+  { id: "phone-iphone-16-pro", label: "iPhone 16 Pro 393 x 852", width: 393, height: 852 },
+  { id: "phone-iphone-16", label: "iPhone 16 390 x 844", width: 390, height: 844 },
+  { id: "phone-s25-ultra", label: "Galaxy S25 Ultra 412 x 891", width: 412, height: 891 },
+  { id: "phone-s25", label: "Galaxy S25 360 x 780", width: 360, height: 780 },
+  { id: "phone-mate70-pro", label: "Mate 70 Pro 412 x 891", width: 412, height: 891 },
+  { id: "fold-zfold6-cover", label: "Z Fold 6 Cover 323 x 792", width: 323, height: 792 },
+  { id: "fold-zfold6-main", label: "Z Fold 6 Unfolded 720 x 619", width: 720, height: 619 },
+  { id: "fold-zflip6", label: "Z Flip 6 393 x 960", width: 393, height: 960 },
+  { id: "fold-matex6-cover", label: "Mate X6 Cover 412 x 915", width: 412, height: 915 },
+  { id: "fold-matex6-main", label: "Mate X6 Unfolded 747 x 813", width: 747, height: 813 },
+];
 
 type BrowserGuest = HTMLElement & {
   src?: string;
@@ -77,24 +105,6 @@ function supportsGeolocation(url: string): boolean {
   }
 }
 
-function reportDebug(hypothesisId: string, location: string, msg: string, data: Record<string, unknown>) {
-  // #region debug-point A:browser-report
-  fetch("http://127.0.0.1:7777/event", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      sessionId: "desktop-browser-crash",
-      runId: "post-fix",
-      hypothesisId,
-      location,
-      msg: `[DEBUG] ${msg}`,
-      data,
-      ts: Date.now(),
-    }),
-  }).catch(() => {});
-  // #endregion
-}
-
 export default function BrowserView({
   tabs,
   activeTabId,
@@ -109,6 +119,7 @@ export default function BrowserView({
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const webviewRef = useRef<BrowserGuest | null>(null);
   const webviewReadyRef = useRef(false);
+  const stageRef = useRef<HTMLDivElement>(null);
   const activeTab = tabs.find((tab) => tab.id === activeTabId) || tabs[0] || null;
   const tabId = activeTab?.id || "";
   const url = activeTab?.url || "";
@@ -118,11 +129,16 @@ export default function BrowserView({
   const [inputUrl, setInputUrl] = useState(url);
   const [secure, setSecure] = useState(false);
   const [statusOpen, setStatusOpen] = useState(false);
+  const [viewportOpen, setViewportOpen] = useState(false);
   const [canGoBack, setCanGoBack] = useState(false);
   const [canGoForward, setCanGoForward] = useState(false);
+  const [viewportWidth, setViewportWidth] = useState(1920);
+  const [viewportHeight, setViewportHeight] = useState(1080);
+  const [viewportPresetId, setViewportPresetId] = useState("desktop-fullhd");
   const [perms, setPerms] = useState<Permissions>({
     geolocation: false, camera: false, microphone: false, midi: false, autoplay: true,
   });
+  const [viewportScale, setViewportScale] = useState(0.5);
 
   // Track actual iframe location (independently from prop, for same-origin nav)
   const liveUrlRef = useRef(url);
@@ -143,40 +159,17 @@ export default function BrowserView({
     webviewRef.current = node as BrowserGuest | null;
   }, []);
 
+
+
   const syncDesktopState = useCallback((reason: string) => {
     const view = webviewRef.current;
-    // #region debug-point A:sync-enter
-    reportDebug("A", "BrowserView.tsx:syncDesktopState", "enter syncDesktopState", {
-      tabId,
-      hasView: !!view,
-      isDesktop,
-      reason,
-      liveUrl: liveUrlRef.current,
-    });
-    // #endregion
     if (!view || !tabId) return;
-    if (!webviewReadyRef.current) {
-      // #region debug-point A:sync-skipped-not-ready
-      reportDebug("A", "BrowserView.tsx:syncDesktopState", "skip syncDesktopState before dom-ready", {
-        tabId,
-        reason,
-        liveUrl: liveUrlRef.current,
-      });
-      // #endregion
-      return;
-    }
+    if (!webviewReadyRef.current) return;
 
     let nextUrl = liveUrlRef.current;
     try {
       nextUrl = view.getURL?.() || liveUrlRef.current;
-    } catch (err) {
-      // #region debug-point A:sync-get-url-error
-      reportDebug("A", "BrowserView.tsx:syncDesktopState", "getURL threw", {
-        tabId,
-        reason,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      // #endregion
+    } catch {
       return;
     }
     if (nextUrl && nextUrl !== "about:blank") {
@@ -206,13 +199,6 @@ export default function BrowserView({
     if (!isDesktop) return;
     const view = webviewRef.current;
     webviewReadyRef.current = false;
-    // #region debug-point A:effect-enter
-    reportDebug("A", "BrowserView.tsx:desktopEffect", "desktop effect start", {
-      tabId,
-      hasView: !!view,
-      url,
-    });
-    // #endregion
     if (!view) return;
 
     const onDidFinishLoad = () => syncDesktopState("did-finish-load");
@@ -232,31 +218,10 @@ export default function BrowserView({
     };
     const handleDomReady = () => {
       webviewReadyRef.current = true;
-      // #region debug-point A:dom-ready
-      reportDebug("A", "BrowserView.tsx:dom-ready", "webview dom-ready", {
-        tabId,
-        url,
-      });
-      // #endregion
+      void view.executeJavaScript?.(`(()=>{var m=document.querySelector('meta[name="viewport"]');if(!m){m=document.createElement('meta');m.setAttribute('name','viewport');(document.head||document.documentElement).appendChild(m);}m.setAttribute('content','width=${viewportWidth},height=${viewportHeight},initial-scale=1');})()`, false).catch(()=>{});
       syncDesktopState("dom-ready");
     };
-
-    const handleDidFailLoad = (event: Event) => {
-      const details = event as Event & {
-        errorCode?: number;
-        errorDescription?: string;
-        validatedURL?: string;
-      };
-      // #region debug-point D:did-fail-load
-      reportDebug("D", "BrowserView.tsx:did-fail-load", "webview did-fail-load", {
-        tabId,
-        errorCode: details.errorCode,
-        errorDescription: details.errorDescription,
-        validatedURL: details.validatedURL,
-      });
-      // #endregion
-    };
-
+    const handleDidFailLoad = () => {};
     const handleIpcMessage = (event: Event) => {
       const details = event as Event & {
         channel?: string;
@@ -267,18 +232,7 @@ export default function BrowserView({
         if (popupUrl && popupUrl !== "about:blank") {
           onNewTab?.(popupUrl);
         }
-        return;
       }
-      if (details.channel !== "harness:browserPreloadDebug") return;
-      const payload = (Array.isArray(details.args) ? details.args[0] : null) as
-        | { msg?: string; data?: Record<string, unknown>; ts?: number }
-        | null;
-      // #region debug-point D:browser-preload-ipc
-      reportDebug("D", "BrowserView.tsx:browserPreload", payload?.msg || "browser preload debug", {
-        tabId,
-        ...(payload?.data || {}),
-      });
-      // #endregion
     };
 
     view.addEventListener("dom-ready", handleDomReady);
@@ -289,13 +243,6 @@ export default function BrowserView({
     view.addEventListener("new-window", handleNewWindow);
     view.addEventListener("did-fail-load", handleDidFailLoad);
     view.addEventListener("ipc-message", handleIpcMessage);
-
-    // #region debug-point A:effect-await-dom-ready
-    reportDebug("A", "BrowserView.tsx:desktopEffect", "awaiting dom-ready before sync", {
-      tabId,
-      url,
-    });
-    // #endregion
 
     return () => {
       webviewReadyRef.current = false;
@@ -308,26 +255,41 @@ export default function BrowserView({
       view.removeEventListener("did-fail-load", handleDidFailLoad);
       view.removeEventListener("ipc-message", handleIpcMessage);
     };
-  }, [isDesktop, onNewTab, syncDesktopState, tabId, url]);
+  }, [isDesktop, onNewTab, syncDesktopState, tabId, url, viewportWidth, viewportHeight]);
+
+  // Re-inject viewport meta when preset changes
+  useEffect(() => {
+    if (!isDesktop) return;
+    const view = webviewRef.current;
+    if (!view || !webviewReadyRef.current) return;
+    void view.executeJavaScript?.(`(()=>{var m=document.querySelector('meta[name="viewport"]');if(!m){m=document.createElement('meta');m.setAttribute('name','viewport');(document.head||document.documentElement).appendChild(m);}m.setAttribute('content','width=${viewportWidth},height=${viewportHeight},initial-scale=1');})()`, false).catch(()=>{});
+  }, [isDesktop, viewportWidth, viewportHeight]);
+
+  // Always scale the iframe to fit the container while keeping internal dimensions
+  useLayoutEffect(() => {
+    const stage = stageRef.current;
+    if (!stage) return;
+
+    const updateScale = () => {
+      const rect = stage.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+      const scaleX = rect.width / viewportWidth;
+      const scaleY = rect.height / viewportHeight;
+      const s = Math.max(0.1, Math.min(scaleX, scaleY, 1));
+      setViewportScale(s);
+    };
+
+    updateScale();
+    const observer = new ResizeObserver(updateScale);
+    observer.observe(stage);
+    return () => observer.disconnect();
+  }, [viewportWidth, viewportHeight]);
 
   useEffect(() => {
     if (!isDesktop) return;
     const origin = getOrigin(currentUrl);
     if (!origin) return;
-    // #region debug-point D:set-site-permissions
-    reportDebug("D", "BrowserView.tsx:setSitePermissions", "push site permissions to desktop bridge", {
-      origin,
-      perms,
-    });
-    // #endregion
-    void window.harnessDesktop?.setSitePermissions?.(origin, { ...perms }).then((ok) => {
-      // #region debug-point D:set-site-permissions-result
-      reportDebug("D", "BrowserView.tsx:setSitePermissions", "desktop bridge site permissions result", {
-        origin,
-        ok: !!ok,
-      });
-      // #endregion
-    }).catch(() => {});
+    void window.harnessDesktop?.setSitePermissions?.(origin, { ...perms }).catch(() => {});
   }, [currentUrl, isDesktop, perms]);
 
   // Called by the iframe's onLoad to read title/URL + patch window.open + _blank
@@ -338,6 +300,18 @@ export default function BrowserView({
     try {
       const doc = iframe.contentDocument;
       if (doc) {
+        try {
+          const head = doc.head || doc.documentElement;
+          if (head) {
+            let meta = doc.querySelector('meta[name="viewport"]');
+            if (!meta) {
+              meta = doc.createElement("meta");
+              meta.setAttribute("name", "viewport");
+              head.appendChild(meta);
+            }
+            meta.setAttribute("content", `width=${viewportWidth},height=${viewportHeight},initial-scale=1`);
+          }
+        } catch {}
         const newUrl = doc.location?.href;
         if (newUrl && newUrl !== "about:blank" && newUrl !== liveUrlRef.current) {
           liveUrlRef.current = newUrl;
@@ -387,10 +361,13 @@ export default function BrowserView({
     } catch { /* cross-origin — silently ignored */ }
     setCanGoBack(true);
     setCanGoForward(true);
-  }, [isDesktop, onNewTab, onTitleChange, onUrlChange, tabId]);
+  }, [isDesktop, onNewTab, onTitleChange, onUrlChange, tabId, viewportWidth, viewportHeight, viewportPresetId]);
 
   // Close dropdown when clicking the backdrop
-  const closeStatus = useCallback(() => setStatusOpen(false), []);
+  const closeOverlays = useCallback(() => {
+    setStatusOpen(false);
+    setViewportOpen(false);
+  }, []);
 
   // Build allow attribute from permissions
   const allowAttr = [
@@ -451,20 +428,19 @@ export default function BrowserView({
     if (e.key === "Enter") navigate();
   }, [navigate]);
 
+  const setViewportPreset = useCallback((presetId: string) => {
+    const preset = VIEWPORT_PRESETS.find((p) => p.id === presetId);
+    if (!preset) return;
+    setViewportPresetId(preset.id);
+    setViewportWidth(preset.width);
+    setViewportHeight(preset.height);
+  }, []);
+
+  const selectedPreset = VIEWPORT_PRESETS.find((p) => p.id === viewportPresetId) || VIEWPORT_PRESETS[0];
+
   const togglePerm = useCallback((key: keyof Permissions) => {
-    setPerms((prev) => {
-      const next = { ...prev, [key]: !prev[key] };
-      // #region debug-point D:toggle-permission
-      reportDebug("D", "BrowserView.tsx:togglePerm", "toggle site permission", {
-        tabId,
-        key,
-        enabled: next[key],
-        currentUrl,
-      });
-      // #endregion
-      return next;
-    });
-  }, [currentUrl, isDesktop, tabId]);
+    setPerms((prev) => ({ ...prev, [key]: !prev[key] }));
+  }, []);
 
   const geolocationNeedsSecureContext = perms.geolocation && currentUrl && !supportsGeolocation(currentUrl);
   const desktopSrc = navTabId === tabId ? navUrl : url;
@@ -534,35 +510,103 @@ export default function BrowserView({
           )}
         </div>
         <button className="browser-btn browser-btn-go" onClick={navigate}>Go</button>
+        <span className="browser-viewport-dims">{viewportWidth} x {viewportHeight}</span>
+        <div className="browser-viewport-settings">
+          <button
+            className={`browser-btn${viewportOpen ? " active" : ""}`}
+            onClick={() => {
+              setViewportOpen((open) => !open);
+              setStatusOpen(false);
+            }}
+            title="Viewport settings"
+          >
+            ⚙
+          </button>
+          {viewportOpen && (
+            <div className="browser-viewport-dropdown">
+              <div className="browser-status-section">
+                <div className="browser-status-summary">Viewport</div>
+                <div className="browser-status-url">{selectedPreset.label}</div>
+              </div>
+              <div className="browser-status-perms">
+                <div className="browser-status-label">Preset</div>
+                <select
+                  className="browser-viewport-select"
+                  value={viewportPresetId}
+                  onChange={(e) => setViewportPreset(e.target.value)}
+                >
+                  <optgroup label="Desktop">
+                    {VIEWPORT_PRESETS.filter((p) => p.id.startsWith("desktop-")).map((p) => (
+                      <option key={p.id} value={p.id}>{p.label}</option>
+                    ))}
+                  </optgroup>
+                  <optgroup label="iPhone">
+                    {VIEWPORT_PRESETS.filter((p) => p.id.startsWith("phone-iphone-")).map((p) => (
+                      <option key={p.id} value={p.id}>{p.label}</option>
+                    ))}
+                  </optgroup>
+                  <optgroup label="Samsung">
+                    {VIEWPORT_PRESETS.filter((p) => p.id.startsWith("phone-s")).map((p) => (
+                      <option key={p.id} value={p.id}>{p.label}</option>
+                    ))}
+                  </optgroup>
+                  <optgroup label="Huawei">
+                    {VIEWPORT_PRESETS.filter((p) => p.id.startsWith("phone-mate")).map((p) => (
+                      <option key={p.id} value={p.id}>{p.label}</option>
+                    ))}
+                  </optgroup>
+                  <optgroup label="Foldables">
+                    {VIEWPORT_PRESETS.filter((p) => p.id.startsWith("fold-")).map((p) => (
+                      <option key={p.id} value={p.id}>{p.label}</option>
+                    ))}
+                  </optgroup>
+                </select>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
       {/* Backdrop: clicking anywhere outside the dropdown closes it */}
-      {statusOpen && <div className="browser-status-backdrop" onClick={closeStatus} />}
+      {(statusOpen || viewportOpen) && <div className="browser-status-backdrop" onClick={closeOverlays} />}
       {!tabId ? (
         <div className="browser-placeholder">
           Open a browser tab to begin.
         </div>
       ) : currentUrl ? (
-        isDesktop ? (
-          <webview
-            ref={handleWebviewRef}
-            key={tabId}
-            className="browser-iframe"
-            src={desktopSrc}
-            preload={window.harnessDesktop?.browserPreloadUrl}
-            partition="harness-browser"
-            allowpopups={true}
-          />
-        ) : (
-          <iframe
-            ref={iframeRef}
-            key={`${tabId}-${perms.geolocation}-${perms.camera}-${perms.microphone}`}
-            className="browser-iframe"
-            src={currentUrl}
-            allow={allowAttr}
-            sandbox={sandboxAttr}
-            onLoad={handleIframeLoad}
-          />
-        )
+        <div
+          ref={stageRef}
+          className="browser-viewport-stage"
+        >
+          <div
+            className="browser-viewport-frame"
+            style={{
+              width: `${Math.round(viewportWidth * viewportScale)}px`,
+              height: `${Math.round(viewportHeight * viewportScale)}px`,
+            }}
+          >
+            {isDesktop ? (
+              <webview
+                ref={handleWebviewRef}
+                key={tabId}
+                src={desktopSrc}
+                preload={window.harnessDesktop?.browserPreloadUrl}
+                partition="harness-browser"
+                allowpopups={true}
+                style={{ width: "100%", height: "100%" }}
+              />
+            ) : (
+              <iframe
+                ref={iframeRef}
+                key={`${tabId}-${perms.geolocation}-${perms.camera}-${perms.microphone}`}
+                src={currentUrl}
+                allow={allowAttr}
+                sandbox={sandboxAttr}
+                onLoad={handleIframeLoad}
+                style={{ width: "100%", height: "100%", border: "none" }}
+              />
+            )}
+          </div>
+        </div>
       ) : (
         <div className="browser-placeholder">
           Enter a URL or search query in the address bar above.
