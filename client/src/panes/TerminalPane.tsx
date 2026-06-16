@@ -32,6 +32,8 @@ interface TermInstance {
   currentPromptMarker?: IMarker;
   lastCommandMarker?: IMarker;
   promptMarkers: Array<{ id: number; marker: IMarker; kind: "idle" | "success" | "error" }>;
+  commandMarkerIds: number[];
+  commandNavIndex: number;
   writeChain: Promise<void>;
 }
 
@@ -106,6 +108,8 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
   const termsRef = useRef<Map<string, TermInstance>>(new Map());
   const pendingOutputRef = useRef<Map<string, string[]>>(new Map()); // buffer output before xterm is ready
   const [gutterVersion, setGutterVersion] = useState(0);
+  const [moreOpen, setMoreOpen] = useState(false);
+  const moreRef = useRef<HTMLDivElement | null>(null);
   const onDetectUrlRef = useRef(onDetectUrl);
   const groupKeyRef = useRef("");
   const openedOnceRef = useRef(false);
@@ -137,6 +141,38 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
   const defaultShellLabel = useMemo(() => getDefaultShellLabel(), []);
   // Current active group's members displayed in the grid
   const activeGroupMembers = terminalGroups[activeGroupIndex] || [];
+
+  const getNextSelectionAfterRemoval = useCallback((removedId: string) => {
+    const groups = terminalGroupsRef.current
+      .map((g) => g.filter((x) => x !== removedId))
+      .filter((g) => g.length > 0);
+    const allLeft = termIdsRef.current.filter((x) => x !== removedId);
+    if (groups.length === 0) {
+      return { groups, nextGroupIndex: 0, nextActiveId: allLeft[0] || "" };
+    }
+
+    const currentGroup = terminalGroupsRef.current[activeGroupIndexRef.current] || [];
+    const removedFromActiveGroup = currentGroup.includes(removedId);
+    let nextGroupIndex = activeGroupIndexRef.current;
+
+    if (removedFromActiveGroup) {
+      nextGroupIndex = Math.min(activeGroupIndexRef.current, groups.length - 1);
+    } else {
+      const removedGroupIndex = terminalGroupsRef.current.findIndex((g) => g.includes(removedId));
+      if (removedGroupIndex >= 0 && removedGroupIndex < activeGroupIndexRef.current) {
+        nextGroupIndex = Math.max(0, activeGroupIndexRef.current - 1);
+      } else {
+        nextGroupIndex = Math.min(activeGroupIndexRef.current, groups.length - 1);
+      }
+    }
+
+    const nextGroup = groups[nextGroupIndex] || [];
+    const nextActiveId = removedFromActiveGroup
+      ? (nextGroup[0] || allLeft[0] || "")
+      : (nextGroup.includes(activeIdRef.current) ? activeIdRef.current : (nextGroup[0] || allLeft[0] || ""));
+
+    return { groups, nextGroupIndex, nextActiveId };
+  }, []);
 
   // Keep ref in sync for the WS effect (which must NOT re-run on activeId changes)
   useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
@@ -191,9 +227,24 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
     if (next.length) inst.term.write(next);
   }, []);
 
+  const bumpGutter = useCallback(() => {
+    setGutterVersion((v) => v + 1);
+  }, []);
+
+  const ensurePromptMarker = useCallback((inst: TermInstance) => {
+    const existing = inst.currentPromptMarker;
+    if (existing && existing.line >= 0) return existing;
+    const marker = inst.term.registerMarker(0);
+    if (!marker) return undefined;
+    inst.currentPromptMarker = marker;
+    inst.promptMarkers = [...inst.promptMarkers, { id: marker.id, marker, kind: "idle" }];
+    bumpGutter();
+    return marker;
+  }, [bumpGutter]);
+
   const runLine = useCallback((inst: TermInstance) => {
     const line = inst.input;
-    inst.term.write("\r\n");
+    ensurePromptMarker(inst);
     if (line.trim().length) {
       if (inst.history[inst.history.length - 1] !== line) inst.history.push(line);
       saveHistory(inst.historyKey, inst.history);
@@ -201,19 +252,39 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
     inst.historyIndex = inst.history.length;
     inst.input = "";
     inst.cursor = 0;
+    inst.term.write("\r\n");
     sendToServer(inst.id, `${line}\r\n`);
     if (inst.backend === "pipe") {
       inst.commandRunning = true;
       inst.commandSawError = false;
       inst.lastCommandMarker = inst.currentPromptMarker;
+      const m = inst.lastCommandMarker;
+      if (m && (inst.commandMarkerIds.length === 0 || inst.commandMarkerIds[inst.commandMarkerIds.length - 1] !== m.id)) {
+        inst.commandMarkerIds = [...inst.commandMarkerIds, m.id];
+      }
+      inst.commandNavIndex = inst.commandMarkerIds.length;
       const label = getCommandLabel(line);
       if (label) setLabelById((prev) => ({ ...prev, [inst.id]: label }));
     }
-  }, [saveHistory, sendToServer]);
+  }, [ensurePromptMarker, saveHistory, sendToServer]);
 
-  const bumpGutter = useCallback(() => {
-    setGutterVersion((v) => v + 1);
-  }, []);
+  useEffect(() => {
+    if (!moreOpen) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node | null;
+      if (t && moreRef.current?.contains(t)) return;
+      setMoreOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMoreOpen(false);
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [moreOpen]);
 
   const setCommandDecorationKind = useCallback((inst: TermInstance, marker: IMarker | undefined, kind: "idle" | "success" | "error") => {
     if (!marker) return;
@@ -237,7 +308,7 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
 
   const writeWithPromptHandling = useCallback((inst: TermInstance, chunk: string) => {
     inst.writeChain = inst.writeChain.then(async () => {
-      const promptRe = /(^|\r?\n|\r)((?:\x1b\[[0-9;?]*[ -/]*[@-~])*)(PS [^\r\n]*?> ?)/g;
+      const promptRe = /(^|\r?\n|\r)((?:\x1b\[[0-9;?]*[ -/]*[@-~])*)(?:\([^)\r\n]*\)\s*)?(PS [^\r\n]*?> ?)/g;
       let last = 0;
       let match: RegExpExecArray | null;
       let matchCount = 0;
@@ -297,9 +368,15 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
   const handleInput = useCallback((inst: TermInstance, data: string) => {
     if (inst.backend === "pty") {
       if (data === "\r") {
+        ensurePromptMarker(inst);
         inst.commandRunning = true;
         inst.commandSawError = false;
         inst.lastCommandMarker = inst.currentPromptMarker;
+        const m = inst.lastCommandMarker;
+        if (m && (inst.commandMarkerIds.length === 0 || inst.commandMarkerIds[inst.commandMarkerIds.length - 1] !== m.id)) {
+          inst.commandMarkerIds = [...inst.commandMarkerIds, m.id];
+        }
+        inst.commandNavIndex = inst.commandMarkerIds.length;
       }
       sendToServer(inst.id, data);
       return;
@@ -390,7 +467,7 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
     if (data.startsWith("\x1b")) return;
 
     insertAtCursor(inst, data);
-  }, [handlePasteText, insertAtCursor, runLine, sendToServer, setInputLine]);
+  }, [ensurePromptMarker, handlePasteText, insertAtCursor, runLine, sendToServer, setInputLine]);
 
   const createTerminal = useCallback((id: string, container: HTMLDivElement, backend: "pty" | "pipe") => {
     const term = new Terminal({
@@ -432,6 +509,8 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
       commandRunning: false,
       commandSawError: false,
       promptMarkers: [],
+      commandMarkerIds: [],
+      commandNavIndex: -1,
       writeChain: Promise.resolve(),
     };
 
@@ -509,7 +588,7 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
     if (buffered) {
       pendingOutputRef.current.delete(id);
       for (const chunk of buffered) {
-        if (inst.commandRunning && /error|exception|failed|not recognized|cannot/i.test(chunk)) {
+        if (inst.commandRunning && /error|exception|failed|not recognized|cannot|categoryinfo|fullyqualifiederrorid|itemnotfoundexception/i.test(chunk)) {
           inst.commandSawError = true;
         }
         writeWithPromptHandling(inst, chunk);
@@ -572,10 +651,10 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
         const output = rest.slice(idx + 1);
         const clean = output
           .replace(/\x7f/g, "\x08")
-          .replace(/(?<!\x1b)\[(?=[0-9?;]*[A-Za-z@])/g, "\x1b[");
+          .replace(/(?<!\x1b)\[(?=[0-9?;]+[A-Za-z@])/g, "\x1b[");
         const inst = termsRef.current.get(id);
         if (inst) {
-          if (inst.commandRunning && /error|exception|failed|not recognized|cannot/i.test(clean)) {
+          if (inst.commandRunning && /error|exception|failed|not recognized|cannot|categoryinfo|fullyqualifiederrorid|itemnotfoundexception/i.test(clean)) {
             inst.commandSawError = true;
           }
           writeWithPromptHandling(inst, clean);
@@ -603,14 +682,10 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
         const inst = termsRef.current.get(id);
         inst?.term.writeln(`\r\n[Process exited code=${code}]`);
         setTermIds((prev) => prev.filter((x) => x !== id));
-        setTerminalGroups((prev) => prev.map((g) => g.filter((x) => x !== id)).filter((g) => g.length > 0));
-        if (activeIdRef.current === id) {
-          const groups = terminalGroupsRef.current.map((g) => g.filter((x) => x !== id)).filter((g) => g.length > 0);
-          const gi = Math.min(activeGroupIndexRef.current, groups.length - 1);
-          const members = gi >= 0 ? (groups[gi] || []) : [];
-          const allLeft = termIdsRef.current.filter((x) => x !== id);
-          setActiveId(members[0] || allLeft[0] || "");
-        }
+        const nextSelection = getNextSelectionAfterRemoval(id);
+        setTerminalGroups(nextSelection.groups);
+        setActiveGroupIndex(nextSelection.nextGroupIndex);
+        setActiveId(nextSelection.nextActiveId);
         setLabelById((labels) => {
           const { [id]: _, ...rest } = labels;
           return rest;
@@ -725,14 +800,10 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
       wsRef.current.send(`term:kill:${id}`);
     }
     setTermIds((prev) => prev.filter((x) => x !== id));
-    setTerminalGroups((prev) => prev.map((g) => g.filter((x) => x !== id)).filter((g) => g.length > 0));
-    if (activeIdRef.current === id) {
-      const groups = terminalGroupsRef.current.map((g) => g.filter((x) => x !== id)).filter((g) => g.length > 0);
-      const gi = Math.min(activeGroupIndexRef.current, groups.length - 1);
-      const members = gi >= 0 ? (groups[gi] || []) : [];
-      const allLeft = termIdsRef.current.filter((x) => x !== id);
-      setActiveId(members[0] || allLeft[0] || "");
-    }
+    const nextSelection = getNextSelectionAfterRemoval(id);
+    setTerminalGroups(nextSelection.groups);
+    setActiveGroupIndex(nextSelection.nextGroupIndex);
+    setActiveId(nextSelection.nextActiveId);
     setLabelById((labels) => {
       const { [id]: _, ...rest } = labels;
       return rest;
@@ -742,7 +813,7 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
     if (nextAll.length === 0 && openedOnceRef.current) {
       setTimeout(() => onClose(), 0);
     }
-  }, [onClose]);
+  }, [getNextSelectionAfterRemoval, onClose]);
 
   // Auto-open one terminal when pane becomes visible
   useEffect(() => {
@@ -802,6 +873,73 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
       });
   };
 
+  const getCommandLines = useCallback((inst: TermInstance): number[] => {
+    const lines: number[] = [];
+    for (const mid of inst.commandMarkerIds) {
+      const entry = inst.promptMarkers.find((e) => e.marker.id === mid);
+      const line = entry?.marker.line ?? -1;
+      if (line >= 0) lines.push(line);
+    }
+    lines.sort((a, b) => a - b);
+    const uniq: number[] = [];
+    for (const ln of lines) {
+      if (uniq.length === 0 || uniq[uniq.length - 1] !== ln) uniq.push(ln);
+    }
+    return uniq;
+  }, []);
+
+  const scrollToPrevCommand = useCallback(() => {
+    const inst = termsRef.current.get(activeIdRef.current);
+    if (!inst) return;
+    const top = inst.term.buffer.active.viewportY;
+    const bottom = top + Math.max(0, inst.term.rows - 1);
+    const lines = getCommandLines(inst);
+    if (!lines.length) return;
+    const maxIdxInView = (() => {
+      let idx = -1;
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i] <= bottom) idx = i;
+        else break;
+      }
+      return idx;
+    })();
+    if (maxIdxInView < 0) return;
+
+    let nextIdx = inst.commandNavIndex;
+    if (nextIdx < 0 || nextIdx > maxIdxInView) nextIdx = maxIdxInView;
+    else nextIdx = Math.max(0, nextIdx - 1);
+
+    inst.commandNavIndex = nextIdx;
+    inst.term.scrollToLine(lines[nextIdx]);
+    bumpGutter();
+  }, [bumpGutter, getCommandLines]);
+
+  const scrollToNextCommand = useCallback(() => {
+    const inst = termsRef.current.get(activeIdRef.current);
+    if (!inst) return;
+    const top = inst.term.buffer.active.viewportY;
+    const bottom = top + Math.max(0, inst.term.rows - 1);
+    const lines = getCommandLines(inst);
+    if (!lines.length) return;
+    const maxIdxInView = (() => {
+      let idx = -1;
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i] <= bottom) idx = i;
+        else break;
+      }
+      return idx;
+    })();
+
+    let nextIdx = inst.commandNavIndex;
+    if (nextIdx < 0) nextIdx = maxIdxInView;
+    if (nextIdx >= lines.length - 1) return;
+    nextIdx = nextIdx + 1;
+
+    inst.commandNavIndex = nextIdx;
+    inst.term.scrollToLine(lines[nextIdx]);
+    bumpGutter();
+  }, [bumpGutter, getCommandLines]);
+
   return (
     <div className="terminal-pane">
       <div className="pane-header terminal-pane-header">
@@ -819,6 +957,31 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
         <div className="terminal-header-actions">
           {activeCategory === "terminal" && (
             <>
+              <div className="terminal-more" ref={moreRef}>
+                <button
+                  className="terminal-instance-btn terminal-header-btn"
+                  onClick={() => setMoreOpen((v) => !v)}
+                  title="More actions"
+                >
+                  ⋯
+                </button>
+                {moreOpen && (
+                  <div className="terminal-more-menu" role="menu">
+                    <button
+                      className="terminal-more-item"
+                      onClick={() => { scrollToPrevCommand(); setMoreOpen(false); }}
+                    >
+                      Scroll to previous command
+                    </button>
+                    <button
+                      className="terminal-more-item"
+                      onClick={() => { scrollToNextCommand(); setMoreOpen(false); }}
+                    >
+                      Scroll to next command
+                    </button>
+                  </div>
+                )}
+              </div>
               {sidebarCollapsed && activeId && (
                 <button className="terminal-instance-btn terminal-header-btn" onClick={() => createSplitTerminal(activeId)} title="Split terminal">
                   <SplitIcon />

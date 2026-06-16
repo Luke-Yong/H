@@ -717,11 +717,13 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 6px;
-  overflow: hidden;
+  overflow: visible;
   text-transform: none;
   font-weight: normal;
   padding: 4px 8px;
   flex-shrink: 0;
+  position: relative;
+  z-index: 1200;
 }
 
 .terminal-header-actions {
@@ -729,6 +731,43 @@ body {
   align-items: center;
   gap: 2px;
   flex-shrink: 0;
+}
+
+.terminal-more {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.terminal-more-menu {
+  position: absolute;
+  right: 0;
+  top: 24px;
+  min-width: 220px;
+  background: #2d2d2d;
+  border: 1px solid #454545;
+  border-radius: 6px;
+  padding: 6px;
+  z-index: 2200;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.terminal-more-item {
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 1px solid transparent;
+  color: var(--text);
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.terminal-more-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.08);
 }
 
 /* left: category tabs */
@@ -955,12 +994,12 @@ body {
   flex: 1;
   min-width: 0;
   position: relative;
-  overflow: visible;
+  overflow: hidden;
 }
 
-.terminal-screen-host .xterm,
-.terminal-screen-host .xterm-screen {
-  overflow: visible;
+body.resizing iframe.browser-iframe,
+body.resizing webview.browser-iframe {
+  pointer-events: none;
 }
 
 .terminal-gutter-marker {
