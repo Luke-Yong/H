@@ -46,19 +46,30 @@ interface Props {
   onDetectUrl?: (sessionId: string, url: string) => void;
   debugEntries?: DebugConsoleEntry[];
   onClearDebugEntries?: () => void;
+  outputEntries?: OutputEntry[];
+  onClearOutputEntries?: () => void;
 }
 
 type Category = "problems" | "output" | "debugConsole" | "terminal";
 type DebugSource = DebugConsoleEntry["source"];
 type DebugLevel = DebugConsoleEntry["level"];
+type OutputKind = OutputEntry["kind"];
 
 const DEBUG_SOURCES: DebugSource[] = ["app", "runtime", "server"];
 const DEBUG_LEVELS: DebugLevel[] = ["log", "info", "warn", "error"];
+const OUTPUT_KINDS: OutputKind[] = ["log", "action", "dom", "result", "error", "assistant", "code", "screenshot"];
 
 export interface DebugConsoleEntry {
   id: string;
   level: "log" | "info" | "warn" | "error";
   source: "app" | "runtime" | "server";
+  text: string;
+  time: number;
+}
+
+export interface OutputEntry {
+  id: string;
+  kind: "log" | "action" | "dom" | "result" | "error" | "assistant" | "code" | "screenshot";
   text: string;
   time: number;
 }
@@ -116,7 +127,18 @@ function TrashIcon() {
   );
 }
 
-export default function TerminalPane({ visible, onClose, cwd, venvDir, activateScript, onDetectUrl, debugEntries = [], onClearDebugEntries }: Props) {
+export default function TerminalPane({
+  visible,
+  onClose,
+  cwd,
+  venvDir,
+  activateScript,
+  onDetectUrl,
+  debugEntries = [],
+  onClearDebugEntries,
+  outputEntries = [],
+  onClearOutputEntries,
+}: Props) {
   const panelRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
@@ -156,6 +178,16 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
     warn: true,
     error: true,
   });
+  const [outputKindFilters, setOutputKindFilters] = useState<Record<OutputKind, boolean>>({
+    log: true,
+    action: true,
+    dom: false,
+    result: true,
+    error: true,
+    assistant: true,
+    code: true,
+    screenshot: false,
+  });
   const { size: sidebarWidth, onMouseDown: onSidebarResize } = useResizable(164, 44, 280, true);
   const sidebarCollapsed = sidebarWidth <= 72;
 
@@ -168,6 +200,10 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
   const filteredDebugEntries = useMemo(
     () => debugEntries.filter((entry) => debugSourceFilters[entry.source] && debugLevelFilters[entry.level]),
     [debugEntries, debugLevelFilters, debugSourceFilters]
+  );
+  const filteredOutputEntries = useMemo(
+    () => outputEntries.filter((entry) => outputKindFilters[entry.kind]),
+    [outputEntries, outputKindFilters]
   );
   // Current active group's members displayed in the grid
   const activeGroupMembers = terminalGroups[activeGroupIndex] || [];
@@ -215,6 +251,23 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
   const resetDebugFilters = useCallback(() => {
     setDebugSourceFilters({ app: true, runtime: true, server: true });
     setDebugLevelFilters({ log: true, info: true, warn: true, error: true });
+  }, []);
+
+  const toggleOutputKindFilter = useCallback((kind: OutputKind) => {
+    setOutputKindFilters((prev) => ({ ...prev, [kind]: !prev[kind] }));
+  }, []);
+
+  const resetOutputFilters = useCallback(() => {
+    setOutputKindFilters({
+      log: true,
+      action: true,
+      dom: false,
+      result: true,
+      error: true,
+      assistant: true,
+      code: true,
+      screenshot: false,
+    });
   }, []);
 
   // Keep ref in sync for the WS effect (which must NOT re-run on activeId changes)
@@ -1042,6 +1095,11 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
               <TrashIcon />
             </button>
           )}
+          {activeCategory === "output" && onClearOutputEntries && (
+            <button className="terminal-instance-btn terminal-header-btn" onClick={onClearOutputEntries} title="Clear output">
+              <TrashIcon />
+            </button>
+          )}
           {activeCategory === "terminal" && (
             <button className="terminal-instance-btn terminal-header-btn" onClick={() => { setActiveCategory("terminal"); addTerminal(); }} title="New terminal">
               <span style={{ fontSize: 14, lineHeight: 1 }}>+</span>
@@ -1140,7 +1198,42 @@ export default function TerminalPane({ visible, onClose, cwd, venvDir, activateS
       {activeCategory !== "terminal" && (
         <div className={`terminal-placeholder${activeCategory === "debugConsole" ? " terminal-debug-console" : ""}`}>
           {activeCategory === "problems" && "No problems detected."}
-          {activeCategory === "output" && "No output."}
+          {activeCategory === "output" && (
+            <div className="debug-console-panel">
+              <div className="debug-console-toolbar">
+                <div className="debug-console-filter-group">
+                  <span className="debug-console-filter-label">Channel</span>
+                  {OUTPUT_KINDS.map((kind) => (
+                    <button
+                      key={kind}
+                      className={`debug-console-filter-chip debug-console-filter-chip-output${outputKindFilters[kind] ? " active" : ""}`}
+                      onClick={() => toggleOutputKindFilter(kind)}
+                    >
+                      {kind}
+                    </button>
+                  ))}
+                </div>
+                <button className="debug-console-reset" onClick={resetOutputFilters}>
+                  Reset Filters
+                </button>
+              </div>
+              {outputEntries.length === 0 ? (
+                <div className="debug-console-empty">No output.</div>
+              ) : filteredOutputEntries.length === 0 ? (
+                <div className="debug-console-empty">No output matches the current filters.</div>
+              ) : (
+                <div className="debug-console-list">
+                  {filteredOutputEntries.map((entry) => (
+                    <div key={entry.id} className={`debug-console-entry debug-console-entry-${entry.kind === "error" ? "error" : entry.kind === "result" ? "info" : "log"}`}>
+                      <span className="debug-console-time">{new Date(entry.time).toLocaleTimeString()}</span>
+                      <span className={`debug-console-badge debug-console-badge-output debug-console-badge-output-${entry.kind}`}>{entry.kind}</span>
+                      <span className="debug-console-text">{entry.text}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           {activeCategory === "debugConsole" && (
             <div className="debug-console-panel">
               <div className="debug-console-toolbar">

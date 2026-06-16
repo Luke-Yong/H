@@ -5,7 +5,7 @@ import MenuBar from "./panes/MenuBar";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { useResizable, ResizeHandle } from "./hooks/useResizable";
 import type { FsEntry } from "./panes/FilesPanel";
-import type { DebugConsoleEntry } from "./panes/TerminalPane";
+import type { DebugConsoleEntry, OutputEntry } from "./panes/TerminalPane";
 import { pickAndEnumerateFolder, pickAndReadFile } from "./panes/browserFs";
 
 interface BrowserTab {
@@ -58,7 +58,9 @@ export default function App() {
   const editorRef = useRef<EditorPaneHandle>(null);
   const { connected, events, runTest } = useWebSocket();
   const [debugEntries, setDebugEntries] = useState<DebugConsoleEntry[]>([]);
+  const [outputEntries, setOutputEntries] = useState<OutputEntry[]>([]);
   const debugIdRef = useRef(0);
+  const outputIdRef = useRef(0);
   const wsEventCountRef = useRef(0);
 
   const [fsRoot, setFsRoot] = useState<FsEntry[] | null>(null);
@@ -156,6 +158,20 @@ export default function App() {
     setDebugEntries([]);
   }, []);
 
+  const appendOutputEntry = useCallback((entry: Omit<OutputEntry, "id" | "time"> & { time?: number }) => {
+    const next: OutputEntry = {
+      id: `out-${++outputIdRef.current}`,
+      time: entry.time ?? Date.now(),
+      kind: entry.kind,
+      text: entry.text,
+    };
+    setOutputEntries((prev) => [...prev.slice(-399), next]);
+  }, []);
+
+  const clearOutputEntries = useCallback(() => {
+    setOutputEntries([]);
+  }, []);
+
   useEffect(() => {
     if (events.length <= wsEventCountRef.current) return;
     for (const event of events.slice(wsEventCountRef.current)) {
@@ -175,9 +191,22 @@ export default function App() {
         }
       }
       appendDebugEntry({ level, source: "server", text: `${event.type}: ${text}` });
+
+      const outputText =
+        event.type === "action"
+          ? `${(event.data as { action: string; index: number; text?: string }).action} [${(event.data as { index: number }).index}]${(event.data as { text?: string }).text ? ` "${(event.data as { text: string }).text}"` : ""}`
+          : event.type === "result"
+            ? `${(event.data as { verdict: string }).verdict.toUpperCase()}: ${(event.data as { message: string }).message}`
+            : event.type === "dom"
+              ? String(event.data).slice(0, 2000)
+              : event.type === "assistant"
+                ? `AI: ${String(event.data).slice(0, 500)}`
+                : String(event.data);
+
+      appendOutputEntry({ kind: event.type, text: outputText });
     }
     wsEventCountRef.current = events.length;
-  }, [appendDebugEntry, events]);
+  }, [appendDebugEntry, appendOutputEntry, events]);
 
   useEffect(() => {
     const stringifyArgs = (args: unknown[]) => args.map((arg) => {
@@ -480,6 +509,8 @@ export default function App() {
             onDetectUrl={handleDetectUrl}
             debugEntries={debugEntries}
             onClearDebugEntries={clearDebugEntries}
+            outputEntries={outputEntries}
+            onClearOutputEntries={clearOutputEntries}
           />
         </div>
 

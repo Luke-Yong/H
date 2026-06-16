@@ -2,7 +2,7 @@ import { useState, forwardRef, useImperativeHandle, useCallback, useEffect, useR
 import Editor from "@monaco-editor/react";
 import FilesPanel from "./FilesPanel";
 import BrowserView from "./BrowserView";
-import TerminalPane, { type DebugConsoleEntry } from "./TerminalPane";
+import TerminalPane, { type DebugConsoleEntry, type OutputEntry } from "./TerminalPane";
 import { VFile, createFile, detectLanguage } from "./fileModel";
 import { readFileFromHandle, writeFileToHandle } from "./browserFs";
 import { useResizable, ResizeHandle } from "../hooks/useResizable";
@@ -46,6 +46,8 @@ interface Props {
   onDetectUrl?: (sessionId: string, url: string) => void;
   debugEntries?: DebugConsoleEntry[];
   onClearDebugEntries?: () => void;
+  outputEntries?: OutputEntry[];
+  onClearOutputEntries?: () => void;
 }
 
 const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
@@ -53,7 +55,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     onActiveBrowserTabChange, onCloseBrowser, onBrowserTabClose, onAddBrowserTab,
     onBrowserTabUpdateLabel, onBrowserTabUpdateUrl, onBrowserNewTabFromLink,
     onOpenFolder, onCreateProject, onCreateFile, onOpenFile, onRefreshFs,
-    terminalVisible, onCloseTerminal, onDetectUrl, debugEntries, onClearDebugEntries }, ref
+    terminalVisible, onCloseTerminal, onDetectUrl, debugEntries, onClearDebugEntries, outputEntries, onClearOutputEntries }, ref
 ) {
   const [files, setFiles] = useState<VFile[]>([]);
   const [activeFileId, setActiveFileId] = useState<string>("");
@@ -340,6 +342,8 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
                 onDetectUrl={onDetectUrl}
                 debugEntries={debugEntries}
                 onClearDebugEntries={onClearDebugEntries}
+                outputEntries={outputEntries}
+                onClearOutputEntries={onClearOutputEntries}
               />
             </div>
           </>

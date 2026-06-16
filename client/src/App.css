@@ -1121,6 +1121,50 @@ body {
   color: #b5cea8;
 }
 
+.debug-console-badge-output {
+  background: rgba(255, 255, 255, 0.08);
+  color: #d4d4d4;
+}
+
+.debug-console-badge-output-log {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.debug-console-badge-output-action {
+  background: rgba(55, 148, 255, 0.16);
+  color: #9cdcfe;
+}
+
+.debug-console-badge-output-dom {
+  background: rgba(255, 204, 0, 0.16);
+  color: #dcdcaa;
+}
+
+.debug-console-badge-output-result {
+  background: rgba(106, 153, 85, 0.18);
+  color: #b5cea8;
+}
+
+.debug-console-badge-output-error {
+  background: rgba(244, 71, 71, 0.16);
+  color: #f48771;
+}
+
+.debug-console-badge-output-assistant {
+  background: rgba(188, 140, 255, 0.16);
+  color: #d7b8ff;
+}
+
+.debug-console-badge-output-code {
+  background: rgba(0, 204, 153, 0.16);
+  color: #7ee7c4;
+}
+
+.debug-console-badge-output-screenshot {
+  background: rgba(255, 153, 0, 0.16);
+  color: #ffd089;
+}
+
 .debug-console-text {
   white-space: pre-wrap;
   word-break: break-word;
