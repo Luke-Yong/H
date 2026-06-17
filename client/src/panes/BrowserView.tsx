@@ -1,4 +1,4 @@
-import { useRef, useCallback, useState, useEffect, useLayoutEffect } from "react";
+import { useRef, useCallback, useState, useEffect, useLayoutEffect, useMemo } from "react";
 
 interface BrowserTab {
   id: string;
@@ -120,7 +120,31 @@ export default function BrowserView({
   const webviewRef = useRef<BrowserGuest | null>(null);
   const webviewReadyRef = useRef(false);
   const stageRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const inputFocusedRef = useRef(false);
   const activeTab = tabs.find((tab) => tab.id === activeTabId) || tabs[0] || null;
+
+  // ── Browser reverse proxy (makes localhost apps same-origin) ──
+  const proxyOriginRef = useRef<string | null>(null);
+  const PROXY_PREFIX = window.location.origin + "/_browser";
+
+  // Convert a real URL to the proxy URL used as the iframe src
+  const toProxySrc = useCallback((real: string): string => {
+    if (!proxyOriginRef.current) return real;
+    if (real.startsWith(proxyOriginRef.current)) {
+      return PROXY_PREFIX + real.slice(proxyOriginRef.current.length);
+    }
+    return real;
+  }, []);
+
+  // Convert a proxy URL read from the iframe back to the real URL for display
+  const fromProxySrc = useCallback((proxy: string): string => {
+    if (!proxyOriginRef.current) return proxy;
+    if (proxy.startsWith(PROXY_PREFIX)) {
+      return proxyOriginRef.current + proxy.slice(PROXY_PREFIX.length);
+    }
+    return proxy;
+  }, []);
   const tabId = activeTab?.id || "";
   const url = activeTab?.url || "";
   const [navTabId, setNavTabId] = useState(tabId);
@@ -143,28 +167,155 @@ export default function BrowserView({
   // Track actual iframe location (independently from prop, for same-origin nav)
   const liveUrlRef = useRef(url);
 
+  // ── Iframe browser state sync (mirrors desktop syncDesktopState pattern) ──
+  // Unified sync for URL, title, and navigation state — used by polling, load events, and history hooks
+  const syncIframeState = useCallback(() => {
+    const ifr = iframeRef.current;
+    if (!ifr || !tabId) return;
+
+    // getURL – read current href from iframe's contentDocument (now same-origin via proxy)
+    let nextUrl: string | undefined;
+    try {
+      const raw = ifr.contentDocument?.location?.href;
+      if (raw) nextUrl = fromProxySrc(raw);
+    } catch {
+      return;
+    }
+    if (!nextUrl || nextUrl === "about:blank") return;
+
+    if (nextUrl !== liveUrlRef.current) {
+      liveUrlRef.current = nextUrl;
+      setCurrentUrl(nextUrl);
+      setInputUrl(nextUrl);
+      setSecure(isHttps(nextUrl));
+      onUrlChange?.(tabId, nextUrl);
+    }
+
+    // getTitle
+    try {
+      const t = ifr.contentDocument?.title;
+      if (t) onTitleChange?.(tabId, t);
+    } catch {}
+
+    // canGoBack / canGoForward
+    try {
+      setCanGoBack((ifr.contentWindow?.history?.length ?? 0) > 1);
+    } catch {}
+  }, [tabId, onUrlChange, onTitleChange]);
+
+  // Ref-based accessor for history hooks to avoid stale closures
+  const syncIframeStateRef = useRef(syncIframeState);
+  syncIframeStateRef.current = syncIframeState;
+
+  // Sync inputUrl whenever the actual URL changes, unless the user is actively editing
+  useEffect(() => {
+    if (!inputFocusedRef.current) {
+      setInputUrl(currentUrl);
+    }
+  }, [currentUrl]);
+
   // Sync the displayed URL when the prop changes (new tab, detected URL, etc.)
   useEffect(() => {
-    // Keep the address bar in sync with parent state, but do not re-drive the
-    // guest src for SPA route changes that originated inside the webview.
     setNavTabId(tabId);
     setNavUrl(url);
     setCurrentUrl(url);
     setInputUrl(url);
     setSecure(isHttps(url));
     liveUrlRef.current = url;
-  }, [tabId, url]);
+
+    // Auto-register proxy for localhost URLs set externally (e.g., terminal detection)
+    if (!isDesktop && url && /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?/i.test(url)) {
+      const nextOrigin = new URL(url).origin;
+      if (proxyOriginRef.current !== nextOrigin) {
+        proxyOriginRef.current = nextOrigin;
+        fetch("/api/browser-proxy", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url }),
+        }).catch(() => {});
+      }
+    }
+  }, [tabId, url, isDesktop]);
 
   const handleWebviewRef = useCallback((node: HTMLElement | null) => {
     webviewRef.current = node as BrowserGuest | null;
+    if (node) {
+      node.setAttribute("allowpopups", "");
+    }
   }, []);
+
+  // Set up iframe load listener + polling (native events, not React synthetic)
+  const setupIframe = useCallback((iframe: HTMLIFrameElement) => {
+    (iframeRef as any).current = iframe;
+    if (!iframe) return;
+    iframe.addEventListener("load", syncIframeState);
+    const poll = setInterval(syncIframeState, 300);
+    if (iframe.contentDocument) {
+      try { syncIframeState(); } catch {}
+    }
+    (iframe as any).__hc = () => {
+      iframe.removeEventListener("load", syncIframeState);
+      clearInterval(poll);
+    };
+  }, [syncIframeState]);
+
+  // Inject viewport meta + history hooks into the iframe on every load
+  const injectIntoIframe = useCallback((iframe: HTMLIFrameElement) => {
+    try {
+      const doc = iframe.contentDocument;
+      if (!doc) return;
+      // viewport meta
+      const head = doc.head || doc.documentElement;
+      if (head) {
+        let meta: HTMLMetaElement | null = doc.querySelector('meta[name="viewport"]');
+        if (!meta) { meta = doc.createElement("meta"); meta.setAttribute("name","viewport"); head.appendChild(meta); }
+        meta.setAttribute("content", `width=${viewportWidth},height=${viewportHeight},initial-scale=1`);
+      }
+      // Layer 4: intercept pushState / replaceState
+      // Layer 1: popstate / hashchange native events
+      // Layer 3: click capture — detect <a> navigation
+      const win = iframe.contentWindow as any;
+      if (!win) return;
+      if (!win.__harnessPatched) {
+        win.__harnessPatched = true;
+        const patch = (orig: Function) => function(this: any, ...args: any[]) {
+          orig.apply(this, args as any);
+          syncIframeStateRef.current();
+        };
+        win.history.pushState = patch(win.history.pushState);
+        win.history.replaceState = patch(win.history.replaceState);
+        win.addEventListener("popstate", syncIframeStateRef.current);
+        win.addEventListener("hashchange", syncIframeStateRef.current);
+        doc.addEventListener("click", (e: MouseEvent) => {
+          const a = (e.target as Element).closest("a");
+          if (a && (a as HTMLAnchorElement).href && !(a as HTMLAnchorElement).target && (a as HTMLAnchorElement).origin === win.location.origin) {
+            syncIframeStateRef.current();
+          }
+        }, true);
+      }
+      syncIframeStateRef.current();
+    } catch {}
+  }, [viewportWidth, viewportHeight]);
+
+  // On every iframe load (React synthetic), inject hooks
+  const iframeLoadHandler = useCallback((e: React.SyntheticEvent<HTMLIFrameElement>) => {
+    injectIntoIframe(e.currentTarget);
+  }, [injectIntoIframe]);
+
+  // Cleanup when iframe detaches
+  useEffect(() => {
+    return () => {
+      const ifr = iframeRef.current;
+      if (ifr && (ifr as any).__hc) (ifr as any).__hc();
+    };
+  }, []);
+
 
 
 
   const syncDesktopState = useCallback((reason: string) => {
     const view = webviewRef.current;
     if (!view || !tabId) return;
-    if (!webviewReadyRef.current) return;
 
     let nextUrl = liveUrlRef.current;
     try {
@@ -172,7 +323,9 @@ export default function BrowserView({
     } catch {
       return;
     }
-    if (nextUrl && nextUrl !== "about:blank") {
+    if (!nextUrl || nextUrl === "about:blank") return;
+
+    if (nextUrl !== liveUrlRef.current) {
       liveUrlRef.current = nextUrl;
       setCurrentUrl(nextUrl);
       setInputUrl(nextUrl);
@@ -195,13 +348,41 @@ export default function BrowserView({
     } catch {}
   }, [onTitleChange, onUrlChange, tabId, isDesktop]);
 
+  // Viewport meta injection for desktop webview
+  // URL detection is handled by IPC events (did-navigate, did-navigate-in-page) + 300ms polling
+  const DESKTOP_INJECT_CODE = useMemo(() => String.raw`
+    (()=>{
+      var m=document.querySelector('meta[name="viewport"]');
+      if(!m){m=document.createElement('meta');m.setAttribute('name','viewport');(document.head||document.documentElement).appendChild(m);}
+      m.setAttribute('content','width=${viewportWidth},height=${viewportHeight},initial-scale=1');
+    })()
+  `, [viewportWidth, viewportHeight]);
+
+  // Ref for onNewTab to avoid re-triggering the webview effect when browserTabs changes
+  const onNewTabRef = useRef(onNewTab);
+  onNewTabRef.current = onNewTab;
+
   useEffect(() => {
     if (!isDesktop) return;
     const view = webviewRef.current;
-    webviewReadyRef.current = false;
     if (!view) return;
 
-    const onDidFinishLoad = () => syncDesktopState("did-finish-load");
+    // If webview is already loaded (dom-ready fired before effect), sync immediately
+    try {
+      const existing = view.getURL?.();
+      if (existing && existing !== "about:blank") {
+        syncDesktopState("initial");
+      }
+    } catch {}
+
+    // ── Event listeners ──
+    const onDidFinishLoad = () => {
+      syncDesktopState("did-finish-load");
+      // Re-inject detection JS on every full page load (JS context is wiped)
+      if (webviewReadyRef.current) {
+        void view.executeJavaScript?.(DESKTOP_INJECT_CODE, false).catch(() => {});
+      }
+    };
     const onDidNavigate = () => syncDesktopState("did-navigate");
     const onDidNavigateInPage = () => syncDesktopState("did-navigate-in-page");
     const onPageTitleUpdated = () => syncDesktopState("page-title-updated");
@@ -214,12 +395,12 @@ export default function BrowserView({
       const popupUrl = details.url || details.detail?.url || "";
       if (!popupUrl || popupUrl === "about:blank") return;
       details.preventDefault?.();
-      onNewTab?.(popupUrl);
+      onNewTabRef.current?.(popupUrl);
     };
     const handleDomReady = () => {
       webviewReadyRef.current = true;
-      void view.executeJavaScript?.(`(()=>{var m=document.querySelector('meta[name="viewport"]');if(!m){m=document.createElement('meta');m.setAttribute('name','viewport');(document.head||document.documentElement).appendChild(m);}m.setAttribute('content','width=${viewportWidth},height=${viewportHeight},initial-scale=1');})()`, false).catch(()=>{});
       syncDesktopState("dom-ready");
+      void view.executeJavaScript?.(DESKTOP_INJECT_CODE, false).catch(() => {});
     };
     const handleDidFailLoad = () => {};
     const handleIpcMessage = (event: Event) => {
@@ -230,7 +411,7 @@ export default function BrowserView({
       if (details.channel === "harness:browserOpenUrl") {
         const popupUrl = typeof details.args?.[0] === "string" ? details.args[0] : "";
         if (popupUrl && popupUrl !== "about:blank") {
-          onNewTab?.(popupUrl);
+          onNewTabRef.current?.(popupUrl);
         }
       }
     };
@@ -244,8 +425,14 @@ export default function BrowserView({
     view.addEventListener("did-fail-load", handleDidFailLoad);
     view.addEventListener("ipc-message", handleIpcMessage);
 
+    // ── Polling fallback ──
+    // Events cover most navigations, but polling catches redirects, meta-refresh,
+    // missed dom-ready, and any other URL changes that slip through events.
+    const poll = setInterval(() => syncDesktopState("poll"), 300);
+
     return () => {
       webviewReadyRef.current = false;
+      clearInterval(poll);
       view.removeEventListener("dom-ready", handleDomReady);
       view.removeEventListener("did-finish-load", onDidFinishLoad);
       view.removeEventListener("did-navigate", onDidNavigate);
@@ -255,14 +442,14 @@ export default function BrowserView({
       view.removeEventListener("did-fail-load", handleDidFailLoad);
       view.removeEventListener("ipc-message", handleIpcMessage);
     };
-  }, [isDesktop, onNewTab, syncDesktopState, tabId, url, viewportWidth, viewportHeight]);
+  }, [isDesktop, syncDesktopState, tabId, viewportWidth, viewportHeight]);
 
-  // Re-inject viewport meta when preset changes
+  // Re-inject viewport meta when preset changes (only if webview is ready)
   useEffect(() => {
     if (!isDesktop) return;
     const view = webviewRef.current;
     if (!view || !webviewReadyRef.current) return;
-    void view.executeJavaScript?.(`(()=>{var m=document.querySelector('meta[name="viewport"]');if(!m){m=document.createElement('meta');m.setAttribute('name','viewport');(document.head||document.documentElement).appendChild(m);}m.setAttribute('content','width=${viewportWidth},height=${viewportHeight},initial-scale=1');})()`, false).catch(()=>{});
+    void view.executeJavaScript?.(DESKTOP_INJECT_CODE, false).catch(() => {});
   }, [isDesktop, viewportWidth, viewportHeight]);
 
   // Always scale the iframe to fit the container while keeping internal dimensions
@@ -291,77 +478,6 @@ export default function BrowserView({
     if (!origin) return;
     void window.harnessDesktop?.setSitePermissions?.(origin, { ...perms }).catch(() => {});
   }, [currentUrl, isDesktop, perms]);
-
-  // Called by the iframe's onLoad to read title/URL + patch window.open + _blank
-  const handleIframeLoad = useCallback(() => {
-    if (isDesktop) return;
-    const iframe = iframeRef.current;
-    if (!iframe || !tabId) return;
-    try {
-      const doc = iframe.contentDocument;
-      if (doc) {
-        try {
-          const head = doc.head || doc.documentElement;
-          if (head) {
-            let meta = doc.querySelector('meta[name="viewport"]');
-            if (!meta) {
-              meta = doc.createElement("meta");
-              meta.setAttribute("name", "viewport");
-              head.appendChild(meta);
-            }
-            meta.setAttribute("content", `width=${viewportWidth},height=${viewportHeight},initial-scale=1`);
-          }
-        } catch {}
-        const newUrl = doc.location?.href;
-        if (newUrl && newUrl !== "about:blank" && newUrl !== liveUrlRef.current) {
-          liveUrlRef.current = newUrl;
-          setCurrentUrl(newUrl);
-          setInputUrl(newUrl);
-          setSecure(isHttps(newUrl));
-          onUrlChange?.(tabId, newUrl);
-        }
-        const title = doc.title;
-        if (title) onTitleChange?.(tabId, title);
-
-        // Intercept window.open
-        const win = iframe.contentWindow as any;
-        if (win && !win.__harnessOpenPatched) {
-          win.__harnessOpenPatched = true;
-          const origOpen = win.open;
-          win.open = (...args: any[]) => {
-            const targetUrl = typeof args[0] === "string" ? args[0] : "";
-            if (targetUrl && targetUrl !== "about:blank") {
-              onNewTab?.(targetUrl);
-              return null;
-            }
-            return origOpen ? origOpen.apply(win, args) : null;
-          };
-        }
-
-        // Intercept target="_blank" (only once per document)
-        if (!(doc as any).__harnessBlankPatched) {
-          (doc as any).__harnessBlankPatched = true;
-          doc.addEventListener("click", (e: MouseEvent) => {
-            let el = e.target as HTMLElement | null;
-            while (el) {
-              if (el.tagName === "A" && el.getAttribute("target") === "_blank") {
-                const href = el.getAttribute("href");
-                if (href && !href.startsWith("javascript:")) {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  onNewTab?.(new URL(href, doc.baseURI).href);
-                  return;
-                }
-              }
-              el = el.parentElement;
-            }
-          }, true);
-        }
-      }
-    } catch { /* cross-origin — silently ignored */ }
-    setCanGoBack(true);
-    setCanGoForward(true);
-  }, [isDesktop, onNewTab, onTitleChange, onUrlChange, tabId, viewportWidth, viewportHeight, viewportPresetId]);
 
   // Close dropdown when clicking the backdrop
   const closeOverlays = useCallback(() => {
@@ -392,13 +508,30 @@ export default function BrowserView({
     } else {
       final = `https://www.bing.com/search?q=${encodeURIComponent(raw)}`;
     }
+
+    // Register reverse proxy for localhost URLs (makes them same-origin)
+    if (!isDesktop && /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?/i.test(final)) {
+      const nextOrigin = new URL(final).origin;
+      if (proxyOriginRef.current !== nextOrigin) {
+        proxyOriginRef.current = nextOrigin;
+        fetch("/api/browser-proxy", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: final }),
+        }).catch(() => {});
+      }
+    } else if (!isDesktop && proxyOriginRef.current) {
+      // Navigating away from proxied app – disable proxy
+      proxyOriginRef.current = null;
+    }
+
     liveUrlRef.current = final;
     setNavUrl(final);
     setCurrentUrl(final);
     setInputUrl(final);
     setSecure(isHttps(final));
     onUrlChange?.(tabId, final);
-  }, [inputUrl, onUrlChange, tabId]);
+  }, [inputUrl, onUrlChange, tabId, isDesktop]);
 
   const refresh = useCallback(() => {
     if (isDesktop) {
@@ -461,8 +594,8 @@ export default function BrowserView({
         <button className="browser-tab browser-tab-add" onClick={onAddTab} title="New browser tab">+</button>
       </div>
       <div className="browser-toolbar">
-        <button className="browser-btn" onClick={goBack} title="Back" disabled={isDesktop && !canGoBack}>◀</button>
-        <button className="browser-btn" onClick={goForward} title="Forward" disabled={isDesktop && !canGoForward}>▶</button>
+        <button className="browser-btn" onClick={goBack} title="Back" disabled={!canGoBack}>◀</button>
+        <button className="browser-btn" onClick={goForward} title="Forward" disabled={!canGoForward}>▶</button>
         <button className="browser-btn" onClick={refresh} title="Refresh">↻</button>
         <div className="browser-url-wrap">
           {currentUrl ? (
@@ -477,10 +610,13 @@ export default function BrowserView({
             <span className="browser-secure-icon-placeholder" />
           )}
           <input
+            ref={inputRef}
             className="browser-url-input"
             value={inputUrl}
             onChange={(e) => setInputUrl(e.target.value)}
             onKeyDown={handleKeyDown}
+            onFocus={() => { inputFocusedRef.current = true; }}
+            onBlur={() => { inputFocusedRef.current = false; }}
             placeholder="Search Bing or enter URL"
             spellCheck={false}
           />
@@ -600,17 +736,16 @@ export default function BrowserView({
                   src={desktopSrc}
                   preload={window.harnessDesktop?.browserPreloadUrl}
                   partition="harness-browser"
-                  allowpopups={true}
                   style={{ width: "100%", height: "100%" }}
                 />
               ) : (
                 <iframe
-                  ref={iframeRef}
+                  ref={setupIframe}
                   key={`${tabId}-${perms.geolocation}-${perms.camera}-${perms.microphone}`}
-                  src={currentUrl}
+                  src={toProxySrc(currentUrl)}
                   allow={allowAttr}
-                  sandbox={sandboxAttr}
-                  onLoad={handleIframeLoad}
+                  sandbox={proxyOriginRef.current ? undefined : sandboxAttr}
+                  onLoad={iframeLoadHandler}
                   style={{ width: "100%", height: "100%", border: "none" }}
                 />
               )}

@@ -82,6 +82,18 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   const pendingProblemSelectionRef = useRef<{ fileId: string; line: number; column: number } | null>(null);
   const { size: filePanelW, onMouseDown: onFilePanelDrag } = useResizable(200, 120, 500);
   const { size: termH, onMouseDown: onTermDrag } = useResizable(220, 80, 600, true);
+  const [sidebarPanel, setSidebarPanel] = useState<string>("");
+  const [sidebarVisible, setSidebarVisible] = useState(true);
+
+  const sidebarItems = [
+    { id: "files", icon: "📁", label: "Explorer", title: "Explorer (Ctrl+Shift+E)" },
+    { id: "search", icon: "🔍", label: "Search", title: "Search (Ctrl+Shift+F)" },
+    { id: "scm", icon: "⎇", label: "Source Control", title: "Source Control (Ctrl+Shift+G)" },
+    { id: "browser", icon: "🌐", label: "Preview", title: "Browser Preview" },
+    { id: "debug", icon: "🐛", label: "Debug", title: "Run and Debug (Ctrl+Shift+D)" },
+    { id: "remote", icon: "⊞", label: "Remote Explorer", title: "Remote Explorer" },
+    { id: "extensions", icon: "🧩", label: "Extensions", title: "Extensions (Ctrl+Shift+X)" },
+  ];
 
   const hasBrowserTabs = browserTabs.length > 0;
   const hasContent = files.length > 0 || (fsRoot && fsRoot.length > 0) || hasBrowserTabs;
@@ -291,6 +303,30 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   if (!hasContent && !terminalVisible) {
     return (
       <div className="ide-layout">
+        <div className="activity-bar">
+          {sidebarItems.map((item) => (
+            <button
+              key={item.id}
+              className={`activity-bar-btn${sidebarPanel === item.id && sidebarVisible ? " active" : ""}`}
+              onClick={() => { if (item.id === "browser" && browserTabs.length === 0) onAddBrowserTab(); setSidebarPanel(item.id); setSidebarVisible(true); }}
+              title={item.title}
+            >
+              {item.icon}
+            </button>
+          ))}
+          <div className="activity-bar-spacer" />
+          <button className="activity-bar-btn" title="Manage">⚙</button>
+        </div>
+        {sidebarVisible && sidebarPanel && sidebarPanel !== "browser" && (
+          <div className="sidebar-placeholder">
+            <div className="sidebar-placeholder-text">{sidebarItems.find((i) => i.id === sidebarPanel)?.label || ""}</div>
+            {sidebarPanel === "search" && <div className="placeholder-sub">Search across files coming soon</div>}
+            {sidebarPanel === "scm" && <div className="placeholder-sub">Source control integration coming soon</div>}
+            {sidebarPanel === "debug" && <div className="placeholder-sub">Debug console coming soon</div>}
+            {sidebarPanel === "remote" && <div className="placeholder-sub">Remote connections coming soon</div>}
+            {sidebarPanel === "extensions" && <div className="placeholder-sub">Extension marketplace coming soon</div>}
+          </div>
+        )}
         <div className="editor-welcome">
           <div className="welcome-logo">Harness</div>
           <div className="welcome-subtitle">AI-Powered Browser Test IDE</div>
@@ -324,21 +360,64 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
 
   return (
     <div className="ide-layout">
-      <FilesPanel
-        files={files}
-        activeFileId={activeFileId}
-        onSelect={setActiveFileId}
-        onAdd={addFile}
-        onDelete={(id) => closeTab(id)}
-        onRename={renameFile}
-        fsRoot={fsRoot}
-        fsBasePath={fsBasePath}
-        onOpenFsFile={openFsFile}
-        onOpenFsFolder={onOpenFolder}
-        onRefreshFs={onRefreshFs}
-        width={filePanelW}
-      />
-      <ResizeHandle onMouseDown={onFilePanelDrag} />
+      <div className="activity-bar">
+        {sidebarItems.map((item) => (
+          <button
+            key={item.id}
+            className={`activity-bar-btn${sidebarPanel === item.id && sidebarVisible ? " active" : ""}`}
+            onClick={() => {
+              if (item.id === sidebarPanel) { setSidebarVisible((v) => !v); return; }
+              setSidebarPanel(item.id);
+              setSidebarVisible(true);
+              if (item.id === "browser" && browserTabs.length === 0) onAddBrowserTab();
+            }}
+            title={item.title}
+          >
+            {item.icon}
+          </button>
+        ))}
+        <div className="activity-bar-spacer" />
+        <button className="activity-bar-btn" title="Manage">⚙</button>
+      </div>
+      {sidebarVisible && sidebarPanel === "files" && (
+        <>
+          <FilesPanel
+            files={files}
+            activeFileId={activeFileId}
+            onSelect={setActiveFileId}
+            onAdd={addFile}
+            onDelete={(id) => closeTab(id)}
+            onRename={renameFile}
+            fsRoot={fsRoot}
+            fsBasePath={fsBasePath}
+            onOpenFsFile={openFsFile}
+            onOpenFsFolder={onOpenFolder}
+            onRefreshFs={onRefreshFs}
+            width={filePanelW}
+          />
+          <ResizeHandle onMouseDown={onFilePanelDrag} />
+        </>
+      )}
+      {sidebarVisible && sidebarPanel !== "files" && sidebarPanel !== "browser" && (
+        <div className="sidebar-placeholder">
+          <div className="sidebar-placeholder-text">{sidebarItems.find((i) => i.id === sidebarPanel)?.label || ""}</div>
+          {sidebarPanel === "search" && (
+            <div className="placeholder-sub">Search across files coming soon</div>
+          )}
+          {sidebarPanel === "scm" && (
+            <div className="placeholder-sub">Source control integration coming soon</div>
+          )}
+          {sidebarPanel === "debug" && (
+            <div className="placeholder-sub">Debug console coming soon</div>
+          )}
+          {sidebarPanel === "remote" && (
+            <div className="placeholder-sub">Remote connections coming soon</div>
+          )}
+          {sidebarPanel === "extensions" && (
+            <div className="placeholder-sub">Extension marketplace coming soon</div>
+          )}
+        </div>
+      )}
       <div className="ide-editor-area">
         <div className="editor-tabs">
           {files.length === 0 && !hasBrowserTabs && (

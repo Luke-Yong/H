@@ -1,6 +1,8 @@
 import "dotenv/config";
 import express from "express";
 import { createServer } from "http";
+import http from "http";
+import https from "https";
 import { WebSocketServer, WebSocket } from "ws";
 import { launchBrowser, closeBrowser } from "./browser";
 import { runLoop, LoopConfig, LoopEvent } from "./loop";
@@ -202,10 +204,68 @@ app.get("/api/health", (_req, res) => {
 const clientDist = path.resolve(process.cwd(), "client", "dist");
 if (process.env.HARNESS_SERVE_CLIENT === "1" && fs.existsSync(path.join(clientDist, "index.html"))) {
   app.use(express.static(clientDist));
-  app.get(/^\/(?!api\/|ws\/?).*/, (_req, res) => {
+  app.get(/^\/(?!api\/|ws\/?|_browser\/?).*/, (_req, res) => {
     res.sendFile(path.join(clientDist, "index.html"));
   });
 }
+
+// ── Browser reverse proxy (makes localhost apps same-origin with Harness IDE) ──
+let browserProxyTarget: string | null = null;
+
+app.post("/api/browser-proxy", (req, res) => {
+  const { url } = req.body;
+  if (!url) return res.status(400).json({ error: "url required" });
+  try {
+    const parsed = new URL(url);
+    browserProxyTarget = parsed.origin;
+    console.log(`[BrowserProxy] Target set to ${browserProxyTarget}`);
+    res.json({ ok: true, proxyUrl: "/_browser" });
+  } catch {
+    res.status(400).json({ error: "Invalid URL" });
+  }
+});
+
+app.delete("/api/browser-proxy", (_req, res) => {
+  browserProxyTarget = null;
+  res.json({ ok: true });
+});
+
+// Reverse proxy middleware – forwards /_browser/* to the registered target
+app.use("/_browser", (req, res) => {
+  if (!browserProxyTarget) {
+    return res.status(404).send("No browser proxy target configured");
+  }
+
+  const targetUrl = browserProxyTarget + req.url;
+  const parsed = new URL(targetUrl);
+  const client = parsed.protocol === "https:" ? https : http;
+
+  const proxyReq = client.request(
+    targetUrl,
+    {
+      method: req.method,
+      headers: {
+        ...req.headers,
+        host: parsed.host,
+      },
+    },
+    (proxyRes) => {
+      // Strip restrictive headers so the iframe is allowed to embed
+      const headers = { ...proxyRes.headers };
+      delete headers["x-frame-options"];
+      delete headers["content-security-policy"];
+      res.writeHead(proxyRes.statusCode || 200, headers);
+      proxyRes.pipe(res);
+    }
+  );
+
+  proxyReq.on("error", (err) => {
+    console.error(`[BrowserProxy] Error: ${err.message}`);
+    if (!res.headersSent) res.status(502).send("Proxy error");
+  });
+
+  req.pipe(proxyReq);
+});
 
 // ── WebSocket ──
 wss.on("connection", (ws) => {

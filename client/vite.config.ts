@@ -11,6 +11,7 @@ export default defineConfig({
         target: "ws://localhost:3001",
         ws: true,
       },
+      "/_browser": "http://localhost:3001",
     },
   },
 });
