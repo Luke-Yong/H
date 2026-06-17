@@ -254,6 +254,21 @@ export function writeToSession(groupKey: string, sessionId: string, data: string
     s.pty?.write(data);
     return;
   }
+  // Pipe backend: \x03 (Ctrl+C) doesn't work through stdin on any OS.
+  // On Unix, send SIGINT; on Windows, kill the process (TerminateProcess).
+  if (data === "\x03") {
+    if (isWin) {
+      s.proc?.kill();
+    } else {
+      s.proc?.kill("SIGINT");
+    }
+    return;
+  }
+  // Pipe backend: \x04 (Ctrl+D / EOF) — close stdin to signal end of input
+  if (data === "\x04") {
+    s.proc?.stdin?.end();
+    return;
+  }
   if (s.proc?.stdin?.writable) s.proc.stdin.write(data);
 }
 

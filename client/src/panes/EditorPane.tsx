@@ -157,16 +157,16 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     prevBrowserCount.current = browserTabs.length;
   }, [browserTabs, files]);
 
-  // Auto-open files panel when files or folder are loaded
+  // Auto-open files panel when files or folder are loaded (even if browser tabs are open)
   const prevFileCount = useRef(0);
   useEffect(() => {
     const hasFiles = files.length > 0 || (fsRoot && fsRoot.length > 0);
-    if (hasFiles && prevFileCount.current === 0 && !hasBrowserTabs) {
+    if (hasFiles && prevFileCount.current === 0) {
       setSidebarPanel("files");
       setSidebarVisible(true);
     }
     prevFileCount.current = files.length + (fsRoot ? fsRoot.length : 0);
-  }, [files, fsRoot, hasBrowserTabs]);
+  }, [files, fsRoot]);
 
   const getCode = useCallback(() => {
     const byExt = (ext: string) => files.find((f) => f.name.endsWith(ext))?.content || "";

@@ -560,6 +560,11 @@ export default function TerminalPane({
       return;
     }
 
+    if (data === "\x04") {
+      sendToServer(inst.id, "\x04");
+      return;
+    }
+
     if (data === "\x7f" || data === "\x08") {
       if (inst.cursor <= 0) return;
       const before = inst.input.slice(0, inst.cursor - 1);
@@ -688,7 +693,12 @@ export default function TerminalPane({
           void navigator.clipboard.writeText(sel).catch(() => {});
           return false;
         }
-        return true;
+        // Explicit Ctrl+C: write ^C and send interrupt to process
+        inst.term.write("^C\r\n");
+        inst.input = "";
+        inst.cursor = 0;
+        sendToServer(inst.id, "\x03");
+        return false;
       }
 
       if (ev.type === "keydown" && ctrlOrMeta && ev.shiftKey && ev.code === "KeyC") {
@@ -707,6 +717,16 @@ export default function TerminalPane({
       if (ev.type === "keydown" && ctrlOrMeta && ev.code === "Insert") {
         const sel = term.getSelection();
         if (sel) void navigator.clipboard.writeText(sel).catch(() => {});
+        return false;
+      }
+      // Ctrl+L: clear terminal screen
+      if (ev.type === "keydown" && ctrlOrMeta && !ev.shiftKey && ev.code === "KeyL") {
+        inst.term.clear();
+        return false;
+      }
+      // Ctrl+D: send EOF to process
+      if (ev.type === "keydown" && ctrlOrMeta && !ev.shiftKey && ev.code === "KeyD") {
+        sendToServer(inst.id, "\x04");
         return false;
       }
 

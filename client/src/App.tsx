@@ -78,13 +78,15 @@ export default function App() {
   const [activeBrowserTabId, setActiveBrowserTabId] = useState("");
   const browserIdSeq = useRef(0);
 
-  const openBrowserTabForUrl = useCallback((url: string) => {
+  const openBrowserTabForUrl = useCallback((url: string, forceNew = false) => {
     const normalizedUrl = normalizeBrowserOpenUrl(url);
     if (!normalizedUrl) return;
-    const existing = browserTabs.find((b) => b.url === normalizedUrl);
-    if (existing) {
-      setActiveBrowserTabId(existing.id);
-      return;
+    if (!forceNew) {
+      const existing = browserTabs.find((b) => b.url === normalizedUrl);
+      if (existing) {
+        setActiveBrowserTabId(existing.id);
+        return;
+      }
     }
     const id = String(++browserIdSeq.current);
     setBrowserTabs((prev) => [...prev, { id, url: normalizedUrl, label: normalizedUrl.replace(/^https?:\/\//, "") }]);
@@ -105,7 +107,7 @@ export default function App() {
       existingTabs: browserTabs.length,
     });
     // #endregion
-    openBrowserTabForUrl(url);
+    openBrowserTabForUrl(url, true);
   }, [browserTabs.length]);
 
   const handleAddBrowserTab = useCallback(() => {
