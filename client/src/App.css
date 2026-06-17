@@ -85,6 +85,10 @@ body {
 }
 .resize-handle-v:hover { background: var(--accent); }
 
+/* During pane resize, let mouse pass through the webview/iframe */
+body.resizing webview,
+body.resizing iframe { pointer-events: none; }
+
 /* ── Browser View ── */
 .browser-iframe-container {
   display: flex;
@@ -324,8 +328,12 @@ body {
   background: #1b1b1c;
 }
 
-.browser-viewport-frame {
+.browser-viewport-wrapper {
   flex: 0 0 auto;
+  overflow: hidden;
+}
+
+.browser-viewport-frame {
   background: #ffffff;
   border: 1px solid rgba(255, 255, 255, 0.08);
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28);

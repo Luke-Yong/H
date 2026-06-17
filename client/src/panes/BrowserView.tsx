@@ -275,7 +275,7 @@ export default function BrowserView({
       if (rect.width <= 0 || rect.height <= 0) return;
       const scaleX = rect.width / viewportWidth;
       const scaleY = rect.height / viewportHeight;
-      const s = Math.max(0.1, Math.min(scaleX, scaleY, 1));
+      const s = Math.max(0.1, Math.min(scaleX, scaleY));
       setViewportScale(s);
     };
 
@@ -578,33 +578,43 @@ export default function BrowserView({
           className="browser-viewport-stage"
         >
           <div
-            className="browser-viewport-frame"
+            className="browser-viewport-wrapper"
             style={{
               width: `${Math.round(viewportWidth * viewportScale)}px`,
               height: `${Math.round(viewportHeight * viewportScale)}px`,
+              overflow: "hidden",
             }}
           >
-            {isDesktop ? (
-              <webview
-                ref={handleWebviewRef}
-                key={tabId}
-                src={desktopSrc}
-                preload={window.harnessDesktop?.browserPreloadUrl}
-                partition="harness-browser"
-                allowpopups={true}
-                style={{ width: "100%", height: "100%" }}
-              />
-            ) : (
-              <iframe
-                ref={iframeRef}
-                key={`${tabId}-${perms.geolocation}-${perms.camera}-${perms.microphone}`}
-                src={currentUrl}
-                allow={allowAttr}
-                sandbox={sandboxAttr}
-                onLoad={handleIframeLoad}
-                style={{ width: "100%", height: "100%", border: "none" }}
-              />
-            )}
+            <div
+              className="browser-viewport-frame"
+              style={{
+                width: `${viewportWidth}px`,
+                height: `${viewportHeight}px`,
+                zoom: viewportScale,
+              }}
+            >
+              {isDesktop ? (
+                <webview
+                  ref={handleWebviewRef}
+                  key={tabId}
+                  src={desktopSrc}
+                  preload={window.harnessDesktop?.browserPreloadUrl}
+                  partition="harness-browser"
+                  allowpopups={true}
+                  style={{ width: "100%", height: "100%" }}
+                />
+              ) : (
+                <iframe
+                  ref={iframeRef}
+                  key={`${tabId}-${perms.geolocation}-${perms.camera}-${perms.microphone}`}
+                  src={currentUrl}
+                  allow={allowAttr}
+                  sandbox={sandboxAttr}
+                  onLoad={handleIframeLoad}
+                  style={{ width: "100%", height: "100%", border: "none" }}
+                />
+              )}
+            </div>
           </div>
         </div>
       ) : (
