@@ -124,25 +124,20 @@ export default function BrowserView({
   const inputFocusedRef = useRef(false);
   const activeTab = tabs.find((tab) => tab.id === activeTabId) || tabs[0] || null;
 
-  // ── Browser reverse proxy (makes localhost apps same-origin) ──
-  const proxyOriginRef = useRef<string | null>(null);
-  const PROXY_PREFIX = window.location.origin + "/_browser";
-
-  // Convert a real URL to the proxy URL used as the iframe src
+  // ── Browser reverse proxy (universal — all URLs proxied for same-origin iframe access) ──
+  // Encodes a real URL into the server proxy URL format: /_browser?url=<encoded>
   const toProxySrc = useCallback((real: string): string => {
-    if (!proxyOriginRef.current) return real;
-    if (real.startsWith(proxyOriginRef.current)) {
-      return PROXY_PREFIX + real.slice(proxyOriginRef.current.length);
-    }
-    return real;
+    if (!real) return real;
+    return `/_browser?url=${encodeURIComponent(real)}`;
   }, []);
 
-  // Convert a proxy URL read from the iframe back to the real URL for display
+  // Decodes a proxy URL back to the real URL for display
   const fromProxySrc = useCallback((proxy: string): string => {
-    if (!proxyOriginRef.current) return proxy;
-    if (proxy.startsWith(PROXY_PREFIX)) {
-      return proxyOriginRef.current + proxy.slice(PROXY_PREFIX.length);
-    }
+    try {
+      const u = new URL(proxy, window.location.origin);
+      const encoded = u.searchParams.get("url");
+      if (encoded) return decodeURIComponent(encoded);
+    } catch {}
     return proxy;
   }, []);
   const tabId = activeTab?.id || "";
@@ -173,17 +168,26 @@ export default function BrowserView({
     const ifr = iframeRef.current;
     if (!ifr || !tabId) return;
 
+    // #region debug-point C:sync-attempt
+    let cdAccessible = false;
+    try { cdAccessible = !!ifr.contentDocument; } catch {}
+    if (!cdAccessible) {
+      fetch("http://127.0.0.1:7777/event",{method:"POST",body:JSON.stringify({sessionId:"bing-links-sandbox-sync",runId:"pre",hypothesisId:"C",location:"BrowserView.tsx:syncIframeState",msg:"[DEBUG] sync-content-doc-null",data:{tabId,currentUrl},ts:Date.now()})}).catch(()=>{});
+      return;
+    }
+    // #endregion
+
     // getURL – read current href from iframe's contentDocument (now same-origin via proxy)
     let nextUrl: string | undefined;
     try {
       const raw = ifr.contentDocument?.location?.href;
       if (raw) nextUrl = fromProxySrc(raw);
       // #region debug-point C:sync-url
-      fetch("http://127.0.0.1:7778/event",{method:"POST",body:JSON.stringify({sessionId:"bing-links-no-response",runId:"pre",hypothesisId:"C",location:"BrowserView.tsx:syncIframeState",msg:"[DEBUG] sync-url-ok",data:{raw,nextUrl,currentUrl,tabId,proxyOrigin:proxyOriginRef.current},ts:Date.now()})}).catch(()=>{});
+      fetch("http://127.0.0.1:7777/event",{method:"POST",body:JSON.stringify({sessionId:"bing-links-sandbox-sync",runId:"pre",hypothesisId:"C",location:"BrowserView.tsx:syncIframeState",msg:"[DEBUG] sync-url-ok",data:{raw,nextUrl,currentUrl,tabId},ts:Date.now()})}).catch(()=>{});
       // #endregion
     } catch {
       // #region debug-point C:sync-cross-origin
-      fetch("http://127.0.0.1:7778/event",{method:"POST",body:JSON.stringify({sessionId:"bing-links-no-response",runId:"pre",hypothesisId:"C",location:"BrowserView.tsx:syncIframeState",msg:"[DEBUG] sync-cross-origin-blocked",data:{currentUrl,tabId,proxyOrigin:proxyOriginRef.current},ts:Date.now()})}).catch(()=>{});
+      fetch("http://127.0.0.1:7777/event",{method:"POST",body:JSON.stringify({sessionId:"bing-links-sandbox-sync",runId:"pre",hypothesisId:"C",location:"BrowserView.tsx:syncIframeState",msg:"[DEBUG] sync-cross-origin-blocked",data:{currentUrl,tabId},ts:Date.now()})}).catch(()=>{});
       // #endregion
       return;
     }
@@ -233,19 +237,6 @@ export default function BrowserView({
     if (!url) {
       requestAnimationFrame(() => { inputRef.current?.focus(); });
     }
-
-    // Auto-register proxy for localhost URLs set externally (e.g., terminal detection)
-    if (!isDesktop && url && /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?/i.test(url)) {
-      const nextOrigin = new URL(url).origin;
-      if (proxyOriginRef.current !== nextOrigin) {
-        proxyOriginRef.current = nextOrigin;
-        fetch("/api/browser-proxy", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ url }),
-        }).catch(() => {});
-      }
-    }
   }, [tabId, url, isDesktop]);
 
   const handleWebviewRef = useCallback((node: HTMLElement | null) => {
@@ -255,12 +246,18 @@ export default function BrowserView({
     }
   }, []);
 
+  // Track user-initiated navigation to prevent polling from reverting URL
+  const navigatingRef = useRef(false);
+
   // Set up iframe load listener + polling (native events, not React synthetic)
   const setupIframe = useCallback((iframe: HTMLIFrameElement) => {
     (iframeRef as any).current = iframe;
     if (!iframe) return;
     iframe.addEventListener("load", syncIframeState);
     const poll = setInterval(syncIframeState, 300);
+    // #region debug-point C:setup-iframe
+    fetch("http://127.0.0.1:7777/event",{method:"POST",body:JSON.stringify({sessionId:"bing-links-sandbox-sync",runId:"pre",hypothesisId:"C",location:"BrowserView.tsx:setupIframe",msg:"[DEBUG] iframe-ref-attached",data:{tabId,src:iframe.src||"",currentUrl},ts:Date.now()})}).catch(()=>{});
+    // #endregion
     if (iframe.contentDocument) {
       try { syncIframeState(); } catch {}
     }
@@ -277,11 +274,16 @@ export default function BrowserView({
     try {
       docAccessible = !!iframe.contentDocument;
     } catch {}
-    fetch("http://127.0.0.1:7778/event",{method:"POST",body:JSON.stringify({sessionId:"bing-links-no-response",runId:"pre",hypothesisId:"B",location:"BrowserView.tsx:injectIntoIframe",msg:"[DEBUG] inject-attempt",data:{docAccessible,tabId,currentUrl,proxyOrigin:proxyOriginRef.current},ts:Date.now()})}).catch(()=>{});
+    fetch("http://127.0.0.1:7777/event",{method:"POST",body:JSON.stringify({sessionId:"bing-links-sandbox-sync",runId:"pre",hypothesisId:"B",location:"BrowserView.tsx:injectIntoIframe",msg:"[DEBUG] inject-attempt",data:{docAccessible,tabId,currentUrl},ts:Date.now()})}).catch(()=>{});
     // #endregion
     try {
       const doc = iframe.contentDocument;
-      if (!doc) return;
+      if (!doc) {
+        // #region debug-point B:no-content-doc
+        fetch("http://127.0.0.1:7777/event",{method:"POST",body:JSON.stringify({sessionId:"bing-links-sandbox-sync",runId:"pre",hypothesisId:"B",location:"BrowserView.tsx:injectIntoIframe",msg:"[DEBUG] no-content-doc-abort",data:{tabId,currentUrl,iframeSrc:(iframe as any).src||""},ts:Date.now()})}).catch(()=>{});
+        // #endregion
+        return;
+      }
       // viewport meta
       const head = doc.head || doc.documentElement;
       if (head) {
@@ -331,7 +333,14 @@ export default function BrowserView({
         }, true);
       }
       syncIframeStateRef.current();
-    } catch {}
+      // #region debug-point B:injection-success
+      fetch("http://127.0.0.1:7777/event",{method:"POST",body:JSON.stringify({sessionId:"bing-links-sandbox-sync",runId:"pre",hypothesisId:"B",location:"BrowserView.tsx:injectIntoIframe",msg:"[DEBUG] injection-success",data:{tabId,currentUrl,patched:true},ts:Date.now()})}).catch(()=>{});
+      // #endregion
+    } catch(ex) {
+      // #region debug-point B:injection-failed
+      fetch("http://127.0.0.1:7777/event",{method:"POST",body:JSON.stringify({sessionId:"bing-links-sandbox-sync",runId:"pre",hypothesisId:"B",location:"BrowserView.tsx:injectIntoIframe",msg:"[DEBUG] injection-failed",data:{tabId,currentUrl,error:String(ex)},ts:Date.now()})}).catch(()=>{});
+      // #endregion
+    }
   }, [viewportWidth, viewportHeight]);
 
   // On every iframe load (React synthetic), inject hooks
@@ -340,9 +349,9 @@ export default function BrowserView({
     try {
       const ifr = e.currentTarget;
       const canAccess = !!ifr.contentDocument;
-      fetch("http://127.0.0.1:7778/event",{method:"POST",body:JSON.stringify({sessionId:"bing-links-no-response",runId:"pre",hypothesisId:"B",location:"BrowserView.tsx:iframeLoadHandler",msg:"[DEBUG] iframe-loaded",data:{canAccessContentDoc:canAccess,src:(ifr as any).src||"",tabId,currentUrl},ts:Date.now()})}).catch(()=>{});
+      fetch("http://127.0.0.1:7777/event",{method:"POST",body:JSON.stringify({sessionId:"bing-links-sandbox-sync",runId:"pre",hypothesisId:"B",location:"BrowserView.tsx:iframeLoadHandler",msg:"[DEBUG] iframe-loaded",data:{canAccessContentDoc:canAccess,src:(ifr as any).src||"",tabId,currentUrl},ts:Date.now()})}).catch(()=>{});
     } catch(ex) {
-      fetch("http://127.0.0.1:7778/event",{method:"POST",body:JSON.stringify({sessionId:"bing-links-no-response",runId:"pre",hypothesisId:"B",location:"BrowserView.tsx:iframeLoadHandler",msg:"[DEBUG] iframe-load-error",data:{error:String(ex),tabId,currentUrl},ts:Date.now()})}).catch(()=>{});
+      fetch("http://127.0.0.1:7777/event",{method:"POST",body:JSON.stringify({sessionId:"bing-links-sandbox-sync",runId:"pre",hypothesisId:"B",location:"BrowserView.tsx:iframeLoadHandler",msg:"[DEBUG] iframe-load-error",data:{error:String(ex),tabId,currentUrl},ts:Date.now()})}).catch(()=>{});
     }
     // #endregion
     injectIntoIframe(e.currentTarget);
@@ -372,6 +381,11 @@ export default function BrowserView({
     if (!nextUrl || nextUrl === "about:blank") return;
 
     if (nextUrl !== liveUrlRef.current) {
+      // During user-initiated navigation, the webview still shows the old URL.
+      // Block ALL sync sources until the navigation completes (did-navigate/did-finish-load
+      // reset the flag before calling us).
+      if (navigatingRef.current) return;
+
       liveUrlRef.current = nextUrl;
       setCurrentUrl(nextUrl);
       setInputUrl(nextUrl);
@@ -423,13 +437,14 @@ export default function BrowserView({
 
     // ── Event listeners ──
     const onDidFinishLoad = () => {
+      navigatingRef.current = false;
       syncDesktopState("did-finish-load");
       // Re-inject detection JS on every full page load (JS context is wiped)
       if (webviewReadyRef.current) {
         void view.executeJavaScript?.(DESKTOP_INJECT_CODE, false).catch(() => {});
       }
     };
-    const onDidNavigate = () => syncDesktopState("did-navigate");
+    const onDidNavigate = () => { navigatingRef.current = false; syncDesktopState("did-navigate"); };
     const onDidNavigateInPage = () => syncDesktopState("did-navigate-in-page");
     const onPageTitleUpdated = () => syncDesktopState("page-title-updated");
     const handleNewWindow = (event: Event) => {
@@ -448,7 +463,7 @@ export default function BrowserView({
       syncDesktopState("dom-ready");
       void view.executeJavaScript?.(DESKTOP_INJECT_CODE, false).catch(() => {});
     };
-    const handleDidFailLoad = () => {};
+    const handleDidFailLoad = () => { navigatingRef.current = false; };
     const handleIpcMessage = (event: Event) => {
       const details = event as Event & {
         channel?: string;
@@ -488,7 +503,7 @@ export default function BrowserView({
       view.removeEventListener("did-fail-load", handleDidFailLoad);
       view.removeEventListener("ipc-message", handleIpcMessage);
     };
-  }, [isDesktop, syncDesktopState, tabId, viewportWidth, viewportHeight]);
+  }, [isDesktop, syncDesktopState, tabId, currentUrl, viewportWidth, viewportHeight]);
 
   // Re-inject viewport meta when preset changes (only if webview is ready)
   useEffect(() => {
@@ -542,25 +557,24 @@ export default function BrowserView({
     perms.autoplay && "autoplay",
   ].filter(Boolean).join("; ");
 
-  const sandboxAttr = "allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals allow-orientation-lock allow-pointer-lock allow-presentation allow-top-navigation allow-top-navigation-by-user-activation";
-
-  // Sandbox blocks cross-origin iframe access, preventing the click interceptor
-  // (injectIntoIframe) from being injected into external pages like Bing.
-  // Without the interceptor, target="_blank" links produce broken popups.
-  // We disable sandbox globally whenever any localhost proxy is active,
-  // since the proxy already provides security isolation.
+  // ── Sandbox — removed ──
+  // Sandbox (even with allow-popups) interferes with external site JS (Bing links,
+  // window.open, etc.) for cross-origin iframes. Cross-origin policy already isolates
+  // the iframe, making the sandbox redundant for security.
 
   // #region debug-point A:sandbox-state
   (() => {
     if (tabId && currentUrl) {
-      fetch("http://127.0.0.1:7778/event",{method:"POST",body:JSON.stringify({sessionId:"bing-links-no-response",runId:"pre",hypothesisId:"A",location:"BrowserView.tsx:render",msg:"[DEBUG] sandbox-state",data:{tabId,currentUrl,proxyOrigin:proxyOriginRef.current,hasSandbox:!proxyOriginRef.current,sandboxAttr},ts:Date.now()})}).catch(()=>{});
+      fetch("http://127.0.0.1:7777/event",{method:"POST",body:JSON.stringify({sessionId:"bing-links-sandbox-sync",runId:"post-fix",hypothesisId:"A",location:"BrowserView.tsx:render",msg:"[DEBUG] sandbox-state",data:{tabId,currentUrl,hasSandbox:false},ts:Date.now()})}).catch(()=>{});
     }
   })();
   // #endregion
 
   const navigate = useCallback(() => {
     if (!tabId) return;
-    const raw = inputUrl.trim();
+    // Read from DOM input — for "Go" button clicks React has flushed
+    // the state update, so inputRef.current.value is accurate.
+    const raw = inputRef.current?.value?.trim();
     if (!raw) return;
     let final: string;
     if (isUrlLike(raw)) {
@@ -569,32 +583,23 @@ export default function BrowserView({
       final = `https://www.bing.com/search?q=${encodeURIComponent(raw)}`;
     }
 
-    // Register reverse proxy for localhost URLs (makes them same-origin)
-    if (!isDesktop && /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?/i.test(final)) {
-      const nextOrigin = new URL(final).origin;
-      if (proxyOriginRef.current !== nextOrigin) {
-        proxyOriginRef.current = nextOrigin;
-        fetch("/api/browser-proxy", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ url: final }),
-        }).catch(() => {});
-      }
-    } else if (!isDesktop && proxyOriginRef.current) {
-      // Navigating away from proxied app – disable proxy
-      proxyOriginRef.current = null;
-    }
-
     liveUrlRef.current = final;
+    navigatingRef.current = true;
     setNavUrl(final);
     setCurrentUrl(final);
     setInputUrl(final);
     setSecure(isHttps(final));
     onUrlChange?.(tabId, final);
+
+    // Explicit loadURL for desktop webview (src attribute update alone may not trigger navigation)
+    if (isDesktop) {
+      webviewRef.current?.loadURL?.(final);
+    }
+
     // #region debug-point A:navigate
-    fetch("http://127.0.0.1:7778/event",{method:"POST",body:JSON.stringify({sessionId:"bing-links-no-response",runId:"pre",hypothesisId:"A",location:"BrowserView.tsx:navigate",msg:"[DEBUG] navigate",data:{final,raw:inputUrl,tabId,proxyOrigin:proxyOriginRef.current},ts:Date.now()})}).catch(()=>{});
+    fetch("http://127.0.0.1:7777/event",{method:"POST",body:JSON.stringify({sessionId:"bing-links-sandbox-sync",runId:"post-fix",hypothesisId:"A",location:"BrowserView.tsx:navigate",msg:"[DEBUG] navigate",data:{final,raw,tabId},ts:Date.now()})}).catch(()=>{});
     // #endregion
-  }, [inputUrl, onUrlChange, tabId, isDesktop]);
+  }, [onUrlChange, tabId, isDesktop]);
 
   const refresh = useCallback(() => {
     if (isDesktop) {
@@ -620,9 +625,38 @@ export default function BrowserView({
     iframeRef.current?.contentWindow?.history.forward();
   }, [isDesktop]);
 
-  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (e.key === "Enter") navigate();
-  }, [navigate]);
+  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    if (!tabId) return;
+
+    // Read directly from the DOM input — React's controlled value hasn't
+    // flushed yet, so inputRef.current.value has the user's actual keystrokes.
+    const raw = e.currentTarget.value.trim();
+    if (!raw) return;
+
+    let final: string;
+    if (isUrlLike(raw)) {
+      final = /^https?:\/\//i.test(raw) ? raw : `http://${raw}`;
+    } else {
+      final = `https://www.bing.com/search?q=${encodeURIComponent(raw)}`;
+    }
+
+    liveUrlRef.current = final;
+    navigatingRef.current = true;
+    setNavUrl(final);
+    setCurrentUrl(final);
+    setInputUrl(final);
+    setSecure(isHttps(final));
+    onUrlChange?.(tabId, final);
+
+    if (isDesktop) {
+      webviewRef.current?.loadURL?.(final);
+    }
+
+    // Blur the input after navigation
+    e.currentTarget.blur();
+  }, [tabId, isDesktop, onUrlChange]);
 
   const setViewportPreset = useCallback((presetId: string) => {
     const preset = VIEWPORT_PRESETS.find((p) => p.id === presetId);
@@ -680,6 +714,7 @@ export default function BrowserView({
             onKeyDown={handleKeyDown}
             onFocus={() => { inputFocusedRef.current = true; }}
             onBlur={() => { inputFocusedRef.current = false; }}
+            onClick={(e) => (e.target as HTMLInputElement).select()}
             placeholder="Search Bing or enter URL"
             spellCheck={false}
           />
@@ -807,7 +842,7 @@ export default function BrowserView({
                   key={`${tabId}-${perms.geolocation}-${perms.camera}-${perms.microphone}`}
                   src={toProxySrc(currentUrl)}
                   allow={allowAttr}
-                  sandbox={proxyOriginRef.current ? undefined : sandboxAttr}
+                  sandbox={undefined}
                   onLoad={iframeLoadHandler}
                   style={{ width: "100%", height: "100%", border: "none" }}
                 />

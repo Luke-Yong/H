@@ -209,35 +209,35 @@ if (process.env.HARNESS_SERVE_CLIENT === "1" && fs.existsSync(path.join(clientDi
   });
 }
 
-// ── Browser reverse proxy (makes localhost apps same-origin with Harness IDE) ──
-let browserProxyTarget: string | null = null;
+// ── Browser reverse proxy (universal — all URLs proxied for same-origin iframe access) ──
 
-app.post("/api/browser-proxy", (req, res) => {
-  const { url } = req.body;
-  if (!url) return res.status(400).json({ error: "url required" });
+// Reverse proxy – /_browser?url=<encoded_url>
+// Proxies any URL through the Harness server so the iframe is always same-origin.
+// This enables click interception, title/URL sync, and _blank link handling for all sites.
+app.use("/_browser", (req, res, next) => {
+  const encoded = typeof req.query.url === "string" ? req.query.url : "";
+  if (!encoded) return next();
+
+  let targetUrl: string;
   try {
-    const parsed = new URL(url);
-    browserProxyTarget = parsed.origin;
-    console.log(`[BrowserProxy] Target set to ${browserProxyTarget}`);
-    res.json({ ok: true, proxyUrl: "/_browser" });
+    targetUrl = decodeURIComponent(encoded);
   } catch {
-    res.status(400).json({ error: "Invalid URL" });
-  }
-});
-
-app.delete("/api/browser-proxy", (_req, res) => {
-  browserProxyTarget = null;
-  res.json({ ok: true });
-});
-
-// Reverse proxy middleware – forwards /_browser/* to the registered target
-app.use("/_browser", (req, res) => {
-  if (!browserProxyTarget) {
-    return res.status(404).send("No browser proxy target configured");
+    return res.status(400).send("Invalid URL encoding");
   }
 
-  const targetUrl = browserProxyTarget + req.url;
-  const parsed = new URL(targetUrl);
+  let parsed: URL;
+  try {
+    parsed = new URL(targetUrl);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return res.status(400).send("Only http/https URLs supported");
+    }
+  } catch {
+    return res.status(400).send("Invalid URL");
+  }
+
+  // Build the actual path from the proxied request (strip /_browser and query)
+  const proxyPath = req.url.includes("?") ? "" : req.url.slice("/_browser".length) || "/";
+
   const client = parsed.protocol === "https:" ? https : http;
 
   const proxyReq = client.request(
@@ -247,24 +247,48 @@ app.use("/_browser", (req, res) => {
       headers: {
         ...req.headers,
         host: parsed.host,
+        referer: undefined as any,
       },
     },
     (proxyRes) => {
-      // Strip restrictive headers so the iframe is allowed to embed
-      const headers = { ...proxyRes.headers };
+      const headers: Record<string, string | string[] | undefined> = {
+        ...proxyRes.headers,
+      };
       delete headers["x-frame-options"];
       delete headers["content-security-policy"];
-      res.writeHead(proxyRes.statusCode || 200, headers);
-      proxyRes.pipe(res);
+      delete headers["content-security-policy-report-only"];
+
+      // Inject <base> tag for HTML responses so relative URLs resolve correctly
+      const contentType = String(headers["content-type"] || "");
+      if (contentType.includes("text/html") || contentType.includes("application/xhtml")) {
+        delete headers["content-length"]; // will change due to injection
+        let body = "";
+        proxyRes.setEncoding("utf8");
+        proxyRes.on("data", (chunk: string) => { body += chunk; });
+        proxyRes.on("end", () => {
+          const baseTag = `<base href="${targetUrl.replace(/"/g, "&quot;")}">`;
+          const injected = body.replace(/<head[^>]*>/i, (match) => match + baseTag);
+          res.writeHead(proxyRes.statusCode || 200, headers);
+          res.end(injected);
+        });
+      } else {
+        res.writeHead(proxyRes.statusCode || 200, headers);
+        proxyRes.pipe(res);
+      }
     }
   );
 
   proxyReq.on("error", (err) => {
-    console.error(`[BrowserProxy] Error: ${err.message}`);
+    console.error(`[BrowserProxy] Error for ${targetUrl}: ${err.message}`);
     if (!res.headersSent) res.status(502).send("Proxy error");
   });
 
   req.pipe(proxyReq);
+});
+
+// Fallback: unrecognized /_browser path
+app.use("/_browser", (_req, res) => {
+  res.status(400).send("Usage: /_browser?url=<encoded_url>");
 });
 
 // ── WebSocket ──
