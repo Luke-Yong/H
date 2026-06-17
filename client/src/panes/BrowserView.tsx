@@ -223,6 +223,11 @@ export default function BrowserView({
     setSecure(isHttps(url));
     liveUrlRef.current = url;
 
+    // Auto-focus the URL input when a new (blank) tab is created
+    if (!url) {
+      requestAnimationFrame(() => { inputRef.current?.focus(); });
+    }
+
     // Auto-register proxy for localhost URLs set externally (e.g., terminal detection)
     if (!isDesktop && url && /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?/i.test(url)) {
       const nextOrigin = new URL(url).origin;

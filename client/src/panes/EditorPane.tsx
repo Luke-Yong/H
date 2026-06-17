@@ -157,6 +157,17 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     prevBrowserCount.current = browserTabs.length;
   }, [browserTabs, files]);
 
+  // Auto-open files panel when files or folder are loaded
+  const prevFileCount = useRef(0);
+  useEffect(() => {
+    const hasFiles = files.length > 0 || (fsRoot && fsRoot.length > 0);
+    if (hasFiles && prevFileCount.current === 0 && !hasBrowserTabs) {
+      setSidebarPanel("files");
+      setSidebarVisible(true);
+    }
+    prevFileCount.current = files.length + (fsRoot ? fsRoot.length : 0);
+  }, [files, fsRoot, hasBrowserTabs]);
+
   const getCode = useCallback(() => {
     const byExt = (ext: string) => files.find((f) => f.name.endsWith(ext))?.content || "";
     return { html: byExt(".html"), css: byExt(".css"), js: byExt(".js") };
@@ -307,8 +318,15 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
           {sidebarItems.map((item) => (
             <button
               key={item.id}
-              className={`activity-bar-btn${sidebarPanel === item.id && sidebarVisible ? " active" : ""}`}
-              onClick={() => { if (item.id === "browser" && browserTabs.length === 0) onAddBrowserTab(); setSidebarPanel(item.id); setSidebarVisible(true); }}
+              className={`activity-bar-btn${(item.id === "browser" && hasBrowserTabs) || (item.id !== "browser" && sidebarPanel === item.id && sidebarVisible) ? " active" : ""}`}
+              onClick={() => {
+                if (item.id === "browser") {
+                  if (hasBrowserTabs) { setActiveFileId(BROWSER_EDITOR_TAB_ID); } else { onAddBrowserTab(); }
+                  return;
+                }
+                if (item.id === sidebarPanel) { setSidebarVisible((v) => !v); return; }
+                setSidebarPanel(item.id); setSidebarVisible(true);
+              }}
               title={item.title}
             >
               {item.icon}
@@ -364,12 +382,15 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
         {sidebarItems.map((item) => (
           <button
             key={item.id}
-            className={`activity-bar-btn${sidebarPanel === item.id && sidebarVisible ? " active" : ""}`}
+            className={`activity-bar-btn${(item.id === "browser" && hasBrowserTabs) || (item.id !== "browser" && sidebarPanel === item.id && sidebarVisible) ? " active" : ""}`}
             onClick={() => {
+              if (item.id === "browser") {
+                if (hasBrowserTabs) { setActiveFileId(BROWSER_EDITOR_TAB_ID); } else { onAddBrowserTab(); }
+                return;
+              }
               if (item.id === sidebarPanel) { setSidebarVisible((v) => !v); return; }
               setSidebarPanel(item.id);
               setSidebarVisible(true);
-              if (item.id === "browser" && browserTabs.length === 0) onAddBrowserTab();
             }}
             title={item.title}
           >
@@ -398,7 +419,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
           <ResizeHandle onMouseDown={onFilePanelDrag} />
         </>
       )}
-      {sidebarVisible && sidebarPanel !== "files" && sidebarPanel !== "browser" && (
+      {sidebarVisible && sidebarPanel && sidebarPanel !== "files" && sidebarPanel !== "browser" && (
         <div className="sidebar-placeholder">
           <div className="sidebar-placeholder-text">{sidebarItems.find((i) => i.id === sidebarPanel)?.label || ""}</div>
           {sidebarPanel === "search" && (
