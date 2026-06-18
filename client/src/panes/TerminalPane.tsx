@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback, useMemo, useState } from "react";
+import { useEffect, useRef, useCallback, useMemo, useState, createElement, type ReactNode } from "react";
 import { Terminal, type IMarker } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -50,9 +50,12 @@ interface Props {
   onClearOutputEntries?: () => void;
   problemEntries?: ProblemEntry[];
   onSelectProblem?: (problem: ProblemEntry) => void;
+  browserConsoleEntries?: BrowserConsoleEntry[];
+  onClearBrowserConsole?: () => void;
+  devtoolsForceKey?: number;
 }
 
-type Category = "problems" | "output" | "debugConsole" | "terminal";
+type Category = "problems" | "output" | "debugConsole" | "browserConsole" | "terminal";
 type DebugSource = DebugConsoleEntry["source"];
 type DebugLevel = DebugConsoleEntry["level"];
 type OutputKind = OutputEntry["kind"];
@@ -91,6 +94,14 @@ export interface ProblemEntry {
   endColumn: number;
   source?: string;
   code?: string;
+}
+
+export interface BrowserConsoleEntry {
+  id: string;
+  level: "log" | "info" | "warn" | "error";
+  text: string;
+  time: number;
+  source?: string;
 }
 
 function getDefaultShellLabel(): string {
@@ -159,6 +170,9 @@ export default function TerminalPane({
   onClearOutputEntries,
   problemEntries = [],
   onSelectProblem,
+  browserConsoleEntries = [],
+  onClearBrowserConsole,
+  devtoolsForceKey,
 }: Props) {
   const panelRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -188,6 +202,41 @@ export default function TerminalPane({
   const activateRef = useRef<string>("");
   const hasRealCwdRef = useRef<boolean>(false);
   const [activeCategory, setActiveCategory] = useState<Category>("terminal");
+  const [inspectActive, setInspectActive] = useState(false);
+  const [browserConsoleCategory, setBrowserConsoleCategory] = useState<"console" | "elements">("console");
+  const [domTreeNodes, setDomTreeNodes] = useState<Array<{ uid: string; tag: string; id: string; classes: string; text: string; attrs: string }>>([]);
+  const [hoveredUid, setHoveredUid] = useState<string | null>(null);
+  const [domExpanded, setDomExpanded] = useState<Set<string>>(new Set(["0", "1", "2"]));
+  const domTreeRef = useRef<HTMLDivElement>(null);
+  const hoverFromTreeRef = useRef(false);
+  const [collapsedEntries, setCollapsedEntries] = useState<Set<string>>(new Set());
+  // Helper: classify console text for formatting
+  const formatConsoleText = (text: string): { kind: "json" | "array" | "plain"; formatted: string } => {
+    const t = text.trim();
+    if (!t) return { kind: "plain", formatted: text };
+    if (t.startsWith("{") || t.startsWith("[")) {
+      try {
+        const parsed = JSON.parse(t);
+        return { kind: t.startsWith("{") ? "json" : "array", formatted: JSON.stringify(parsed, null, 2) };
+      } catch {}
+    }
+    return { kind: "plain", formatted: text };
+  };
+  const [browserConsoleLevelFilters, setBrowserConsoleLevelFilters] = useState<Record<string, boolean>>({
+    log: true,
+    info: true,
+    warn: true,
+    error: true,
+  });
+  const prevDevtoolsKeyRef = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    if (devtoolsForceKey !== undefined && devtoolsForceKey !== prevDevtoolsKeyRef.current) {
+      prevDevtoolsKeyRef.current = devtoolsForceKey;
+      setActiveCategory("browserConsole");
+      // Request fresh DOM tree + console data from webview
+      window.postMessage({ __harness: true, type: "requestRefresh" }, "*");
+    }
+  }, [devtoolsForceKey]);
   const [debugSourceFilters, setDebugSourceFilters] = useState<Record<DebugSource, boolean>>({
     app: true,
     runtime: true,
@@ -225,6 +274,10 @@ export default function TerminalPane({
   const filteredOutputEntries = useMemo(
     () => outputEntries.filter((entry) => outputKindFilters[entry.kind]),
     [outputEntries, outputKindFilters]
+  );
+  const filteredBrowserConsoleEntries = useMemo(
+    () => browserConsoleEntries.filter((entry) => browserConsoleLevelFilters[entry.level]),
+    [browserConsoleEntries, browserConsoleLevelFilters]
   );
   const sortedProblemEntries = useMemo(() => {
     const severityOrder: Record<ProblemSeverity, number> = {
@@ -317,6 +370,68 @@ export default function TerminalPane({
       screenshot: false,
     });
   }, []);
+
+  const toggleBrowserConsoleLevelFilter = useCallback((level: string) => {
+    setBrowserConsoleLevelFilters((prev) => ({ ...prev, [level]: !prev[level] }));
+  }, []);
+
+  const resetBrowserConsoleFilters = useCallback(() => {
+    setBrowserConsoleLevelFilters({ log: true, info: true, warn: true, error: true });
+  }, []);
+
+  // Listen for devtools messages from BrowserView (DOM tree, hover node, inspect)
+  useEffect(() => {
+    const handler = (e: MessageEvent) => {
+      if (!e.data || !e.data.__harnessDevtools) return;
+      if (e.data.type === "domTree") {
+        setDomTreeNodes(e.data.nodes || []);
+        setBrowserConsoleCategory("elements");
+      } else if (e.data.type === "hoverNode") {
+        hoverFromTreeRef.current = false;
+        setHoveredUid(e.data.uid);
+      } else if (e.data.type === "inspectNode") {
+        // Element was clicked in inspect mode — expand all ancestors + scroll to it
+        const parts = (e.data.uid as string).split(".");
+        setDomExpanded((prev) => {
+          const next = new Set(prev);
+          for (let i = 0; i < parts.length; i++) {
+            next.add(parts.slice(0, i + 1).join("."));
+          }
+          next.add("0"); next.add("1"); next.add("2");
+          return next;
+        });
+      } else if (e.data.type === "inspectEnd") {
+        setInspectActive(false);
+        setHoveredUid(null);
+      }
+    };
+    window.addEventListener("message", handler);
+    // Request fresh DOM tree on mount (webview may have loaded before terminal opened)
+    window.postMessage({ __harness: true, type: "requestRefresh" }, "*");
+    return () => window.removeEventListener("message", handler);
+  }, []);
+
+  // Auto-expand ancestors + scroll to hovered node (only when hover from webview, not tree)
+  useEffect(() => {
+    if (!hoveredUid) return;
+    if (hoverFromTreeRef.current) return; // skip: hover came from tree panel itself
+    const parts = hoveredUid.split(".");
+    setDomExpanded((prev) => {
+      const next = new Set(prev);
+      for (let i = 0; i < parts.length; i++) {
+        next.add(parts.slice(0, i + 1).join("."));
+      }
+      return next;
+    });
+    // Scroll the hovered node into view after a short delay (wait for expand to render)
+    const timer = setTimeout(() => {
+      const node = domTreeRef.current?.querySelector('[data-uid="' + hoveredUid.replace(/"/g, '\\"') + '"]');
+      if (node) {
+        node.scrollIntoView({ block: "center", behavior: "smooth" });
+      }
+    }, 100);
+    return () => clearTimeout(timer);
+  }, [hoveredUid]);
 
   // Keep ref in sync for the WS effect (which must NOT re-run on activeId changes)
   useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
@@ -1004,12 +1119,83 @@ export default function TerminalPane({
     return () => { cancelAnimationFrame(raf1); cancelAnimationFrame(raf2); };
   }, [activeGroupMembers]);
 
+  // Recursively render DOM tree from flat node array
+  const renderDomTree = (
+    nodes: Array<{ uid: string; tag: string; id: string; classes: string; text: string; attrs: string }>,
+    hovered: string | null,
+    onHover: (uid: string) => void,
+    expanded: Set<string>,
+    toggle: (uid: string) => void,
+  ): ReactNode => {
+    // Build tree: { node, children: indexes[] }
+    type TreeNode = { node: typeof nodes[0]; children: number[] };
+    const tree: TreeNode[] = [];
+    const parentMap = new Map<string, number>();
+    for (let i = 0; i < nodes.length; i++) {
+      const n = nodes[i];
+      const tn: TreeNode = { node: n, children: [] };
+      const idx = tree.length;
+      tree.push(tn);
+      parentMap.set(n.uid, idx);
+    }
+    for (let i = 0; i < tree.length; i++) {
+      const uid = tree[i].node.uid;
+      const lastDot = uid.lastIndexOf(".");
+      if (lastDot >= 0) {
+        const parentUid = uid.substring(0, lastDot);
+        const parentIdx = parentMap.get(parentUid);
+        if (parentIdx !== undefined) tree[parentIdx].children.push(i);
+      }
+    }
+
+    const renderNode = (nodeIdx: number, depth: number): ReactNode => {
+      const tn = tree[nodeIdx];
+      if (!tn) return null;
+      const { node, children } = tn;
+      const hasKids = children.length > 0;
+      const isExpanded = expanded.has(node.uid);
+      const isHovered = hovered === node.uid;
+      const indent = depth * 12;
+
+      return createElement("div", { key: node.uid, "data-uid": node.uid },
+        createElement("div", {
+          className: "browser-dom-node" + (isHovered ? " hovered" : ""),
+          style: { paddingLeft: indent + "px", cursor: "pointer", lineHeight: "18px", whiteSpace: "nowrap" },
+          onMouseEnter: () => onHover(node.uid),
+          onClick: () => { if (hasKids) toggle(node.uid); },
+        },
+          createElement("span", {
+            style: { display: "inline-block", width: 12, textAlign: "center", color: "#888", fontSize: 10 },
+          }, hasKids ? (isExpanded ? "▼" : "▶") : " "),
+          createElement("span", { style: { color: "#569cd6" } }, "<"),
+          createElement("span", { style: { color: "#4ec94e" } }, node.tag),
+          node.id ? createElement("span", { style: { color: "#d7ba7d" } }, node.id) : null,
+          node.classes ? createElement("span", { style: { color: "#9cdcfe" } }, node.classes) : null,
+          node.attrs ? createElement("span", { style: { color: "#ce9178" } }, node.attrs) : null,
+          createElement("span", { style: { color: "#569cd6" } }, ">"),
+          node.text ? createElement("span", { style: { color: "#6a9955", marginLeft: 4 } }, node.text) : null,
+          hasKids ? createElement("span", { style: { color: "#569cd6", marginLeft: 2 } }, "</" + node.tag + ">") : null,
+        ),
+        isExpanded && children.map((childIdx) => renderNode(childIdx, depth + 1)),
+      );
+    };
+
+    const rootIndexes = tree.reduce<number[]>((acc, tn, i) => {
+      if (!tn.node.uid.includes(".")) acc.push(i);
+      return acc;
+    }, []);
+    return createElement("div", null,
+      ...rootIndexes.map((i) => renderNode(i, 0)),
+    );
+  };
+
   if (!visible) return null;
 
   const categories: { key: Category; label: string }[] = [
     { key: "problems", label: "Problems" },
     { key: "output", label: "Output" },
     { key: "debugConsole", label: "Debug Console" },
+    { key: "browserConsole", label: "Browser Console" },
     { key: "terminal", label: "Terminal" },
   ];
 
@@ -1382,6 +1568,138 @@ export default function TerminalPane({
                     </div>
                   ))}
                 </div>
+              )}
+            </div>
+          )}
+          {activeCategory === "browserConsole" && (
+            <div className="debug-console-panel">
+              {/* Sub-tabs: Console | Elements */}
+              <div className="debug-console-toolbar" style={{ flexWrap: "wrap", gap: 2 }}>
+                <div className="terminal-category-tabs" style={{ marginRight: 8 }}>
+                  <button
+                    className={`terminal-category-tab${browserConsoleCategory === "console" ? " active" : ""}`}
+                    onClick={() => setBrowserConsoleCategory("console")}
+                  >
+                    Console
+                  </button>
+                  <button
+                    className={`terminal-category-tab${browserConsoleCategory === "elements" ? " active" : ""}`}
+                    onClick={() => setBrowserConsoleCategory("elements")}
+                  >
+                    Elements
+                  </button>
+                </div>
+                {browserConsoleCategory === "console" && (
+                  <>
+                    <div className="debug-console-filter-group">
+                      <span className="debug-console-badge debug-console-badge-browser-console">
+                        {filteredBrowserConsoleEntries.length}/{browserConsoleEntries.length}
+                      </span>
+                    </div>
+                    <div className="debug-console-filter-group">
+                      {(["log", "info", "warn", "error"] as const).map((level) => (
+                        <button
+                          key={level}
+                          className={`debug-console-filter-chip debug-console-filter-chip-${level}${browserConsoleLevelFilters[level] ? " active" : ""}`}
+                          onClick={() => toggleBrowserConsoleLevelFilter(level)}
+                        >
+                          {level}
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
+                <div style={{ display: "flex", gap: 4, marginLeft: "auto" }}>
+                  <button
+                    className={`browser-btn-mouse${inspectActive ? " active" : ""}`}
+                    onClick={() => {
+                      const next = !inspectActive;
+                      setInspectActive(next);
+                      window.postMessage({ __harness: true, type: "toggle-inspect", active: next }, "*");
+                      if (!next) { setHoveredUid(null); }
+                    }}
+                    title={inspectActive ? "Click in page to inspect (2nd click ends)" : "Enable element inspector"}
+                    style={{ display: "flex", alignItems: "center", gap: 2, padding: "2px 6px", fontSize: 13, background: inspectActive ? "rgba(78,201,78,0.2)" : "#3c3c3c", color: inspectActive ? "#4ec94e" : "#ccc", border: "1px solid " + (inspectActive ? "#4ec94e" : "#555"), borderRadius: 3, cursor: "pointer", fontFamily: "inherit" }}
+                  >
+                    {inspectActive ? "⏹" : "�"}
+                  </button>
+                  {browserConsoleCategory === "console" && (
+                    <>
+                      <button className="debug-console-reset" onClick={resetBrowserConsoleFilters}>Filters</button>
+                      {onClearBrowserConsole && browserConsoleEntries.length > 0 && (
+                        <button className="debug-console-reset" onClick={() => { setCollapsedEntries(new Set()); onClearBrowserConsole(); }}>Clear</button>
+                      )}
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {browserConsoleCategory === "console" ? (
+                <>
+                  {browserConsoleEntries.length === 0 ? (
+                    <div className="debug-console-empty">No browser console output. Logs from the browser viewport will appear here.</div>
+                  ) : filteredBrowserConsoleEntries.length === 0 ? (
+                    <div className="debug-console-empty">No entries match the current filters.</div>
+                  ) : (
+                    <div className="debug-console-list">
+                      {filteredBrowserConsoleEntries.map((entry) => {
+                        const isCollapsed = collapsedEntries.has(entry.id);
+                        const { kind, formatted } = formatConsoleText(entry.text);
+                        const displayText = formatted || entry.text;
+                        const isLong = displayText.length > 120 || displayText.includes("\n") || kind !== "plain";
+                        const toggle = () => setCollapsedEntries((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(entry.id)) next.delete(entry.id); else next.add(entry.id);
+                          return next;
+                        });
+                        return (
+                          <div key={entry.id} className={`debug-console-entry debug-console-entry-${entry.level}`}>
+                            <span className="debug-console-time">{new Date(entry.time).toLocaleTimeString()}</span>
+                            <span className={`debug-console-badge debug-console-badge-${entry.level === "warn" ? "warning" : entry.level === "error" ? "error" : entry.level === "info" ? "info" : "log"}`}>{entry.level}</span>
+                            {isLong ? (
+                              <span className="debug-console-text" style={{ cursor: "pointer" }} onClick={toggle}>
+                                <span style={{ color: "#888", marginRight: 4 }}>{isCollapsed ? "▶" : "▼"}</span>
+                                {isCollapsed ? (
+                                  <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 400, display: "inline-block", verticalAlign: "bottom" }}>
+                                    {displayText.length > 80 ? displayText.substring(0, 80) + "…" : displayText}
+                                  </span>
+                                ) : (
+                                  <pre style={{ margin: "2px 0", whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "monospace", fontSize: 11, background: "rgba(0,0,0,0.15)", padding: "2px 4px", borderRadius: 2, maxHeight: kind !== "plain" ? 300 : 120, overflowY: "auto" }}>
+                                    {kind !== "plain" ? (
+                                      <code>{displayText}</code>
+                                    ) : displayText}
+                                  </pre>
+                                )}
+                              </span>
+                            ) : (
+                              <span className="debug-console-text">{entry.text}</span>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </>
+              ) : (
+                <>
+                  {domTreeNodes.length === 0 ? (
+                    <div className="debug-console-empty">No DOM tree loaded. Open a page in the browser preview first.</div>
+                  ) : (
+                    <div ref={domTreeRef} className="debug-console-list" style={{ padding: 4, fontFamily: "monospace", fontSize: 11 }}>
+                      {renderDomTree(domTreeNodes, hoveredUid, (uid) => {
+                        hoverFromTreeRef.current = true;
+                        setHoveredUid(uid);
+                        window.postMessage({ __harness: true, type: "highlight", uid }, "*");
+                      }, domExpanded, (uid) => {
+                        setDomExpanded((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(uid)) next.delete(uid); else next.add(uid);
+                          return next;
+                        });
+                      })}
+                    </div>
+                  )}
+                </>
               )}
             </div>
           )}

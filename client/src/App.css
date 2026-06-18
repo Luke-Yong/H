@@ -319,6 +319,24 @@ body.resizing iframe { pointer-events: none; }
   border-color: var(--accent);
 }
 
+/* ── Browser Console badge ── */
+.debug-console-badge.debug-console-badge-browser-console {
+  background: rgba(78, 201, 78, 0.15);
+  color: #4ec94e;
+  border: 1px solid rgba(78, 201, 78, 0.3);
+}
+
+/* ── DOM Tree Nodes ── */
+.browser-dom-node {
+  color: #d4d4d4;
+  user-select: none;
+  border-radius: 2px;
+}
+.browser-dom-node:hover,
+.browser-dom-node.hovered {
+  background: rgba(78, 201, 78, 0.12);
+}
+
 .browser-viewport-stage {
   flex: 1;
   display: flex;

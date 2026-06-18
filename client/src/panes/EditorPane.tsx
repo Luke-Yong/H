@@ -2,7 +2,7 @@ import { useState, forwardRef, useImperativeHandle, useCallback, useEffect, useR
 import Editor from "@monaco-editor/react";
 import FilesPanel from "./FilesPanel";
 import BrowserView from "./BrowserView";
-import TerminalPane, { type DebugConsoleEntry, type OutputEntry, type ProblemEntry } from "./TerminalPane";
+import TerminalPane, { type DebugConsoleEntry, type OutputEntry, type ProblemEntry, type BrowserConsoleEntry } from "./TerminalPane";
 import { VFile, createFile, detectLanguage } from "./fileModel";
 import { readFileFromHandle, writeFileToHandle } from "./browserFs";
 import { useResizable, ResizeHandle } from "../hooks/useResizable";
@@ -48,6 +48,8 @@ interface Props {
   onClearDebugEntries?: () => void;
   outputEntries?: OutputEntry[];
   onClearOutputEntries?: () => void;
+  onOpenDevtools?: () => void;
+  devtoolsForceKey?: number;
 }
 
 interface MarkerSnapshot {
@@ -72,7 +74,8 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     onActiveBrowserTabChange, onCloseBrowser, onBrowserTabClose, onAddBrowserTab,
     onBrowserTabUpdateLabel, onBrowserTabUpdateUrl, onBrowserNewTabFromLink,
     onOpenFolder, onCreateProject, onCreateFile, onOpenFile, onRefreshFs,
-    terminalVisible, onCloseTerminal, onDetectUrl, debugEntries, onClearDebugEntries, outputEntries, onClearOutputEntries }, ref
+    terminalVisible, onCloseTerminal, onDetectUrl, debugEntries, onClearDebugEntries, outputEntries, onClearOutputEntries,
+    onOpenDevtools, devtoolsForceKey }, ref
 ) {
   const [files, setFiles] = useState<VFile[]>([]);
   const [markersByFileId, setMarkersByFileId] = useState<Record<string, MarkerSnapshot[]>>({});
@@ -84,6 +87,20 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   const { size: termH, onMouseDown: onTermDrag } = useResizable(220, 80, 600, true);
   const [sidebarPanel, setSidebarPanel] = useState<string>("");
   const [sidebarVisible, setSidebarVisible] = useState(true);
+  const [browserConsoleMap, setBrowserConsoleMap] = useState<Record<string, BrowserConsoleEntry[]>>({});
+
+  const handleBrowserConsoleEntry = useCallback((entryTabId: string, entry: BrowserConsoleEntry) => {
+    setBrowserConsoleMap((prev) => {
+      const entries = prev[entryTabId] || [];
+      return { ...prev, [entryTabId]: [...entries.slice(-499), entry] };
+    });
+  }, []);
+
+  const handleClearBrowserConsole = useCallback(() => {
+    const activeId = activeBrowserTabId;
+    if (!activeId) return;
+    setBrowserConsoleMap((prev) => ({ ...prev, [activeId]: [] }));
+  }, [activeBrowserTabId]);
 
   const sidebarItems = [
     { id: "files", icon: "📁", label: "Explorer", title: "Explorer (Ctrl+Shift+E)" },
@@ -510,6 +527,8 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
                   onTitleChange={onBrowserTabUpdateLabel}
                   onUrlChange={onBrowserTabUpdateUrl}
                   onNewTab={onBrowserNewTabFromLink}
+                  onConsoleEntry={handleBrowserConsoleEntry}
+                  onOpenDevtools={onOpenDevtools}
                 />
               </div>
             )}
@@ -545,6 +564,9 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
                 onClearOutputEntries={onClearOutputEntries}
                 problemEntries={problemEntries}
                 onSelectProblem={handleSelectProblem}
+                browserConsoleEntries={browserConsoleMap[activeBrowserTab?.id || ""] || []}
+                onClearBrowserConsole={handleClearBrowserConsole}
+                devtoolsForceKey={devtoolsForceKey}
               />
             </div>
           </>

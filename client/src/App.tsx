@@ -72,6 +72,12 @@ export default function App() {
   const [termVisible, setTermVisible] = useState(false);
   const termVisibleRef = useRef(false);
   const reopenTerminal = useRef(false);
+  const [devtoolsForceKey, setDevtoolsForceKey] = useState(0);
+
+  const handleOpenDevtools = useCallback(() => {
+    setTermVisible(true);
+    setDevtoolsForceKey((n) => n + 1);
+  }, []);
 
   // A single top-level browser editor tab hosts multiple child browser tabs.
   const [browserTabs, setBrowserTabs] = useState<BrowserTab[]>([]);
@@ -529,6 +535,8 @@ export default function App() {
             onClearDebugEntries={clearDebugEntries}
             outputEntries={outputEntries}
             onClearOutputEntries={clearOutputEntries}
+            onOpenDevtools={handleOpenDevtools}
+            devtoolsForceKey={devtoolsForceKey}
           />
         </div>
 
