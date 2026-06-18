@@ -204,6 +204,8 @@ export default function TerminalPane({
   const [activeCategory, setActiveCategory] = useState<Category>("terminal");
   const [inspectActive, setInspectActive] = useState(false);
   const [browserConsoleCategory, setBrowserConsoleCategory] = useState<"console" | "elements">("console");
+  // Track whether user manually clicked a sub-tab — if so, don't auto-switch on domTree updates
+  const userPickedCategoryRef = useRef(false);
   const [domTreeNodes, setDomTreeNodes] = useState<Array<{ uid: string; tag: string; id: string; classes: string; text: string; attrs: string }>>([]);
   const [hoveredUid, setHoveredUid] = useState<string | null>(null);
   const [domExpanded, setDomExpanded] = useState<Set<string>>(new Set(["0", "1", "2"]));
@@ -384,13 +386,22 @@ export default function TerminalPane({
     const handler = (e: MessageEvent) => {
       if (!e.data || !e.data.__harnessDevtools) return;
       if (e.data.type === "domTree") {
-        setDomTreeNodes(e.data.nodes || []);
-        setBrowserConsoleCategory("elements");
+        const nodes = e.data.nodes || [];
+        setDomTreeNodes(nodes);
+        // Only auto-switch to elements if user hasn't manually picked a sub-tab
+        if (!userPickedCategoryRef.current && nodes.length > 0) {
+          setBrowserConsoleCategory("elements");
+        }
+        // Reset manual pick when page clears (tab switch sends empty nodes)
+        if (nodes.length === 0) {
+          userPickedCategoryRef.current = false;
+        }
       } else if (e.data.type === "hoverNode") {
         hoverFromTreeRef.current = false;
         setHoveredUid(e.data.uid);
       } else if (e.data.type === "inspectNode") {
-        // Element was clicked in inspect mode — expand all ancestors + scroll to it
+        // Element was clicked in inspect mode — always switch to elements + expand ancestors
+        setBrowserConsoleCategory("elements");
         const parts = (e.data.uid as string).split(".");
         setDomExpanded((prev) => {
           const next = new Set(prev);
@@ -403,6 +414,12 @@ export default function TerminalPane({
       } else if (e.data.type === "inspectEnd") {
         setInspectActive(false);
         setHoveredUid(null);
+      } else if (e.data.type === "inspectState") {
+        setInspectActive(!!e.data.active);
+        if (!e.data.active) setHoveredUid(null);
+      } else if (e.data.type === "showElements") {
+        setActiveCategory("browserConsole");
+        setBrowserConsoleCategory("elements");
       }
     };
     window.addEventListener("message", handler);
@@ -1578,13 +1595,13 @@ export default function TerminalPane({
                 <div className="terminal-category-tabs" style={{ marginRight: 8 }}>
                   <button
                     className={`terminal-category-tab${browserConsoleCategory === "console" ? " active" : ""}`}
-                    onClick={() => setBrowserConsoleCategory("console")}
+                    onClick={() => { userPickedCategoryRef.current = true; setBrowserConsoleCategory("console"); }}
                   >
                     Console
                   </button>
                   <button
                     className={`terminal-category-tab${browserConsoleCategory === "elements" ? " active" : ""}`}
-                    onClick={() => setBrowserConsoleCategory("elements")}
+                    onClick={() => { userPickedCategoryRef.current = true; setBrowserConsoleCategory("elements"); }}
                   >
                     Elements
                   </button>
@@ -1611,17 +1628,16 @@ export default function TerminalPane({
                 )}
                 <div style={{ display: "flex", gap: 4, marginLeft: "auto" }}>
                   <button
-                    className={`browser-btn-mouse${inspectActive ? " active" : ""}`}
+                    className={`browser-btn browser-btn-mouse${inspectActive ? " active" : ""}`}
                     onClick={() => {
                       const next = !inspectActive;
                       setInspectActive(next);
                       window.postMessage({ __harness: true, type: "toggle-inspect", active: next }, "*");
                       if (!next) { setHoveredUid(null); }
                     }}
-                    title={inspectActive ? "Click in page to inspect (2nd click ends)" : "Enable element inspector"}
-                    style={{ display: "flex", alignItems: "center", gap: 2, padding: "2px 6px", fontSize: 13, background: inspectActive ? "rgba(78,201,78,0.2)" : "#3c3c3c", color: inspectActive ? "#4ec94e" : "#ccc", border: "1px solid " + (inspectActive ? "#4ec94e" : "#555"), borderRadius: 3, cursor: "pointer", fontFamily: "inherit" }}
+                    title={inspectActive ? "Exit inspect mode" : "Select an element to inspect"}
                   >
-                    {inspectActive ? "⏹" : "�"}
+                    <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M3 1L3 11.5L5.9 8.6L8.3 14L10.1 13.2L7.7 7.4L11.5 7.4L3 1Z" fill="currentColor"/></svg>
                   </button>
                   {browserConsoleCategory === "console" && (
                     <>

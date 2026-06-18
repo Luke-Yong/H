@@ -163,6 +163,7 @@ export default function BrowserView({
     geolocation: false, camera: false, microphone: false, midi: false, autoplay: true,
   });
   const [viewportScale, setViewportScale] = useState(0.5);
+  const [loading, setLoading] = useState(false);
   const consoleSeqRef = useRef(0);
   const onConsoleEntryRef = useRef(onConsoleEntry);
   onConsoleEntryRef.current = onConsoleEntry;
@@ -231,8 +232,8 @@ export default function BrowserView({
     setInputUrl(url);
     setSecure(isHttps(url));
     liveUrlRef.current = url;
+    if (url) setLoading(true);
 
-    // Auto-focus the URL input when a new (blank) tab is created
     if (!url) {
       requestAnimationFrame(() => { inputRef.current?.focus(); });
     }
@@ -518,6 +519,7 @@ export default function BrowserView({
 
   // On every iframe load (React synthetic), inject hooks
   const iframeLoadHandler = useCallback((e: React.SyntheticEvent<HTMLIFrameElement>) => {
+    setLoading(false);
     injectIntoIframe(e.currentTarget);
   }, [injectIntoIframe, tabId, currentUrl]);
 
@@ -568,13 +570,35 @@ export default function BrowserView({
         }
       } else if (e.data.type === "toggle-inspect") {
         setInspectMode(!!e.data.active);
+        // Sync inspect state to TerminalPane
+        window.postMessage({ __harnessDevtools: true, type: "inspectState", active: !!e.data.active }, "*");
         if (isDesktop) {
           const view = webviewRef.current;
           if (view) {
             if (e.data.active) {
-              void view.executeJavaScript?.("window.__harnessInspectorActive=true", false).catch(() => {});
+              void view.executeJavaScript?.(`
+                window.__harnessInspectorActive=true;
+                (function(){
+                  var s=document.createElement('style');s.id='__harness_inspect_style';
+                  s.textContent='*{cursor:default!important}a,button,input,select,textarea,[onclick]{pointer-events:auto!important}';
+                  document.head.appendChild(s);
+                  function block(ev){if(window.__harnessInspectorActive){ev.preventDefault();ev.stopPropagation()}}
+                  ['mousedown','mouseup','keydown','keypress','submit','focus','auxclick','dblclick','contextmenu'].forEach(function(n){document.addEventListener(n,block,true)});
+                  window.__harnessInspectBlocker=block;
+                })()
+              `, false).catch(() => {});
             } else {
-              void view.executeJavaScript?.("window.__harnessInspectorActive=false;var l=window.__harnessLastEl;if(l&&l.style){l.style.outline=''}window.__harnessLastEl=null;var ib=document.getElementById('__harness_inspector_info');if(ib)ib.style.display='none'", false).catch(() => {});
+              void view.executeJavaScript?.(`
+                window.__harnessInspectorActive=false;
+                var l=window.__harnessLastEl;if(l&&l.style){l.style.outline=''}window.__harnessLastEl=null;
+                var ib=document.getElementById('__harness_inspector_info');if(ib)ib.style.display='none';
+                var ss=document.getElementById('__harness_inspect_style');if(ss)ss.remove();
+                if(window.__harnessInspectBlocker){
+                  var b=window.__harnessInspectBlocker;
+                  ['mousedown','mouseup','keydown','keypress','submit','focus','auxclick','dblclick','contextmenu'].forEach(function(n){document.removeEventListener(n,b,true)});
+                  delete window.__harnessInspectBlocker;
+                }
+              `, false).catch(() => {});
               window.postMessage({ __harnessDevtools: true, type: "inspectEnd" }, "*");
             }
           }
@@ -624,6 +648,10 @@ export default function BrowserView({
 
   // Immediate DOM tree update on browser tab switch (console is per-tab in EditorPane)
   useEffect(() => {
+    // Deactivate inspect mode when switching tabs
+    if (inspectMode) {
+      window.postMessage({ __harness: true, type: "toggle-inspect", active: false }, "*");
+    }
     // Clear old tab's DOM tree from TerminalPane immediately
     window.postMessage({ __harnessDevtools: true, type: "domTree", nodes: [] }, "*");
     // Immediately request fresh tree for the new tab
@@ -708,8 +736,8 @@ export default function BrowserView({
         if(window.__harnessLastEl&&window.__harnessLastEl!==t){try{window.__harnessLastEl.style.outline=''}catch(x){}}
         try{t.style.outline='2px solid #4ec94e';t.style.outlineOffset='-1px'}catch(x){}
         window.__harnessLastEl=t;
-        var uid=t.getAttribute('data-__huid');
-        if(uid)console.log('[Harness:domNode] '+uid);
+        // Walk up to find closest ancestor with data-__huid
+        var el=t;while(el&&el!==document.body&&el!==document.documentElement){var uid=el.getAttribute('data-__huid');if(uid){console.log('[Harness:domNode] '+uid);break}el=el.parentElement}
         var tag=t.tagName.toLowerCase();
         var tid=t.id?'#'+t.id:'';
         var tcls=t.className&&typeof t.className==='string'?'.'+t.className.trim().split(/\s+/).filter(Boolean).join('.'):'';
@@ -721,18 +749,23 @@ export default function BrowserView({
       document.addEventListener('click',function(e){
         if(!window.__harnessInspectorActive)return;
         e.preventDefault();e.stopPropagation();
-        var t=e.target,uid=t.getAttribute('data-__huid');
+        var t=e.target;
+        // Walk up to find closest ancestor with data-__huid
+        var el=t;var uid=null;while(el&&el!==document.body&&el!==document.documentElement){uid=el.getAttribute('data-__huid');if(uid)break;el=el.parentElement}
         if(uid){
-          var tag=t.tagName.toLowerCase();
-          var id=t.id?'#'+t.id:'';
-          var rect=t.getBoundingClientRect();
+          var tag=(el||t).tagName.toLowerCase();
+          var id=(el||t).id?'#'+(el||t).id:'';
+          var rect=(el||t).getBoundingClientRect();
           console.log('[Harness:inspectInfo] <'+tag+id+'>  '+rect.width.toFixed(0)+'\xD7'+rect.height.toFixed(0));
           console.log('[Harness:inspectNode] '+uid);
-          window.__harnessInspectorActive=false;
-          if(window.__harnessLastEl){try{window.__harnessLastEl.style.outline=''}catch(x){}window.__harnessLastEl=null;}
-          infoBar.style.display='none';
-          console.log('[Harness:inspectEnd] ');
         }
+        window.__harnessInspectorActive=false;
+        if(window.__harnessLastEl){try{window.__harnessLastEl.style.outline=''}catch(x){}window.__harnessLastEl=null;}
+        infoBar.style.display='none';
+        // Clean up inspect styles + blockers
+        var ss=document.getElementById('__harness_inspect_style');if(ss)ss.remove();
+        if(window.__harnessInspectBlocker){var b=window.__harnessInspectBlocker;['mousedown','mouseup','keydown','keypress','submit','focus','auxclick','dblclick','contextmenu'].forEach(function(n){document.removeEventListener(n,b,true)});delete window.__harnessInspectBlocker}
+        console.log('[Harness:inspectEnd] ');
       },true);
     })()
   `, [viewportWidth, viewportHeight]);
@@ -776,6 +809,7 @@ export default function BrowserView({
     // ── Event listeners ──
     const onDidFinishLoad = () => {
       navigatingRef.current = false;
+      setLoading(false);
       syncDesktopState("did-finish-load");
       if (webviewReadyRef.current) {
         void view.executeJavaScript?.(DESKTOP_INJECT_CODE, false).catch(() => {});
@@ -803,7 +837,7 @@ export default function BrowserView({
       syncDesktopState("dom-ready");
       void view.executeJavaScript?.(DESKTOP_INJECT_CODE, false).catch(() => {});
     };
-    const handleDidFailLoad = () => { navigatingRef.current = false; };
+    const handleDidFailLoad = () => { navigatingRef.current = false; setLoading(false); };
     const handleConsoleMessage = (event: Event) => {
       const details = event as Event & {
         level?: number;
@@ -829,7 +863,9 @@ export default function BrowserView({
           } else if (kind === "inspectNode") {
             window.postMessage({ __harnessDevtools: true, type: "inspectNode", tagHint: text }, "*");
           } else if (kind === "inspectEnd") {
+            setInspectMode(false);
             window.postMessage({ __harnessDevtools: true, type: "inspectEnd" }, "*");
+            window.postMessage({ __harnessDevtools: true, type: "inspectState", active: false }, "*");
           } else if (kind === "inspectInfo") {
             const entry: BrowserConsoleEntry = {
               id: `browser-${Date.now()}-${++consoleSeqRef.current}`,
@@ -867,7 +903,10 @@ export default function BrowserView({
       }
     };
 
+    const handleStartLoading = () => { setLoading(true); };
+
     view.addEventListener("dom-ready", handleDomReady);
+    view.addEventListener("did-start-loading", handleStartLoading);
     view.addEventListener("did-finish-load", onDidFinishLoad);
     view.addEventListener("did-navigate", onDidNavigate);
     view.addEventListener("did-navigate-in-page", onDidNavigateInPage);
@@ -877,15 +916,13 @@ export default function BrowserView({
     view.addEventListener("console-message", handleConsoleMessage);
     view.addEventListener("ipc-message", handleIpcMessage);
 
-    // ── Polling fallback ──
-    // Events cover most navigations, but polling catches redirects, meta-refresh,
-    // missed dom-ready, and any other URL changes that slip through events.
     const poll = setInterval(() => syncDesktopState("poll"), 300);
 
     return () => {
       webviewReadyRef.current = false;
       clearInterval(poll);
       view.removeEventListener("dom-ready", handleDomReady);
+      view.removeEventListener("did-start-loading", handleStartLoading);
       view.removeEventListener("did-finish-load", onDidFinishLoad);
       view.removeEventListener("did-navigate", onDidNavigate);
       view.removeEventListener("did-navigate-in-page", onDidNavigateInPage);
@@ -1010,6 +1047,16 @@ export default function BrowserView({
     onOpenDevtools?.();
   }, [onOpenDevtools]);
 
+  const toggleInspect = useCallback(() => {
+    const next = !inspectMode;
+    window.postMessage({ __harness: true, type: "toggle-inspect", active: next }, "*");
+    if (next) {
+      // Open terminal pane to browser console > elements
+      onOpenDevtools?.();
+      window.postMessage({ __harnessDevtools: true, type: "showElements" }, "*");
+    }
+  }, [inspectMode, onOpenDevtools]);
+
   // Inject element inspector into iframe on demand
   const injectInspector = useCallback((iframe: HTMLIFrameElement) => {
     try {
@@ -1078,6 +1125,15 @@ export default function BrowserView({
       // Send tree initially
       sendTree();
 
+      // Force arrow cursor + block page interactions during inspect
+      const inspectStyle = doc.createElement("style");
+      inspectStyle.id = "__harness_inspect_style";
+      inspectStyle.textContent = "*{cursor:default!important}";
+      doc.head.appendChild(inspectStyle);
+      const blockEvent = (ev: Event) => { ev.preventDefault(); ev.stopPropagation(); };
+      const blockEvents = ["mousedown", "mouseup", "keydown", "keypress", "submit", "focus", "auxclick", "dblclick", "contextmenu"];
+      blockEvents.forEach((n) => doc.addEventListener(n, blockEvent, true));
+
       // Info bar at bottom of viewport (multi-line tooltip)
       const infoBar = doc.createElement("div");
       infoBar.id = "__harness_inspector_info";
@@ -1096,7 +1152,6 @@ export default function BrowserView({
         (target as HTMLElement).style.outlineOffset = "-1px";
         lastEl = target;
 
-        // Build tooltip: tag, id, classes, dimensions, position, computed styles
         const tag = target.tagName.toLowerCase();
         const id = target.id ? "#" + target.id : "";
         const cls = target.className && typeof target.className === "string"
@@ -1109,9 +1164,13 @@ export default function BrowserView({
         infoBar.style.display = "block";
         infoBar.textContent = "<" + tag + id + cls + ">  " + sizeText + "  |  " + boxModel + "  |  " + colorInfo;
 
-        // Notify parent of hovered element uid for tree sync
-        const uid = target.getAttribute("data-__huid");
-        if (uid) window.postMessage({ __harness: true, type: "hoverNode", uid }, "*");
+        // Walk up to find closest ancestor with data-__huid
+        let el: Element | null = target;
+        while (el && el !== doc.body && el !== doc.documentElement) {
+          const uid = el.getAttribute("data-__huid");
+          if (uid) { window.postMessage({ __harness: true, type: "hoverNode", uid }, "*"); break; }
+          el = el.parentElement;
+        }
       };
 
       const onClick = (e: MouseEvent) => {
@@ -1120,22 +1179,26 @@ export default function BrowserView({
         const target = e.target as Element;
         if (!target || target === infoBar) return;
 
-        const uid = target.getAttribute("data-__huid");
-        // First click: log + scroll+expand tree, then exit inspect
-        if (uid) {
-          const tag = target.tagName.toLowerCase();
-          const id = target.id ? "#" + target.id : "";
-          const rect = target.getBoundingClientRect();
-          // Log element info to console
+        // Walk up to find closest ancestor with data-__huid
+        let el: Element | null = target;
+        let uid: string | null = null;
+        while (el && el !== doc.body && el !== doc.documentElement) {
+          uid = el.getAttribute("data-__huid");
+          if (uid) break;
+          el = el.parentElement;
+        }
+        if (uid && el) {
+          const tag = el.tagName.toLowerCase();
+          const eid = el.id ? "#" + el.id : "";
+          const rect = el.getBoundingClientRect();
           window.postMessage({
             __harness: true,
             type: "console",
             level: "info",
-            text: "<" + tag + id + ">  " + rect.width.toFixed(0) + "\xD7" + rect.height.toFixed(0),
+            text: "<" + tag + eid + ">  " + rect.width.toFixed(0) + "\xD7" + rect.height.toFixed(0),
             time: Date.now(),
             source: "inspect",
           }, "*");
-          // Expand tree to this node
           window.postMessage({ __harness: true, type: "inspectNode", uid }, "*");
         }
         // Turn off inspect
@@ -1149,6 +1212,8 @@ export default function BrowserView({
       win.__harnessInspectorCleanup = () => {
         if (lastEl) (lastEl as HTMLElement).style.outline = "";
         infoBar.remove();
+        inspectStyle.remove();
+        blockEvents.forEach((n) => doc.removeEventListener(n, blockEvent, true));
         doc.removeEventListener("mouseover", onMouseOver, true);
         doc.removeEventListener("click", onClick, true);
         delete win.__harnessInspectorActive;
@@ -1227,7 +1292,15 @@ export default function BrowserView({
       <div className="browser-toolbar">
         <button className="browser-btn" onClick={goBack} title="Back" disabled={!canGoBack}>◀</button>
         <button className="browser-btn" onClick={goForward} title="Forward" disabled={!canGoForward}>▶</button>
-        <button className="browser-btn" onClick={refresh} title="Refresh">↻</button>
+        {loading ? (
+          <button className="browser-btn browser-btn-spinner" title="Loading..." disabled>
+            <svg width="14" height="14" viewBox="0 0 14 14" style={{ animation: "harness-spin 0.8s linear infinite" }}>
+              <circle cx="7" cy="7" r="5.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeDasharray="24 10" strokeLinecap="round" />
+            </svg>
+          </button>
+        ) : (
+          <button className="browser-btn" onClick={refresh} title="Refresh">↻</button>
+        )}
         <div className="browser-url-wrap">
           {currentUrl ? (
             <button
@@ -1278,6 +1351,15 @@ export default function BrowserView({
           )}
         </div>
         <button className="browser-btn browser-btn-go" onClick={navigate}>Go</button>
+        <button
+          className={`browser-btn browser-btn-mouse${inspectMode ? " active" : ""}`}
+          onClick={toggleInspect}
+          title={inspectMode ? "Exit inspect mode" : "Select an element to inspect"}
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M3 1L3 11.5L5.9 8.6L8.3 14L10.1 13.2L7.7 7.4L11.5 7.4L3 1Z" fill="currentColor"/>
+          </svg>
+        </button>
         <button
           className="browser-btn"
           onClick={toggleDevtools}
