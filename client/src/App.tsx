@@ -1,12 +1,14 @@
 import { useRef, useCallback, useState, useEffect } from "react";
-import EditorPane, { EditorPaneHandle } from "./panes/EditorPane";
+import EditorPane, { EditorPaneHandle, type StatusBarState } from "./panes/EditorPane";
 import TestConsole from "./panes/TestConsole";
 import MenuBar from "./panes/MenuBar";
+import StatusBar from "./panes/StatusBar";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { useResizable, ResizeHandle } from "./hooks/useResizable";
 import type { FsEntry } from "./panes/FilesPanel";
 import type { DebugConsoleEntry, OutputEntry } from "./panes/TerminalPane";
-import { pickAndEnumerateFolder, pickAndReadFile } from "./panes/browserFs";
+import { pickAndEnumerateFolder, pickAndReadFile, enumerateHandle } from "./panes/browserFs";
+import NameDialog from "./panes/NameDialog";
 
 interface BrowserTab {
   id: string;
@@ -73,6 +75,21 @@ export default function App() {
   const termVisibleRef = useRef(false);
   const reopenTerminal = useRef(false);
   const [devtoolsForceKey, setDevtoolsForceKey] = useState(0);
+  const [showConsole, setShowConsole] = useState(false);
+  const [nameDialog, setNameDialog] = useState<{
+    title: string;
+    defaultValue?: string;
+    onOk: (value: string) => void;
+  } | null>(null);
+
+  const [statusBar, setStatusBar] = useState<StatusBarState>({
+    cursorLine: 1, cursorColumn: 1,
+    language: "plaintext", encoding: "UTF-8", fsBasePath: "", hasFsRoot: false, hasEditor: false,
+  });
+
+  const promptName = useCallback((title: string, defaultValue: string | undefined, onOk: (value: string) => void) => {
+    setNameDialog({ title, defaultValue, onOk });
+  }, []);
 
   const handleOpenDevtools = useCallback(() => {
     setTermVisible(true);
@@ -321,6 +338,7 @@ export default function App() {
       setFsRoot(data.entries || []);
       setFsBasePath(data.path);
       isBrowserFs.current = false;
+      setShowConsole(true);
       await detectProject(data.path);
       ensureTerminalVisible(shouldRestartTerminal);
     } catch (err) { alert(`Failed to open folder: ${err}`); }
@@ -345,26 +363,11 @@ export default function App() {
     setFsRoot(picked.entries);
     setFsBasePath(picked.name);
     isBrowserFs.current = true;
+    setShowConsole(true);
     setProjectVenvDir("");
     setProjectActivateScript("");
     ensureTerminalVisible(false);
   }, [ensureTerminalVisible, openFolder]);
-
-  const createProject = useCallback(async (dir: string) => {
-    try {
-      await fetch("/api/fs/mkdir", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: dir }) });
-      const sep = dir.includes("/") ? "/" : "\\";
-      await fetch("/api/fs/create-file", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: dir + sep + "index.html", content: `<!DOCTYPE html>\n<html>\n<head>\n  <link rel="stylesheet" href="style.css">\n</head>\n<body>\n  <h1>Hello</h1>\n  <script src="app.js"></script>\n</body>\n</html>` }) });
-      await fetch("/api/fs/create-file", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: dir + sep + "style.css", content: "body {\n  font-family: sans-serif;\n  padding: 2rem;\n}" }) });
-      await fetch("/api/fs/create-file", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: dir + sep + "app.js", content: "console.log('Hello Harness!');" }) });
-      const res = await fetch(`/api/fs/list?path=${encodeURIComponent(dir)}`);
-      const data = await res.json();
-      setFsRoot(data.entries || []);
-      setFsBasePath(data.path);
-      isBrowserFs.current = false;
-      detectProject(data.path);
-    } catch (err) { alert(`Failed to create project: ${err}`); }
-  }, [detectProject]);
 
   const refreshFs = useCallback(async () => {
     if (isBrowserFs.current || !fsBasePath) return;
@@ -372,20 +375,109 @@ export default function App() {
     catch { /* ignore */ }
   }, [fsBasePath]);
 
-  const createNewFile = useCallback(async (name: string) => {
-    if (!fsBasePath) return;
-    const filePath = fsBasePath + (fsBasePath.includes("/") ? "/" : "\\") + name;
+  const createNewProject = useCallback(async (projectName: string) => {
     try {
-      await fetch("/api/fs/create-file", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: filePath, content: "" }),
-      });
-      await refreshFs();
-      ensureTerminalVisible(false);
+      if (fsBasePath) {
+        // Create subfolder in current project, then open it
+        const sep = fsBasePath.includes("/") ? "/" : "\\";
+        const dir = fsBasePath + sep + projectName;
+        await fetch("/api/fs/mkdir", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: dir }) });
+        const res = await fetch(`/api/fs/list?path=${encodeURIComponent(dir)}`);
+        const data = await res.json();
+        if (!data.error) {
+          setFsRoot(data.entries || []);
+          setFsBasePath(data.path);
+          isBrowserFs.current = false;
+          detectProject(data.path);
+        }
+      } else if (window.harnessDesktop?.openFolder) {
+        // Desktop mode: pick parent directory, create subfolder, open only the subfolder
+        const parentPath = await window.harnessDesktop.openFolder();
+        if (!parentPath?.trim()) return;
+        const sep = parentPath.includes("/") ? "/" : "\\";
+        const dir = parentPath.trim() + sep + projectName;
+        await fetch("/api/fs/mkdir", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: dir }) });
+        const res = await fetch(`/api/fs/list?path=${encodeURIComponent(dir)}`);
+        const data = await res.json();
+        if (!data.error) {
+          setFsRoot(data.entries || []);
+          setFsBasePath(data.path);
+          isBrowserFs.current = false;
+          detectProject(data.path);
+        }
+      } else {
+        // Browser mode: pick parent directory, create subfolder, open only the subfolder
+        const parentHandle = await (window as any).showDirectoryPicker();
+        const projectHandle = await parentHandle.getDirectoryHandle(projectName, { create: true });
+        const entries = await enumerateHandle(projectHandle as FileSystemDirectoryHandle);
+        const dir = parentHandle.name + (parentHandle.name.includes("/") ? "/" : "\\") + projectName;
+        setFsRoot(entries);
+        setFsBasePath(dir);
+        isBrowserFs.current = true;
+        setProjectVenvDir("");
+        setProjectActivateScript("");
+      }
+      setShowConsole(true);
+      setTermVisible(true);
+    } catch (err) { alert(`Failed to create project: ${err}`); }
+  }, [detectProject, fsBasePath, refreshFs]);
+
+  const createNewFile = useCallback(async (name: string) => {
+    try {
+      const desktop = window.harnessDesktop;
+      if (desktop?.openFolder) {
+        // Desktop mode: pick folder, create file, open only the new file
+        const folderPath = await desktop.openFolder();
+        if (!folderPath?.trim()) return;
+        const sep = folderPath.includes("/") ? "/" : "\\";
+        const filePath = folderPath.trim() + sep + name;
+        await fetch("/api/fs/create-file", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: filePath, content: "" }),
+        });
+        setFsRoot([{ name, path: filePath, isDirectory: false }]);
+        setFsBasePath(folderPath.trim());
+        isBrowserFs.current = false;
+        detectProject(folderPath.trim());
+        editorRef.current?.applyAiFiles([{ name, content: "" }]);
+        const files = editorRef.current?.getFiles() || [];
+        const created = files.find((f) => f.name === name);
+        if (created) created._fsPath = filePath;
+      } else if (fsBasePath) {
+        // Existing project: create in current folder, refresh full tree
+        const sep = fsBasePath.includes("/") ? "/" : "\\";
+        const filePath = fsBasePath + sep + name;
+        await fetch("/api/fs/create-file", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: filePath, content: "" }),
+        });
+        await refreshFs();
+        editorRef.current?.applyAiFiles([{ name, content: "" }]);
+        const files = editorRef.current?.getFiles() || [];
+        const created = files.find((f) => f.name === name);
+        if (created) created._fsPath = filePath;
+      } else {
+        // Web mode no project: pick folder, create file, open only the new file
+        const dirHandle = await (window as any).showDirectoryPicker();
+        await dirHandle.getFileHandle(name, { create: true });
+        const filePath = dirHandle.name + (dirHandle.name.includes("/") ? "/" : "\\") + name;
+        setFsRoot([{ name, path: filePath, isDirectory: false }]);
+        setFsBasePath(dirHandle.name);
+        isBrowserFs.current = true;
+        setProjectVenvDir("");
+        setProjectActivateScript("");
+        editorRef.current?.applyAiFiles([{ name, content: "" }]);
+        const files = editorRef.current?.getFiles() || [];
+        const created = files.find((f) => f.name === name);
+        if (created) created._fsPath = filePath;
+      }
+      setShowConsole(true);
+      setTermVisible(true);
     }
     catch (err) { alert(`Failed to create file: ${err}`); }
-  }, [ensureTerminalVisible, fsBasePath, refreshFs]);
+  }, [detectProject, fsBasePath, refreshFs]);
 
   const openFileByPath = useCallback(async (filePath: string) => {
     try {
@@ -396,6 +488,7 @@ export default function App() {
       const data = await res.json();
       if (data.error) throw new Error(data.error);
       editorRef.current?.applyAiFiles([{ name: filePath.split(/[/\\]/).pop() || "untitled", content: data.content }]);
+      setShowConsole(true);
       if (dirPath && dirPath !== fsBasePath) {
         const listRes = await fetch(`/api/fs/list?path=${encodeURIComponent(dirPath)}`);
         const listData = await listRes.json();
@@ -427,6 +520,7 @@ export default function App() {
     const picked = await pickAndReadFile();
     if (!picked) return;
     editorRef.current?.applyAiFiles([{ name: picked.name, content: picked.content }]);
+    setShowConsole(true);
     const files = editorRef.current?.getFiles() || [];
     const last = files[files.length - 1];
     if (last) last._fsHandle = picked.handle;
@@ -447,19 +541,17 @@ export default function App() {
         { label: "Open File...", shortcut: "Ctrl+O", action: () => { void openFileImmediate(); } },
         "---" as const,
         { label: "New Project...", action: () => {
-          const dir = prompt("Project folder path (absolute):");
-          if (dir?.trim()) void createProject(dir.trim());
+          promptName("Project name:", undefined, (name) => { void createNewProject(name); });
         } },
         { label: "New File", shortcut: "Ctrl+N", action: () => {
-          const name = prompt("File name (e.g. utils.js):");
-          if (name?.trim()) void createNewFile(name.trim());
+          promptName("File name:", undefined, (name) => { void createNewFile(name); });
         } },
         "---" as const,
         { label: "Save", shortcut: "Ctrl+S", action: () => {
           const files = editorRef.current?.getFiles(); if (files) for (const f of files) { if (f._fsPath) fetch("/api/fs/write", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: f._fsPath, content: f.content }) }).catch(() => {}); }
         }},
         "---" as const,
-        { label: "Close Folder", shortcut: "Ctrl+K F", action: () => { setFsRoot(null); setFsBasePath(""); isBrowserFs.current = false; setProjectVenvDir(""); setProjectActivateScript(""); handleBrowserClose(); setTermVisible(false); } },
+        { label: "Close Folder", shortcut: "Ctrl+K F", action: () => { setFsRoot(null); setFsBasePath(""); isBrowserFs.current = false; setProjectVenvDir(""); setProjectActivateScript(""); handleBrowserClose(); setTermVisible(false); setShowConsole(false); } },
       ],
     },
     {
@@ -519,12 +611,10 @@ export default function App() {
             onBrowserNewTabFromLink={handleBrowserNewTabFromLink}
             onOpenFolder={() => { void openFolderImmediate(); }}
             onCreateProject={() => {
-              const dir = prompt("Project folder path (absolute):");
-              if (dir?.trim()) void createProject(dir.trim());
+              promptName("Project name:", undefined, (name) => { void createNewProject(name); });
             }}
             onCreateFile={() => {
-              const name = prompt("File name (e.g. utils.js):");
-              if (name?.trim()) void createNewFile(name.trim());
+              promptName("File name:", "index.js", (name) => { void createNewFile(name); });
             }}
             onOpenFile={() => { void openFileImmediate(); }}
             onRefreshFs={refreshFs}
@@ -537,11 +627,13 @@ export default function App() {
             onClearOutputEntries={clearOutputEntries}
             onOpenDevtools={handleOpenDevtools}
             devtoolsForceKey={devtoolsForceKey}
+            onStatusChange={setStatusBar}
           />
         </div>
 
-        <ResizeHandle onMouseDown={onConsoleDrag} />
+        {showConsole && <ResizeHandle onMouseDown={onConsoleDrag} />}
 
+        {showConsole && (
         <div className="pane pane-console" style={{ width: consoleW, minWidth: consoleW }}>
           <TestConsole
             events={events}
@@ -551,7 +643,33 @@ export default function App() {
             connected={connected}
           />
         </div>
+        )}
       </div>
+      <StatusBar
+        cursorLine={statusBar.cursorLine}
+        cursorColumn={statusBar.cursorColumn}
+        language={statusBar.language}
+        encoding={statusBar.encoding}
+        fsBasePath={statusBar.fsBasePath}
+        hasFsRoot={statusBar.hasFsRoot}
+        hasEditor={statusBar.hasEditor}
+        onSelectLanguage={(lang) => editorRef.current?.setLanguage(lang)}
+        onGoToLine={(line) => editorRef.current?.goToLine(line)}
+        onGoToBracket={() => editorRef.current?.goToBracket()}
+        onIndentChange={(opts) => editorRef.current?.setIndent(opts)}
+        onLineEndingChange={(le) => editorRef.current?.setLineEnding(le)}
+        onEncodingChange={(enc) => { editorRef.current?.setEncoding(enc); }}
+      />
+      <NameDialog
+        open={!!nameDialog}
+        title={nameDialog?.title || ""}
+        defaultValue={nameDialog?.defaultValue}
+        onOk={(value) => {
+          nameDialog?.onOk(value);
+          setNameDialog(null);
+        }}
+        onCancel={() => setNameDialog(null)}
+      />
     </div>
   );
 }

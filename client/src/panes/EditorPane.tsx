@@ -6,6 +6,8 @@ import TerminalPane, { type DebugConsoleEntry, type OutputEntry, type ProblemEnt
 import { VFile, createFile, detectLanguage } from "./fileModel";
 import { readFileFromHandle, writeFileToHandle } from "./browserFs";
 import { useResizable, ResizeHandle } from "../hooks/useResizable";
+import NameDialog from "./NameDialog";
+import ScmPanel from "./ScmPanel";
 import type { FsEntry } from "./FilesPanel";
 
 interface BrowserTab {
@@ -20,6 +22,22 @@ export interface EditorPaneHandle {
   getCode: () => { html: string; css: string; js: string };
   getFiles: () => VFile[];
   applyAiFiles: (files: { name: string; content: string }[]) => void;
+  goToLine: (line: number) => void;
+  goToBracket: () => void;
+  setLanguage: (lang: string) => void;
+  setIndent: (opts: { tabSize: number; insertSpaces: boolean }) => void;
+  setLineEnding: (le: string) => void;
+  setEncoding: (enc: string) => Promise<void>;
+}
+
+export interface StatusBarState {
+  cursorLine: number;
+  cursorColumn: number;
+  language: string;
+  encoding: string;
+  fsBasePath: string;
+  hasFsRoot: boolean;
+  hasEditor: boolean;
 }
 
 interface Props {
@@ -50,6 +68,7 @@ interface Props {
   onClearOutputEntries?: () => void;
   onOpenDevtools?: () => void;
   devtoolsForceKey?: number;
+  onStatusChange?: (state: StatusBarState) => void;
 }
 
 interface MarkerSnapshot {
@@ -67,6 +86,7 @@ interface EditorViewHandle {
   focus: () => void;
   setPosition: (position: { lineNumber: number; column: number }) => void;
   revealPositionInCenter: (position: { lineNumber: number; column: number }) => void;
+  onDidChangeCursorPosition: (cb: (e: { position: { lineNumber: number; column: number } }) => void) => { dispose: () => void };
 }
 
 const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
@@ -75,7 +95,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     onBrowserTabUpdateLabel, onBrowserTabUpdateUrl, onBrowserNewTabFromLink,
     onOpenFolder, onCreateProject, onCreateFile, onOpenFile, onRefreshFs,
     terminalVisible, onCloseTerminal, onDetectUrl, debugEntries, onClearDebugEntries, outputEntries, onClearOutputEntries,
-    onOpenDevtools, devtoolsForceKey }, ref
+    onOpenDevtools, devtoolsForceKey, onStatusChange }, ref
 ) {
   const [files, setFiles] = useState<VFile[]>([]);
   const [markersByFileId, setMarkersByFileId] = useState<Record<string, MarkerSnapshot[]>>({});
@@ -88,6 +108,12 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   const [sidebarPanel, setSidebarPanel] = useState<string>("");
   const [sidebarVisible, setSidebarVisible] = useState(true);
   const [browserConsoleMap, setBrowserConsoleMap] = useState<Record<string, BrowserConsoleEntry[]>>({});
+  const [nameDialog, setNameDialog] = useState<{
+    title: string;
+    defaultValue?: string;
+    onOk: (value: string) => void;
+  } | null>(null);
+  const [cursorPos, setCursorPos] = useState<{ line: number; column: number }>({ line: 1, column: 1 });
 
   const handleBrowserConsoleEntry = useCallback((entryTabId: string, entry: BrowserConsoleEntry) => {
     setBrowserConsoleMap((prev) => {
@@ -120,6 +146,68 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     !fsBasePath &&
     (!fsRoot || fsRoot.length === 0);
   const activeBrowserTab = browserTabs.find((b) => b.id === activeBrowserTabId) || browserTabs[0];
+  const activeFile = files.find((f) => f.id === activeFileId);
+  const activeLanguage = activeFile?.language || "plaintext";
+  const activeEncoding = activeFile?._encoding || "UTF-8";
+
+  const handleSetLanguage = useCallback((lang: string) => {
+    if (!activeFileId) return;
+    setFiles((prev) => prev.map((f) =>
+      f.id === activeFileId ? { ...f, language: lang } : f
+    ));
+  }, [activeFileId]);
+  const hasFsRoot = !!(fsRoot && fsRoot.length > 0) || !!fsBasePath;
+  const hasEditor = activeFileId !== "";
+
+  // Notify parent of status bar state
+  useEffect(() => {
+    onStatusChange?.({
+      cursorLine: cursorPos.line,
+      cursorColumn: cursorPos.column,
+      language: activeLanguage,
+      encoding: activeEncoding,
+      fsBasePath,
+      hasFsRoot,
+      hasEditor,
+    });
+  }, [cursorPos.line, cursorPos.column, activeLanguage, activeEncoding, fsBasePath, hasFsRoot, hasEditor, onStatusChange]);
+
+  const handleGoToLine = useCallback((line: number) => {
+    const editor = editorByFileIdRef.current[activeFileId];
+    if (!editor) return;
+    const model = (editor as any).getModel?.();
+    const maxLine = model?.getLineCount?.() || 99999;
+    if (line >= 1 && line <= maxLine) {
+      editor.revealPositionInCenter({ lineNumber: line, column: 1 });
+      editor.setPosition({ lineNumber: line, column: 1 });
+      editor.focus();
+    }
+  }, [activeFileId]);
+
+  const handleIndentChange = useCallback((opts: { tabSize: number; insertSpaces: boolean }) => {
+    const editor = editorByFileIdRef.current[activeFileId];
+    if (editor) {
+      (editor as any).updateOptions?.({ tabSize: opts.tabSize, insertSpaces: opts.insertSpaces });
+    }
+  }, [activeFileId]);
+
+  const handleGoToBracket = useCallback(() => {
+    const editor = editorByFileIdRef.current[activeFileId];
+    if (editor) {
+      (editor as any).getAction("editor.action.jumpToBracket")?.run();
+      editor.focus();
+    }
+  }, [activeFileId]);
+
+  const handleLineEnding = useCallback((le: string) => {
+    const editor = editorByFileIdRef.current[activeFileId];
+    if (editor && le) {
+      // Monaco EndOfLineSequence: 1=LF, 2=CRLF
+      const eol = le === "CRLF" ? 2 : 1;
+      (editor as any).getModel()?.setEOL(eol);
+    }
+  }, [activeFileId]);
+
   const problemEntries = useMemo<ProblemEntry[]>(() => {
     const severityMap: Record<number, ProblemEntry["severity"]> = {
       8: "error",
@@ -174,16 +262,20 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     prevBrowserCount.current = browserTabs.length;
   }, [browserTabs, files]);
 
-  // Auto-open files panel when files or folder are loaded (even if browser tabs are open)
-  const prevFileCount = useRef(0);
+  // Auto-open files panel when a folder is loaded
+  const hadFolderRef = useRef(false);
   useEffect(() => {
-    const hasFiles = files.length > 0 || (fsRoot && fsRoot.length > 0);
-    if (hasFiles && prevFileCount.current === 0) {
+    const hasFolder = !!(fsRoot && fsRoot.length > 0) || !!fsBasePath;
+    if (!hasFolder) {
+      hadFolderRef.current = false;
+      return;
+    }
+    if (!hadFolderRef.current) {
       setSidebarPanel("files");
       setSidebarVisible(true);
+      hadFolderRef.current = true;
     }
-    prevFileCount.current = files.length + (fsRoot ? fsRoot.length : 0);
-  }, [files, fsRoot]);
+  }, [fsRoot, fsBasePath]);
 
   const getCode = useCallback(() => {
     const byExt = (ext: string) => files.find((f) => f.name.endsWith(ext))?.content || "";
@@ -206,11 +298,24 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
         const data = await res.json();
         const f = createFile(name, data.content);
         f._fsPath = filePath;
+        f._encoding = data.encoding || "utf8";
         setFiles((prev) => [...prev, f]);
         setActiveFileId(f.id);
       }
     } catch (err) { console.error("Failed to open file:", err); }
   }, [files]);
+
+  const setEncoding = useCallback(async (enc: string) => {
+    const f = files.find((x) => x.id === activeFileId);
+    if (!f || !f._fsPath) return;
+    try {
+      const res = await fetch(`/api/fs/read-encoding?path=${encodeURIComponent(f._fsPath)}&encoding=${encodeURIComponent(enc)}`);
+      const data = await res.json();
+      setFiles((prev) => prev.map((x) =>
+        x.id === activeFileId ? { ...x, content: data.content, _encoding: enc } : x
+      ));
+    } catch { /* */ }
+  }, [files, activeFileId]);
 
   const applyAiFiles = useCallback((aiFiles: { name: string; content: string }[]) => {
     let newFileId = "";
@@ -237,7 +342,12 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     if (newFileId) setActiveFileId(newFileId);
   }, []);
 
-  useImperativeHandle(ref, () => ({ getCode, getFiles: () => files, applyAiFiles }), [getCode, files, applyAiFiles]);
+  useImperativeHandle(ref, () => ({
+    getCode, getFiles: () => files, applyAiFiles,
+    goToLine: handleGoToLine, goToBracket: handleGoToBracket,
+    setLanguage: handleSetLanguage, setIndent: handleIndentChange,
+    setLineEnding: handleLineEnding, setEncoding,
+  }), [getCode, files, applyAiFiles, handleGoToLine, handleGoToBracket, handleSetLanguage, handleIndentChange, handleLineEnding, setEncoding]);
 
   const updateFile = useCallback((id: string, content: string) => {
     setFiles((prev) => prev.map((f) => {
@@ -281,10 +391,35 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   }, []);
 
   const addFile = useCallback(() => {
-    const name = prompt("File name (e.g. utils.js):");
-    if (!name) return;
-    setFiles((prev) => [...prev, createFile(name)]);
-  }, []);
+    setNameDialog({ title: "New File", defaultValue: "untitled.js", onOk: async (name) => {
+      if (fsBasePath) {
+        // Create file on disk, refresh tree, open in editor
+        const sep = fsBasePath.includes("/") ? "/" : "\\";
+        const filePath = fsBasePath + sep + name;
+        try {
+          await fetch("/api/fs/create-file", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: filePath, content: "" }),
+          });
+          onRefreshFs();
+        } catch { /* ignore - still create virtual tab */ }
+        setFiles((prev) => {
+          const f = createFile(name);
+          f._fsPath = filePath;
+          setActiveFileId(f.id);
+          return [...prev, f];
+        });
+      } else {
+        setFiles((prev) => {
+          const f = createFile(name);
+          setActiveFileId(f.id);
+          return [...prev, f];
+        });
+      }
+      setNameDialog(null);
+    }});
+  }, [fsBasePath, onRefreshFs]);
 
   const closeTab = useCallback((id: string) => {
     if (id === BROWSER_EDITOR_TAB_ID) {
@@ -321,15 +456,19 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   const renameFile = useCallback((id: string) => {
     const f = files.find((x) => x.id === id);
     if (!f) return;
-    const newName = prompt("New name:", f.name);
-    if (!newName || newName === f.name) return;
-    setFiles((prev) => prev.map((x) =>
-      x.id === id ? { ...x, name: newName, language: detectLanguage(newName) } : x
-    ));
+    setNameDialog({ title: "Rename", defaultValue: f.name, onOk: (newName) => {
+      if (newName !== f.name) {
+        setFiles((prev) => prev.map((x) =>
+          x.id === id ? { ...x, name: newName, language: detectLanguage(newName) } : x
+        ));
+      }
+      setNameDialog(null);
+    }});
   }, [files]);
 
   if (!hasContent && !terminalVisible) {
     return (
+      <>
       <div className="ide-layout">
         <div className="activity-bar">
           {sidebarItems.map((item) => (
@@ -352,16 +491,16 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
           <div className="activity-bar-spacer" />
           <button className="activity-bar-btn" title="Manage">⚙</button>
         </div>
-        {sidebarVisible && sidebarPanel && sidebarPanel !== "browser" && (
+        {sidebarVisible && sidebarPanel && sidebarPanel !== "browser" && sidebarPanel !== "files" && sidebarPanel !== "scm" && (
           <div className="sidebar-placeholder">
             <div className="sidebar-placeholder-text">{sidebarItems.find((i) => i.id === sidebarPanel)?.label || ""}</div>
             {sidebarPanel === "search" && <div className="placeholder-sub">Search across files coming soon</div>}
-            {sidebarPanel === "scm" && <div className="placeholder-sub">Source control integration coming soon</div>}
             {sidebarPanel === "debug" && <div className="placeholder-sub">Debug console coming soon</div>}
             {sidebarPanel === "remote" && <div className="placeholder-sub">Remote connections coming soon</div>}
             {sidebarPanel === "extensions" && <div className="placeholder-sub">Extension marketplace coming soon</div>}
           </div>
         )}
+        {sidebarVisible && sidebarPanel === "scm" && <ScmPanel />}
         <div className="editor-welcome">
           <div className="welcome-logo">Harness</div>
           <div className="welcome-subtitle">AI-Powered Browser Test IDE</div>
@@ -376,7 +515,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
             </button>
             <button className="welcome-btn" onClick={onCreateProject}>
               <span className="welcome-btn-icon">🆕</span>
-              <span className="welcome-btn-text"><strong>New Project</strong><small>Create a new folder with index.html, style.css, app.js</small></span>
+              <span className="welcome-btn-text"><strong>New Project</strong><small>Create an empty folder for your project</small></span>
             </button>
             <button className="welcome-btn" onClick={onCreateFile}>
               <span className="welcome-btn-icon">📝</span>
@@ -390,10 +529,19 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
           </div>
         </div>
       </div>
+      <NameDialog
+        open={!!nameDialog}
+        title={nameDialog?.title || ""}
+        defaultValue={nameDialog?.defaultValue}
+        onOk={(value) => { nameDialog?.onOk(value); }}
+        onCancel={() => setNameDialog(null)}
+      />
+      </>
     );
   }
 
   return (
+    <>
     <div className="ide-layout">
       <div className="activity-bar">
         {sidebarItems.map((item) => (
@@ -436,14 +584,11 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
           <ResizeHandle onMouseDown={onFilePanelDrag} />
         </>
       )}
-      {sidebarVisible && sidebarPanel && sidebarPanel !== "files" && sidebarPanel !== "browser" && (
+      {sidebarVisible && sidebarPanel && sidebarPanel !== "files" && sidebarPanel !== "browser" && sidebarPanel !== "scm" && (
         <div className="sidebar-placeholder">
           <div className="sidebar-placeholder-text">{sidebarItems.find((i) => i.id === sidebarPanel)?.label || ""}</div>
           {sidebarPanel === "search" && (
             <div className="placeholder-sub">Search across files coming soon</div>
-          )}
-          {sidebarPanel === "scm" && (
-            <div className="placeholder-sub">Source control integration coming soon</div>
           )}
           {sidebarPanel === "debug" && (
             <div className="placeholder-sub">Debug console coming soon</div>
@@ -456,6 +601,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
           )}
         </div>
       )}
+      {sidebarVisible && sidebarPanel === "scm" && <ScmPanel />}
       <div className="ide-editor-area">
         <div className="editor-tabs">
           {files.length === 0 && !hasBrowserTabs && (
@@ -480,7 +626,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
             <button className="editor-tab editor-tab-add" onClick={onAddBrowserTab} title="Open browser">+ 🌐</button>
           )}
         </div>
-        <div className="editor-main" style={terminalVisible ? { height: `calc(100% - ${termH}px - 4px)` } : { flex: 1 }}>
+        <div className="editor-main" style={{ flex: 1, overflow: "hidden" }}>
           <div className="editor-container">
             {showWelcomeInEditor && (
               <div className="editor-welcome">
@@ -497,7 +643,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
                   </button>
                   <button className="welcome-btn" onClick={onCreateProject}>
                     <span className="welcome-btn-icon">🆕</span>
-                    <span className="welcome-btn-text"><strong>New Project</strong><small>Create a new folder with index.html, style.css, app.js</small></span>
+                    <span className="welcome-btn-text"><strong>New Project</strong><small>Create an empty folder for your project</small></span>
                   </button>
                   <button className="welcome-btn" onClick={onCreateFile}>
                     <span className="welcome-btn-icon">📝</span>
@@ -538,7 +684,13 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
                   height="100%" language={f.language} theme="vs-dark"
                   value={f.content} onChange={(val) => updateFile(f.id, val || "")}
                   onMount={(editor) => {
-                    editorByFileIdRef.current[f.id] = editor as EditorViewHandle;
+                    const ed = editor as EditorViewHandle;
+                    editorByFileIdRef.current[f.id] = ed;
+                    ed.onDidChangeCursorPosition((e: { position: { lineNumber: number; column: number } }) => {
+                      if (activeFileIdRef.current === f.id) {
+                        setCursorPos({ line: e.position.lineNumber, column: e.position.column });
+                      }
+                    });
                   }}
                   onValidate={(markers) => updateProblemMarkers(f.id, markers)}
                   options={{ minimap: { enabled: false }, fontSize: 13, wordWrap: "on", scrollBeyondLastLine: false, automaticLayout: true, tabSize: 2, lineNumbers: "on", renderWhitespace: "selection" }}
@@ -572,7 +724,15 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
           </>
         )}
       </div>
+      <NameDialog
+        open={!!nameDialog}
+        title={nameDialog?.title || ""}
+        defaultValue={nameDialog?.defaultValue}
+        onOk={(value) => { nameDialog?.onOk(value); }}
+        onCancel={() => setNameDialog(null)}
+      />
     </div>
+    </>
   );
 });
 

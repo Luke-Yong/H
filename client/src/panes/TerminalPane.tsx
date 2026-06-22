@@ -230,7 +230,7 @@ export default function TerminalPane({
     warn: true,
     error: true,
   });
-  const prevDevtoolsKeyRef = useRef<number | undefined>(undefined);
+  const prevDevtoolsKeyRef = useRef<number | undefined>(devtoolsForceKey);
   useEffect(() => {
     if (devtoolsForceKey !== undefined && devtoolsForceKey !== prevDevtoolsKeyRef.current) {
       prevDevtoolsKeyRef.current = devtoolsForceKey;

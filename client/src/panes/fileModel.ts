@@ -5,6 +5,7 @@ export interface VFile {
   content: string;
   _fsPath?: string;
   _fsHandle?: FileSystemFileHandle;
+  _encoding?: string;
 }
 
 export function detectLanguage(filename: string): string {

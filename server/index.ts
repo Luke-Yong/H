@@ -13,6 +13,8 @@ import {
 } from "./terminalManager";
 import fs from "fs";
 import path from "path";
+import os from "os";
+import { execSync } from "child_process";
 
 const app = express();
 const server = createServer(app);
@@ -97,8 +99,21 @@ app.get("/api/fs/list", (req, res) => {
 app.get("/api/fs/read", (req, res) => {
   try {
     const filePath = safePath(req.query.path as string);
-    const content = fs.readFileSync(filePath, "utf-8");
-    res.json({ path: filePath, content });
+    const raw = fs.readFileSync(filePath);
+    const { content, encoding } = detectAndDecode(raw);
+    res.json({ path: filePath, content, encoding });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+app.get("/api/fs/read-encoding", (req, res) => {
+  try {
+    const filePath = safePath(req.query.path as string);
+    const encoding = (req.query.encoding as string) || "utf-8";
+    const raw = fs.readFileSync(filePath);
+    const content = decodeWithEncoding(raw, encoding);
+    res.json({ path: filePath, content, encoding });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -194,6 +209,344 @@ app.post("/api/fs/create-file", (req, res) => {
     res.status(500).json({ error: String(err) });
   }
 });
+
+// ── System stats ──
+let prevCpuTimes = os.cpus().map((c) => c.times);
+let prevCpuTime = Date.now();
+let prevProcCpu = process.cpuUsage();
+let prevProcTime = Date.now();
+let prevNetBytes: { rx: number; tx: number } | null = null;
+let prevNetTime = 0;
+
+let firstStatsCall = true;
+
+app.get("/api/system/stats", (_req, res) => {
+  try {
+    const now = Date.now();
+    const cpus = os.cpus();
+    const cpuCount = cpus.length;
+
+    // CPU usage per core + total
+    const cpuUsage: number[] = [];
+    let totalDelta = 0;
+    let totalIdle = 0;
+
+    for (let i = 0; i < cpus.length; i++) {
+      const prev = prevCpuTimes[i] || { user: 0, nice: 0, sys: 0, idle: 0, irq: 0 };
+      const cur = cpus[i].times;
+      const prevTotal = prev.user + prev.nice + prev.sys + prev.idle + prev.irq;
+      const curTotal = cur.user + cur.nice + cur.sys + cur.idle + cur.irq;
+      const delta = curTotal - prevTotal;
+      const idle = cur.idle - prev.idle;
+      totalDelta += delta;
+      totalIdle += idle;
+      cpuUsage.push(Math.round((1 - idle / (delta || 1)) * 100));
+    }
+
+    prevCpuTimes = cpus.map((c) => c.times);
+    prevCpuTime = now;
+
+    const cpuPercent = totalDelta > 0 ? Math.round((1 - totalIdle / totalDelta) * 100) : 0;
+
+    // Memory
+    const totalMem = os.totalmem();
+    const freeMem = os.freemem();
+    const usedMem = totalMem - freeMem;
+
+    // Uptime
+    const uptime = os.uptime();
+    const days = Math.floor(uptime / 86400);
+    const hours = Math.floor((uptime % 86400) / 3600);
+    const mins = Math.floor((uptime % 3600) / 60);
+    const uptimeStr = days > 0 ? `${days}d ${hours}h` : `${hours}h ${mins}m`;
+
+    // Load average
+    const loadAvg = os.loadavg();
+
+    // ── IDE process stats ──
+    const procCpuPct = firstStatsCall ? 0 : (() => {
+      const nowProc = process.cpuUsage(prevProcCpu);
+      const wallElapsed = (now - prevProcTime) / 1000;
+      const procCpuMs = (nowProc.user + nowProc.system) / 1000;
+      const pct = wallElapsed > 0 ? Math.round((procCpuMs / (wallElapsed * cpuCount)) * 100) : 0;
+      return Math.min(pct, 100);
+    })();
+    prevProcCpu = process.cpuUsage();
+    prevProcTime = now;
+    firstStatsCall = false;
+
+    const memInfo = process.memoryUsage();
+
+    // Categorised processes
+    const processesByCategory: Array<{
+      category: string;
+      processes: Array<{ name: string; pid: number; ram: number; ramPercent: number; cpu: number }>;
+    }> = [];
+
+    // Get process listing (sampled)
+    const sampled = sampleProcesses();
+    const ourPid = process.pid;
+    const isOurProcess = (name: string, pid: number) =>
+      pid === ourPid ||
+      name.toLowerCase().includes("node") ||
+      name.toLowerCase().includes("tsx") ||
+      name.toLowerCase().includes("electron") ||
+      name.toLowerCase().includes("harness");
+
+    // IDE services (the main Harness node process + electron)
+    const ideServices = sampled.filter((p) => isOurProcess(p.name, p.pid) && !p.name.toLowerCase().includes("cmd") && !p.name.toLowerCase().includes("powershell") && !p.name.toLowerCase().includes("conhost"));
+    // Terminal processes spawned by IDE
+    const terminals = sampled.filter((p) => {
+      const n = p.name.toLowerCase();
+      return n.includes("cmd") || n.includes("powershell") || n.includes("conhost") || n.includes("bash") || n.includes("zsh") || n.includes("terminal");
+    });
+    // Other IDE-related processes
+    const others = sampled.filter((p) => isOurProcess(p.name, p.pid) && !ideServices.some((s) => s.pid === p.pid) && !terminals.some((t) => t.pid === p.pid));
+    // Non-IDE background (top 20 by RAM, skip idle)
+    const nonIde = sampled
+      .filter((p) => p.pid !== 0 && !isOurProcess(p.name, p.pid) && !terminals.some((t) => t.pid === p.pid))
+      .sort((a, b) => b.ram - a.ram)
+      .slice(0, 20);
+
+    const buildProc = (p: ProcessSample) => ({
+      name: p.name,
+      pid: p.pid,
+      ram: p.ram,
+      ramPercent: p.ramPercent,
+      cpu: p.pid === ourPid ? Math.min(procCpuPct, 100) : 0,
+    });
+
+    if (ideServices.length) processesByCategory.push({ category: "IDE Basic Service", processes: ideServices.map(buildProc) });
+    if (terminals.length) processesByCategory.push({ category: "User Terminal", processes: terminals.map(buildProc) });
+    if (others.length) processesByCategory.push({ category: "Others", processes: others.map(buildProc) });
+    if (nonIde.length) processesByCategory.push({ category: "Non-IDE", processes: nonIde.map(buildProc) });
+
+    // ── Disk breakdown ──
+    const cwd = path.resolve(process.cwd());
+
+    // OS-level disk info for the cwd drive
+    let diskTotal = 0, diskFree = 0, diskModel = "", diskDrive = "";
+    try {
+      diskDrive = (path.parse(cwd).root || "C:").replace(/\\/g, "");
+      if (process.platform === "win32") {
+        // Get Size and FreeSpace
+        const rawSize = execSync(`wmic logicaldisk where "DeviceID='${diskDrive}'" get Size,FreeSpace /format:csv`, { encoding: "utf8", timeout: 3000 });
+        const mSize = rawSize.match(/(\d+)\s*,\s*(\d+)/);
+        if (mSize) { diskFree = parseInt(mSize[1], 10); diskTotal = parseInt(mSize[2], 10); }
+        // Get disk model via diskdrive
+        try {
+          const rawModel = execSync('wmic diskdrive where "MediaType!=\'External hard disk media\'" get Model /format:csv', { encoding: "utf8", timeout: 2000 });
+          const lines = rawModel.trim().split(/\r?\n/).filter((l) => l.trim() && !l.includes("Node,Model"));
+          if (lines.length > 0) {
+            diskModel = lines[0].replace(/.*?,/, "").replace(/"/g, "").trim();
+          }
+        } catch { /* model optional */ }
+      } else {
+        // Unix: df for the cwd mount
+        const raw = execSync("df -h /", { encoding: "utf8", timeout: 2000 });
+        const m = raw.match(/(\d+)\s+(\d+)\s+(\d+)\s+(\d+%)/);
+        if (m) { diskTotal = parseInt(m[1], 10) * 1024; diskFree = parseInt(m[3], 10) * 1024; }
+      }
+    } catch { /* ignore */ }
+
+    const diskBreakdown: Array<{ component: string; size: number }> = [];
+    const dirs = ["server", "client", "electron"];
+    for (const d of dirs) {
+      const p = path.join(cwd, d);
+      if (fs.existsSync(p) && fs.statSync(p).isDirectory()) {
+        diskBreakdown.push({ component: d, size: dirSizeQuick(p) });
+      }
+    }
+    // Also measure node_modules for reference
+    const nm = path.join(cwd, "node_modules");
+    if (fs.existsSync(nm) && fs.statSync(nm).isDirectory()) {
+      diskBreakdown.push({ component: "node_modules", size: dirSizeQuick(nm) });
+    }
+
+    // ── Network stats ──
+    let totalRx = 0, totalTx = 0;
+    const netElapsed = prevNetTime ? (now - prevNetTime) / 1000 : 0;
+    try {
+      if (process.platform === "win32") {
+        const raw = execSync("netstat -e", { encoding: "utf8", timeout: 2000 });
+        const mRx = raw.match(/Bytes\s+(\d+)/);
+        const mTx = raw.match(/Bytes\s+\d+\s+(\d+)/);
+        if (mRx && mTx) { totalRx = parseInt(mRx[1], 10); totalTx = parseInt(mTx[1], 10); }
+      } else {
+        const raw = execSync("cat /proc/net/dev", { encoding: "utf8", timeout: 2000 });
+        for (const line of raw.split(/\r?\n/).slice(2)) {
+          const m = line.match(/^\s*([^:]+):\s+(\d+)\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+(\d+)/);
+          if (m && m[1].trim() !== "lo") { totalRx += parseInt(m[2], 10); totalTx += parseInt(m[3], 10); }
+        }
+      }
+    } catch { /* optional */ }
+
+    const netRxRate = netElapsed > 0 && prevNetBytes ? Math.round((totalRx - prevNetBytes.rx) / netElapsed) : 0;
+    const netTxRate = netElapsed > 0 && prevNetBytes ? Math.round((totalTx - prevNetBytes.tx) / netElapsed) : 0;
+    prevNetBytes = { rx: totalRx, tx: totalTx };
+    prevNetTime = now;
+
+    // IP addresses
+    const ipAddresses: Array<{ name: string; address: string; mac: string }> = [];
+    const ifaces = os.networkInterfaces();
+    for (const [name, addrs] of Object.entries(ifaces)) {
+      if (!addrs) continue;
+      for (const addr of addrs) {
+        if (addr.family === "IPv4" && !addr.internal) {
+          ipAddresses.push({ name, address: addr.address, mac: addr.mac || "" });
+        }
+      }
+    }
+
+    const network = { totalRx, totalTx, rxRate: netRxRate, txRate: netTxRate, ipAddresses };
+
+    res.json({
+      cpu: {
+        percent: cpuPercent,
+        cores: cpuCount,
+        perCore: cpuUsage,
+        model: cpus[0]?.model || "Unknown",
+        speed: cpus[0]?.speed || 0,
+      },
+      memory: {
+        total: totalMem,
+        used: usedMem,
+        free: freeMem,
+        percent: Math.round((usedMem / totalMem) * 100),
+      },
+      uptime: uptimeStr,
+      loadAvg,
+      hostname: os.hostname(),
+      platform: os.platform(),
+      arch: os.arch(),
+      processesByCategory,
+      disk: {
+        total: diskTotal,
+        free: diskFree,
+        used: diskTotal - diskFree,
+        percent: diskTotal > 0 ? Math.round(((diskTotal - diskFree) / diskTotal) * 100) : 0,
+        model: diskModel,
+        drive: diskDrive,
+      },
+      diskBreakdown,
+      network,
+      ourProcess: {
+        pid: process.pid,
+        cpu: Math.min(procCpuPct, 100),
+        ram: memInfo.rss,
+        ramPercent: Math.round((memInfo.rss / totalMem) * 100),
+        heapTotal: memInfo.heapTotal,
+        heapUsed: memInfo.heapUsed,
+        uptime: Math.round(process.uptime()),
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+interface ProcessSample {
+  name: string;
+  pid: number;
+  ram: number;
+  ramPercent: number;
+}
+
+function sampleProcesses(): ProcessSample[] {
+  const totalMem = os.totalmem();
+  try {
+    if (process.platform === "win32") {
+      // tasklist /FO CSV: "ImageName","PID","SessionName","Session#","Mem Usage"
+      const raw = execSync("tasklist /FO CSV /NH", { encoding: "utf8", timeout: 3000 }).trim();
+      const lines = raw.split(/\r?\n/).filter((l) => l.trim());
+      const result: ProcessSample[] = [];
+      for (const line of lines) {
+        const parts = line.split('","');
+        if (parts.length < 5) continue;
+        const name = (parts[0] ?? "").replace(/^"/, "").replace(/\.exe$/i, "");
+        const pid = parseInt((parts[1] ?? "").replace(/"/g, ""), 10);
+        const memStr = (parts[4] ?? "").replace(/"/g, "").replace(/[,\s]K$/i, "").replace(/,/g, "");
+        const memKb = parseInt(memStr, 10);
+        if (isNaN(pid) || isNaN(memKb)) continue;
+        result.push({ name, pid, ram: memKb * 1024, ramPercent: Math.round((memKb * 1024 / totalMem) * 100) });
+      }
+      return result;
+    } else {
+      // Unix: ps -eo comm,pid,rss --no-headers
+      const raw = execSync("ps -eo comm,pid,rss --no-headers", { encoding: "utf8", timeout: 3000 }).trim();
+      const lines = raw.split(/\r?\n/).filter((l) => l.trim());
+      const result: ProcessSample[] = [];
+      for (const line of lines) {
+        const m = line.match(/^(.+?)\s+(\d+)\s+(\d+)/);
+        if (!m) continue;
+        const name = (m[1] || "").replace(/.*[/\\]/, "");
+        const pid = parseInt(m[2], 10);
+        const ramKb = parseInt(m[3], 10);
+        if (isNaN(pid) || isNaN(ramKb)) continue;
+        result.push({ name, pid, ram: ramKb * 1024, ramPercent: Math.round((ramKb * 1024 / totalMem) * 100) });
+      }
+      return result;
+    }
+  } catch {
+    return [];
+  }
+}
+
+function dirSizeQuick(dirPath: string): number {
+  let total = 0;
+  try {
+    const items = fs.readdirSync(dirPath, { withFileTypes: true });
+    for (const item of items) {
+      const fp = path.join(dirPath, item.name);
+      if (item.isDirectory()) {
+        if (item.name === "node_modules" || item.name === ".git" || item.name === "dist") continue;
+        total += dirSizeQuick(fp);
+      } else {
+        try { total += fs.statSync(fp).size; } catch { /* skip */ }
+      }
+    }
+  } catch { /* skip */ }
+  return total;
+}
+
+// ── Encoding detection ──
+function detectAndDecode(raw: Buffer): { content: string; encoding: string } {
+  if (raw.length >= 2 && raw[0] === 0xFF && raw[1] === 0xFE) {
+    return { content: decodeWithEncoding(raw, "utf16le"), encoding: "utf16le" };
+  }
+  if (raw.length >= 2 && raw[0] === 0xFE && raw[1] === 0xFF) {
+    return { content: decodeWithEncoding(raw, "utf16be"), encoding: "utf16be" };
+  }
+  if (raw.length >= 3 && raw[0] === 0xEF && raw[1] === 0xBB && raw[2] === 0xBF) {
+    return { content: raw.subarray(3).toString("utf-8"), encoding: "utf8bom" };
+  }
+  return { content: raw.toString("utf-8"), encoding: "utf8" };
+}
+
+function decodeWithEncoding(raw: Buffer, encoding: string): string {
+  // strip any BOM before decoding
+  let buf = raw;
+  if (encoding === "utf8" || encoding === "utf-8") {
+    if (buf.length >= 3 && buf[0] === 0xEF && buf[1] === 0xBB && buf[2] === 0xBF) buf = buf.subarray(3);
+    return buf.toString("utf-8");
+  }
+  if (encoding === "utf16le" || encoding === "UTF-16 LE") {
+    if (buf.length >= 2 && buf[0] === 0xFF && buf[1] === 0xFE) buf = buf.subarray(2);
+    return buf.toString("utf16le");
+  }
+  if (encoding === "utf16be" || encoding === "UTF-16 BE") {
+    if (buf.length >= 2 && buf[0] === 0xFE && buf[1] === 0xFF) buf = buf.subarray(2);
+    return buf.swap16().toString("utf16le"); // Node has no utf16be decoder, swap bytes then decode as LE
+  }
+  if (encoding === "utf8bom") {
+    if (buf.length >= 3 && buf[0] === 0xEF && buf[1] === 0xBB && buf[2] === 0xBF) buf = buf.subarray(3);
+    return buf.toString("utf-8");
+  }
+  if (encoding === "latin1" || encoding === "ISO 8859-1") {
+    return buf.toString("latin1");
+  }
+  return buf.toString("utf-8");
+}
 
 // ── Health check ──
 app.get("/api/health", (_req, res) => {
