@@ -114,6 +114,137 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     onOk: (value: string) => void;
   } | null>(null);
   const [cursorPos, setCursorPos] = useState<{ line: number; column: number }>({ line: 1, column: 1 });
+  const [gitChanges, setGitChanges] = useState<Map<string, string>>(new Map()); // absolutePath → status letter
+  const [dirtyFiles, setDirtyFiles] = useState<Set<string>>(new Set()); // file ids that have unsaved changes
+  const [gitDiffs, setGitDiffs] = useState<Record<string, string>>({}); // fileId → unified diff text
+  const diffDecorationsRef = useRef<Record<string, string[]>>({}); // fileId → decorationIds
+
+  function applyDecorations(editor: any, fileId: string, diffText: string | undefined, markers: MarkerSnapshot[] | undefined) {
+    try {
+      const monaco = (window as any).monaco;
+      if (!monaco) return;
+      const model = editor.getModel();
+      if (!model) return;
+      const lineCount = model.getLineCount();
+
+      // Clear old decorations for this file
+      const old = diffDecorationsRef.current[fileId];
+      if (old?.length) editor.deltaDecorations(old, []);
+      const newDecorations: any[] = [];
+
+      // ── Git diff decorations (left gutter + overview ruler) ──
+      if (diffText) {
+        const lines = diffText.split("\n");
+        let oldLine = 0, newLine = 0;
+        for (const line of lines) {
+          if (line.startsWith("@@")) {
+            const m = line.match(/@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+            if (m) { oldLine = parseInt(m[1], 10); newLine = parseInt(m[3], 10); }
+          } else if (line.startsWith("+") && !line.startsWith("+++")) {
+            if (newLine <= lineCount) {
+              newDecorations.push({
+                range: new monaco.Range(newLine, 1, newLine, 1),
+                options: {
+                  isWholeLine: true,
+                  linesDecorationsClassName: "git-added-line",
+                  glyphMarginClassName: "git-added-glyph",
+                  overviewRuler: { color: "#2ea043", position: monaco.editor.OverviewRulerLane.Right },
+                },
+              });
+            }
+            newLine++;
+          } else if (line.startsWith("-") && !line.startsWith("---")) {
+            oldLine++;
+          } else if (!line.startsWith("\\")) {
+            oldLine++; newLine++;
+          }
+        }
+      }
+
+      // ── Error/warning decorations (overview ruler + left gutter) ──
+      if (markers && markers.length > 0) {
+        const seen = new Set<number>();
+        for (const m of markers) {
+          if (seen.has(m.startLineNumber)) continue;
+          seen.add(m.startLineNumber);
+          const severity = (m as any).severity; // 1=Hint, 2=Info, 4=Warning, 8=Error
+          const isError = severity === 8;
+          const isWarning = severity === 4;
+          if ((isError || isWarning) && m.startLineNumber <= lineCount) {
+            newDecorations.push({
+              range: new monaco.Range(m.startLineNumber, 1, m.startLineNumber, 1),
+              options: {
+                isWholeLine: true,
+                overviewRuler: {
+                  color: isError ? "#f85149" : "#d29922",
+                  position: monaco.editor.OverviewRulerLane.Full,
+                },
+                glyphMarginClassName: isError ? "error-glyph" : "warning-glyph",
+              },
+            });
+          }
+        }
+      }
+
+      const ids = editor.deltaDecorations([], newDecorations);
+      diffDecorationsRef.current[fileId] = ids;
+    } catch { /* */ }
+  }
+
+  // Fetch git status for FilesPanel markers and diff annotations
+  useEffect(() => {
+    if (!fsBasePath) { setGitChanges(new Map()); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/git/status?path=${encodeURIComponent(fsBasePath)}`);
+        const data = await res.json();
+        if (cancelled || !data.ok) return;
+        const gitRoot: string = data.gitRoot || fsBasePath;
+        const m = new Map<string, string>();
+        for (const c of ([] as Array<{ path: string; status: string }>).concat(data.staged || [], data.unstaged || [])) {
+          const absPath = gitRoot.replace(/\\/g, "/").replace(/\/$/, "") + "/" + c.path.replace(/\\/g, "/");
+          // Keep highest priority status: M > A > D > U
+          const existing = m.get(absPath);
+          const prio: Record<string, number> = { "M": 4, "A": 3, "D": 2, "U": 1, "?": 0 };
+          const s = c.status[0];
+          if (!existing || (prio[s] || 0) > (prio[existing] || 0)) {
+            m.set(absPath, s);
+          }
+        }
+        setGitChanges(m);
+      } catch { /* */ }
+    })();
+    return () => { cancelled = true; };
+  }, [fsBasePath]);
+
+  // Fetch git diff for active file and apply decorations
+  useEffect(() => {
+    const f = files.find((x) => x.id === activeFileId);
+    if (!f?._fsPath) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/git/diff?path=${encodeURIComponent(fsBasePath)}&file=${encodeURIComponent(f._fsPath!)}`);
+        const data = await res.json();
+        if (cancelled) return;
+        if (data.ok && data.diff) {
+          setGitDiffs((prev) => ({ ...prev, [f.id]: data.diff }));
+        } else {
+          setGitDiffs((prev) => { const n = { ...prev }; delete n[f.id]; return n; });
+        }
+      } catch { /* */ }
+    })();
+    return () => { cancelled = true; };
+  }, [activeFileId, files, fsBasePath]);
+
+  // Apply decorations when diff or markers change for active file
+  useEffect(() => {
+    const editor = editorByFileIdRef.current[activeFileId];
+    const diffText = gitDiffs[activeFileId];
+    const markers = markersByFileId[activeFileId];
+    if (editor) applyDecorations(editor, activeFileId, diffText, markers);
+  }, [activeFileId, gitDiffs, markersByFileId]);
 
   const handleBrowserConsoleEntry = useCallback((entryTabId: string, entry: BrowserConsoleEntry) => {
     setBrowserConsoleMap((prev) => {
@@ -350,18 +481,37 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   }), [getCode, files, applyAiFiles, handleGoToLine, handleGoToBracket, handleSetLanguage, handleIndentChange, handleLineEnding, setEncoding]);
 
   const updateFile = useCallback((id: string, content: string) => {
-    setFiles((prev) => prev.map((f) => {
-      if (f.id !== id) return f;
-      if (f._fsHandle) writeFileToHandle(f._fsHandle, content).catch(() => {});
-      else if (f._fsPath) {
-        fetch("/api/fs/write", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ path: f._fsPath, content }),
-        }).catch(() => {});
-      }
-      return { ...f, content };
-    }));
+    setDirtyFiles((prev) => { const next = new Set(prev); next.add(id); return next; });
+    setFiles((prev) => prev.map((f) =>
+      f.id !== id ? f : { ...f, content }
+    ));
   }, []);
+
+  const saveFile = useCallback((id: string) => {
+    const f = files.find((x) => x.id === id);
+    if (!f) return;
+    if (f._fsHandle) {
+      writeFileToHandle(f._fsHandle, f.content).catch(() => {});
+    } else if (f._fsPath) {
+      fetch("/api/fs/write", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: f._fsPath, content: f.content }),
+      }).catch(() => {});
+    }
+    setDirtyFiles((prev) => { const next = new Set(prev); next.delete(id); return next; });
+  }, [files]);
+
+  // Ctrl+S save
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+        e.preventDefault();
+        if (activeFileId) saveFile(activeFileId);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [activeFileId, saveFile]);
 
   const updateProblemMarkers = useCallback((fileId: string, markers: readonly MarkerSnapshot[]) => {
     setMarkersByFileId((prev) => ({
@@ -500,7 +650,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
             {sidebarPanel === "extensions" && <div className="placeholder-sub">Extension marketplace coming soon</div>}
           </div>
         )}
-        {sidebarVisible && sidebarPanel === "scm" && <ScmPanel />}
+        {sidebarVisible && sidebarPanel === "scm" && <ScmPanel fsBasePath={fsBasePath} />}
         <div className="editor-welcome">
           <div className="welcome-logo">Harness</div>
           <div className="welcome-subtitle">AI-Powered Browser Test IDE</div>
@@ -580,6 +730,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
             onOpenFsFolder={onOpenFolder}
             onRefreshFs={onRefreshFs}
             width={filePanelW}
+            gitChanges={gitChanges}
           />
           <ResizeHandle onMouseDown={onFilePanelDrag} />
         </>
@@ -601,18 +752,26 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
           )}
         </div>
       )}
-      {sidebarVisible && sidebarPanel === "scm" && <ScmPanel />}
+      {sidebarVisible && sidebarPanel === "scm" && <ScmPanel fsBasePath={fsBasePath} />}
       <div className="ide-editor-area">
         <div className="editor-tabs">
           {files.length === 0 && !hasBrowserTabs && (
             <div className="editor-tab tab-hint">Open a file from the sidebar to begin</div>
           )}
-          {files.map((f) => (
+          {files.map((f) => {
+            const fileMarkers = markersByFileId[f.id] || [];
+            const errCount = fileMarkers.filter((m: any) => m.severity === 8).length;
+            const warnCount = fileMarkers.filter((m: any) => m.severity === 4).length;
+            const hasError = errCount > 0;
+            const hasWarning = warnCount > 0;
+            return (
             <button key={f.id} className={`editor-tab${f.id === activeFileId ? " active" : ""}`} onClick={() => setActiveFileId(f.id)}>
-              {f._fsPath && <span className="tab-dot" title="On disk">● </span>}{f.name}
+              {dirtyFiles.has(f.id) && <span className="tab-dirty-dot" title="Unsaved"> ● </span>}
+              <span className={`tab-name${hasError ? " tab-name-err" : ""}${!hasError && hasWarning ? " tab-name-warn" : ""}`}>{f.name}</span>
               <span className="tab-close" onClick={(e) => { e.stopPropagation(); closeTab(f.id); }}>✕</span>
             </button>
-          ))}
+            );
+          })}
           {hasBrowserTabs && (
             <button
               className={`editor-tab${activeFileId === BROWSER_EDITOR_TAB_ID ? " active" : ""}`}
@@ -693,7 +852,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
                     });
                   }}
                   onValidate={(markers) => updateProblemMarkers(f.id, markers)}
-                  options={{ minimap: { enabled: false }, fontSize: 13, wordWrap: "on", scrollBeyondLastLine: false, automaticLayout: true, tabSize: 2, lineNumbers: "on", renderWhitespace: "selection" }}
+                  options={{ minimap: { enabled: false }, fontSize: 13, wordWrap: "on", scrollBeyondLastLine: false, automaticLayout: true, tabSize: 2, lineNumbers: "on", renderWhitespace: "selection", glyphMargin: true, overviewRulerLanes: 3 }}
                 />
               </div>
             ))}

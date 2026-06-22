@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import { VFile, createFile, detectLanguage } from "./fileModel";
 import { enumerateHandle } from "./browserFs";
 
@@ -24,6 +24,8 @@ interface Props {
   onRefreshFs: () => void;
   /** Resizable width */
   width?: number;
+  /** Git change map: file path → status letter (M/A/D/U/?) */
+  gitChanges?: Map<string, string>;
 }
 
 const FILE_ICONS: Record<string, string> = {
@@ -31,12 +33,21 @@ const FILE_ICONS: Record<string, string> = {
   json: "🟢", markdown: "📘", python: "🐍", default: "📄",
 };
 
-function FsTree({ entries, basePath, onOpenFile, onOpenFolder, depth }: {
+function statusColor(s: string): string {
+  if (s === "M") return "#e2b714";
+  if (s === "A") return "#4ec94e";
+  if (s === "D") return "#f44747";
+  if (s === "U" || s === "?") return "#569cd6";
+  return "#e2b714";
+}
+
+function FsTree({ entries, basePath, onOpenFile, onOpenFolder, depth, gitChanges }: {
   entries: FsEntry[];
   basePath: string;
   onOpenFile: (p: string, h?: FileSystemFileHandle) => void;
   onOpenFolder: (p: string) => void;
   depth: number;
+  gitChanges?: Map<string, string>;
 }) {
   return (
     <>
@@ -48,22 +59,45 @@ function FsTree({ entries, basePath, onOpenFile, onOpenFolder, depth }: {
           onOpenFile={onOpenFile}
           onOpenFolder={onOpenFolder}
           depth={depth}
+          gitChanges={gitChanges}
         />
       ))}
     </>
   );
 }
 
-function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth }: {
+function hasDescendantChanges(dirPath: string, changes: Map<string, string>): string | null {
+  const prefix = (dirPath.endsWith("/") ? dirPath : dirPath + "/").replace(/\\/g, "/");
+  // Priority: M > A > D > U
+  let best: string | null = null;
+  const prio: Record<string, number> = { "M": 4, "A": 3, "D": 2, "U": 1, "?": 0 };
+  for (const [filePath, status] of changes) {
+    const fp = filePath.replace(/\\/g, "/");
+    if (!fp.startsWith(prefix)) continue;
+    if (!best || (prio[status] || 0) > (prio[best] || 0)) best = status;
+  }
+  return best;
+}
+
+function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth, gitChanges }: {
   entry: FsEntry;
   basePath: string;
   onOpenFile: (p: string, h?: FileSystemFileHandle) => void;
   onOpenFolder: (p: string) => void;
   depth: number;
+  gitChanges?: Map<string, string>;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [children, setChildren] = useState<FsEntry[] | null>(null);
   const [loading, setLoading] = useState(false);
+
+  const gitMarker = useMemo(() => {
+    if (!gitChanges || gitChanges.size === 0) return null;
+    if (entry.isDirectory) {
+      return hasDescendantChanges(entry.path, gitChanges);
+    }
+    return gitChanges.get(entry.path.replace(/\\/g, "/")) || null;
+  }, [entry, gitChanges]);
 
   const handleToggle = useCallback(async () => {
     if (entry.isDirectory) {
@@ -101,6 +135,11 @@ function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth }: {
           {loading ? "⏳" : icon}
         </span>
         <span className="file-name">{entry.name}</span>
+        {gitMarker && (
+          <span className="fs-git-marker" style={{ color: statusColor(gitMarker) }}>
+            {gitMarker}
+          </span>
+        )}
       </div>
       {expanded && children && (
         <FsTree
@@ -109,6 +148,7 @@ function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth }: {
           onOpenFile={onOpenFile}
           onOpenFolder={onOpenFolder}
           depth={depth + 1}
+          gitChanges={gitChanges}
         />
       )}
     </>
@@ -118,7 +158,7 @@ function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth }: {
 export default function FilesPanel({
   files, activeFileId, onSelect, onAdd, onDelete, onRename,
   fsRoot, fsBasePath, onOpenFsFile, onRefreshFs,
-  width,
+  width, gitChanges,
 }: Props) {
   return (
     <div className="files-panel" style={width ? { width, minWidth: width } : {}}>
@@ -138,6 +178,7 @@ export default function FilesPanel({
               onOpenFile={onOpenFsFile}
               onOpenFolder={() => {}}
               depth={0}
+              gitChanges={gitChanges}
             />
           </div>
         </>

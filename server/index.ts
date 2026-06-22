@@ -548,6 +548,123 @@ function decodeWithEncoding(raw: Buffer, encoding: string): string {
   return buf.toString("utf-8");
 }
 
+// ── Git / SCM endpoints ──
+function gitCwd(reqPath?: string): string {
+  if (reqPath) {
+    let dir = path.resolve(reqPath);
+    while (true) {
+      if (fs.existsSync(path.join(dir, ".git"))) return dir;
+      const parent = path.dirname(dir);
+      if (parent === dir) break; // reached filesystem root
+      dir = parent;
+    }
+    // No .git found anywhere — use the resolved path so git fails with "not a repo"
+    return path.resolve(reqPath);
+  }
+  // No path given — only then fall back to server's cwd
+  return process.cwd();
+}
+
+app.get("/api/git/status", (req, res) => {
+  try {
+    const cwd = gitCwd(req.query.path as string | undefined);
+    const statusRaw = execSync("git status --porcelain -u", { cwd, encoding: "utf8", timeout: 5000 });
+    const lines = statusRaw.trim().split(/\r?\n/).filter(Boolean);
+    const staged: Array<{ path: string; status: string }> = [];
+    const unstaged: Array<{ path: string; status: string }> = [];
+    for (const line of lines) {
+      const idx = line.substring(0, 2);
+      const file = line.substring(3).trim();
+      const stageStatus = idx[0];
+      const workStatus = idx[1];
+      if (stageStatus !== " ") staged.push({ path: file, status: `${stageStatus}${workStatus !== " " ? workStatus : ""}` });
+      if (workStatus !== " ") unstaged.push({ path: file, status: workStatus });
+      if (stageStatus === " " && workStatus === " ") unstaged.push({ path: file, status: "U" }); // untracked
+    }
+    // Get current branch
+    let branch = "";
+    try {
+      branch = execSync("git rev-parse --abbrev-ref HEAD", { cwd, encoding: "utf8", timeout: 3000 }).trim();
+    } catch { branch = "unknown"; }
+    // Get git root for client to resolve relative paths
+    let gitRoot = "";
+    try {
+      gitRoot = execSync("git rev-parse --show-toplevel", { cwd, encoding: "utf8", timeout: 3000 }).trim();
+    } catch { /* */ }
+    res.json({ ok: true, branch, gitRoot: gitRoot || cwd, staged, unstaged });
+  } catch (err: any) {
+    res.json({ ok: false, error: err?.message || "Not a git repository" });
+  }
+});
+
+app.get("/api/git/log", (req, res) => {
+  try {
+    const cwd = gitCwd(req.query.path as string | undefined);
+    const limit = parseInt((req.query.limit as string) || "20", 10);
+    const remote = (req.query.remote as string) || "origin";
+    const raw = execSync(
+      `git log --max-count=${limit} --format="%H||%an||%ae||%ad||%s||%D" --date=relative`,
+      { cwd, encoding: "utf8", timeout: 5000 }
+    );
+    const commits = raw.trim().split(/\r?\n/).filter(Boolean).map((line) => {
+      const [hash, author, email, date, message, refs] = line.split("||");
+      return { hash, author, email, date, message, refs };
+    });
+    // Try getting GitHub remote URL
+    let remoteUrl = "";
+    try {
+      remoteUrl = execSync(`git remote get-url ${remote}`, { cwd, encoding: "utf8", timeout: 3000 }).trim();
+    } catch { /* */ }
+    res.json({ ok: true, commits, remoteUrl });
+  } catch (err: any) {
+    res.json({ ok: false, error: err?.message || "Not a git repository" });
+  }
+});
+
+app.post("/api/git/fetch", (req, res) => {
+  try {
+    const cwd = gitCwd(req.query.path as string | undefined);
+    execSync("git fetch --all", { cwd, encoding: "utf8", timeout: 30000 });
+    res.json({ ok: true });
+  } catch (err: any) {
+    res.json({ ok: false, error: err?.message || "Fetch failed" });
+  }
+});
+
+app.post("/api/git/pull", (req, res) => {
+  try {
+    const cwd = gitCwd(req.query.path as string | undefined);
+    execSync("git pull", { cwd, encoding: "utf8", timeout: 30000 });
+    res.json({ ok: true });
+  } catch (err: any) {
+    res.json({ ok: false, error: err?.message || "Pull failed" });
+  }
+});
+
+app.post("/api/git/push", (req, res) => {
+  try {
+    const cwd = gitCwd(req.query.path as string | undefined);
+    execSync("git push", { cwd, encoding: "utf8", timeout: 30000 });
+    res.json({ ok: true });
+  } catch (err: any) {
+    res.json({ ok: false, error: err?.message || "Push failed" });
+  }
+});
+
+app.get("/api/git/diff", (req, res) => {
+  try {
+    const cwd = gitCwd(req.query.path as string | undefined);
+    const file = req.query.file as string;
+    if (!file) return res.status(400).json({ ok: false, error: "file param required" });
+    // Make path relative to git root for git diff
+    const relFile = path.isAbsolute(file) ? path.relative(cwd, file) : file;
+    const raw = execSync(`git diff -- "${relFile}"`, { cwd, encoding: "utf8", timeout: 5000, maxBuffer: 1024 * 1024 });
+    res.json({ ok: true, file, diff: raw });
+  } catch (err: any) {
+    res.json({ ok: false, error: err?.message || "Diff failed" });
+  }
+});
+
 // ── Health check ──
 app.get("/api/health", (_req, res) => {
   res.json({ status: "ok" });
