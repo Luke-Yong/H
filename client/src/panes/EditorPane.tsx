@@ -82,6 +82,15 @@ interface MarkerSnapshot {
   code?: string | { value: string };
 }
 
+// A contiguous git change relative to HEAD, used for the click-to-peek popup + revert.
+interface GitHunk {
+  kind: "added" | "modified" | "removed";
+  newStart: number;   // first current-file line of the hunk (for removed: the surviving line where deleted lines used to be)
+  newCount: number;   // number of current-file lines in the hunk (0 for a pure deletion)
+  original: string[]; // HEAD lines that were removed/replaced (empty for a pure addition)
+  current: string[];  // current lines that were added/changed (empty for a pure deletion)
+}
+
 // Normalize a filesystem path for comparison: unify separators and uppercase
 // the Windows drive letter (git/Node/browser can disagree on drive-letter case).
 function normPath(p: string | undefined | null): string {
@@ -144,9 +153,11 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   const [dirtyFiles, setDirtyFiles] = useState<Set<string>>(new Set()); // file ids that have unsaved changes
   const [gitDiffs, setGitDiffs] = useState<Record<string, string>>({}); // fileId → unified diff text
   const diffDecorationsRef = useRef<Record<string, string[]>>({}); // fileId → decorationIds
-  // fileId → (lineNumber → change info) used for click-to-peek
-  const gitHunksRef = useRef<Record<string, Map<number, { kind: "added" | "modified" | "removed"; original: string[] }>>>({});
-  // fileId → currently open inline diff peek (so it can be toggled/closed)
+  // fileId → (lineNumber → git hunk) used for click-to-peek + revert
+  const gitHunksRef = useRef<Record<string, Map<number, GitHunk>>>({});
+  // fileId → (lineNumber → diagnostics on that line) used for error/warning peek
+  const markersByLineRef = useRef<Record<string, Map<number, MarkerSnapshot[]>>>({});
+  // fileId → currently open inline peek (so it can be toggled/closed)
   const peekRef = useRef<Record<string, { line: number; zoneId: string } | null>>({});
 
   function applyDecorations(editor: any, fileId: string, diffText: string | undefined, markers: MarkerSnapshot[] | undefined) {
@@ -163,7 +174,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
       const newDecorations: any[] = [];
 
       // ── Git diff decorations (left gutter + overview ruler) ──
-      const hunkMap = new Map<number, { kind: "added" | "modified" | "removed"; original: string[] }>();
+      const hunkMap = new Map<number, GitHunk>();
       if (diffText) {
         const lines = diffText.split("\n");
         let newLine = 0;
@@ -171,15 +182,15 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
         let delBuf: string[] = [];
         let addStart = 0, addCount = 0;
 
-        const pushDeco = (line: number, kind: "added" | "modified" | "removed", original: string[]) => {
+        const pushGlyph = (line: number, kind: GitHunk["kind"], hunk: GitHunk) => {
           if (line < 1 || line > lineCount) return;
-          hunkMap.set(line, { kind, original });
+          hunkMap.set(line, hunk);
           if (kind === "removed") {
             newDecorations.push({
               range: new monaco.Range(line, 1, line, 1),
               options: {
                 glyphMarginClassName: "git-removed-glyph",
-                glyphMarginHoverMessage: { value: "Removed lines (click to view)" },
+                glyphMarginHoverMessage: { value: "Removed lines (click to view / revert)" },
                 overviewRuler: { color: "#f85149", position: monaco.editor.OverviewRulerLane.Right },
               },
             });
@@ -191,6 +202,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
                 isWholeLine: true,
                 linesDecorationsClassName: isAdded ? "git-added-line" : "git-modified-line",
                 glyphMarginClassName: isAdded ? "git-added-glyph" : "git-modified-glyph",
+                glyphMarginHoverMessage: { value: `${isAdded ? "Added" : "Modified"} lines (click to view / revert)` },
                 overviewRuler: {
                   color: isAdded ? "#2ea043" : "#388bfd",
                   position: monaco.editor.OverviewRulerLane.Right,
@@ -203,13 +215,19 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
         const flush = () => {
           if (addCount > 0) {
             // Added (no removals) vs modified (removals replaced by additions)
-            const kind = delBuf.length > 0 ? "modified" : "added";
+            const kind: GitHunk["kind"] = delBuf.length > 0 ? "modified" : "added";
+            const current: string[] = [];
             for (let i = 0; i < addCount; i++) {
-              pushDeco(addStart + i, kind, i === 0 ? delBuf.slice() : []);
+              const ln = addStart + i;
+              current.push(ln >= 1 && ln <= lineCount ? model.getLineContent(ln) : "");
             }
+            const hunk: GitHunk = { kind, newStart: addStart, newCount: addCount, original: delBuf.slice(), current };
+            for (let i = 0; i < addCount; i++) pushGlyph(addStart + i, kind, hunk);
           } else if (delBuf.length > 0) {
             // Pure deletion — mark the surviving line where the lines used to be
-            pushDeco(Math.min(Math.max(newLine, 1), lineCount), "removed", delBuf.slice());
+            const surviving = Math.min(Math.max(newLine, 1), lineCount);
+            const hunk: GitHunk = { kind: "removed", newStart: surviving, newCount: 0, original: delBuf.slice(), current: [] };
+            pushGlyph(surviving, "removed", hunk);
           }
           delBuf = []; addStart = 0; addCount = 0;
         };
@@ -239,64 +257,220 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
       gitHunksRef.current[fileId] = hunkMap;
 
       // ── Error/warning decorations (overview ruler + left gutter) ──
+      const lineMarkers = new Map<number, MarkerSnapshot[]>();
       if (markers && markers.length > 0) {
-        const seen = new Set<number>();
+        // Group diagnostics by line so the click-popup can show all of them.
         for (const m of markers) {
-          if (seen.has(m.startLineNumber)) continue;
-          seen.add(m.startLineNumber);
-          const severity = (m as any).severity; // 1=Hint, 2=Info, 4=Warning, 8=Error
-          const isError = severity === 8;
-          const isWarning = severity === 4;
-          if ((isError || isWarning) && m.startLineNumber <= lineCount) {
-            newDecorations.push({
-              range: new monaco.Range(m.startLineNumber, 1, m.startLineNumber, 1),
-              options: {
-                isWholeLine: true,
-                overviewRuler: {
-                  color: isError ? "#f85149" : "#d29922",
-                  // Lane 0 = Left (errors), Lane 1 = Center (warnings), avoid lane 2 (Right = git)
-                  position: isError ? monaco.editor.OverviewRulerLane.Left : monaco.editor.OverviewRulerLane.Center,
-                },
-                glyphMarginClassName: isError ? "error-glyph" : "warning-glyph",
+          if (m.startLineNumber > lineCount) continue;
+          const arr = lineMarkers.get(m.startLineNumber) || [];
+          arr.push(m);
+          lineMarkers.set(m.startLineNumber, arr);
+        }
+        for (const [line, arr] of lineMarkers) {
+          // Highest severity on the line wins for the glyph color.
+          const top = Math.max(...arr.map((m) => m.severity || 0));
+          const isError = top === 8;
+          const isWarning = top === 4;
+          if (!isError && !isWarning) continue;
+          newDecorations.push({
+            range: new monaco.Range(line, 1, line, 1),
+            options: {
+              isWholeLine: true,
+              overviewRuler: {
+                color: isError ? "#f85149" : "#d29922",
+                // Lane 0 = Left (errors), Lane 1 = Center (warnings), avoid lane 2 (Right = git)
+                position: isError ? monaco.editor.OverviewRulerLane.Left : monaco.editor.OverviewRulerLane.Center,
               },
-            });
-          }
+              glyphMarginClassName: isError ? "error-glyph" : "warning-glyph",
+            },
+          });
         }
       }
+      markersByLineRef.current[fileId] = lineMarkers;
 
       const ids = editor.deltaDecorations([], newDecorations);
       diffDecorationsRef.current[fileId] = ids;
     } catch { /* */ }
   }
 
-  // Show/hide an inline peek of the original (HEAD) lines for a changed/removed hunk.
-  function toggleDiffPeek(editor: any, fileId: string, line: number) {
+  function closePeek(editor: any, fileId: string) {
+    const existing = peekRef.current[fileId];
+    if (existing) {
+      editor.changeViewZones((acc: any) => acc.removeZone(existing.zoneId));
+      peekRef.current[fileId] = null;
+    }
+  }
+
+  // Render a single diff line, making blank lines and whitespace-only lines visible.
+  function makeLineRow(text: string, cls: string): HTMLElement {
+    const row = document.createElement("div");
+    row.className = "git-diff-peek-line " + cls;
+    if (text.length === 0) {
+      row.classList.add("peek-ws");
+      row.textContent = "⏎"; // an empty / newline-only line
+    } else if (text.trim().length === 0) {
+      row.classList.add("peek-ws");
+      row.textContent = "·".repeat(text.length); // whitespace-only → show as dots
+    } else {
+      row.textContent = text; // CSS white-space: pre preserves inner spacing
+    }
+    return row;
+  }
+
+  // Restore a hunk to its HEAD (original) state by editing the model in place.
+  function revertHunk(editor: any, hunk: GitHunk) {
+    const monaco = (window as any).monaco;
+    const model = editor.getModel();
+    if (!monaco || !model) return;
+    const eol = model.getEOL();
+    const lineCount = model.getLineCount();
+    let range: any;
+    let text: string;
+    if (hunk.kind === "added") {
+      // Delete the added lines entirely.
+      const start = hunk.newStart;
+      const end = hunk.newStart + hunk.newCount - 1;
+      if (end >= lineCount) {
+        const from = Math.max(1, start - 1);
+        range = new monaco.Range(from, from < start ? model.getLineMaxColumn(from) : 1, end, model.getLineMaxColumn(end));
+      } else {
+        range = new monaco.Range(start, 1, end + 1, 1);
+      }
+      text = "";
+    } else if (hunk.kind === "modified") {
+      // Replace current lines with the original ones.
+      const start = hunk.newStart;
+      const end = hunk.newStart + hunk.newCount - 1;
+      range = new monaco.Range(start, 1, end, model.getLineMaxColumn(end));
+      text = hunk.original.join(eol);
+    } else {
+      // removed → re-insert the original lines where they used to be.
+      const at = hunk.newStart;
+      if (at > lineCount) {
+        range = new monaco.Range(lineCount, model.getLineMaxColumn(lineCount), lineCount, model.getLineMaxColumn(lineCount));
+        text = eol + hunk.original.join(eol);
+      } else {
+        range = new monaco.Range(at, 1, at, 1);
+        text = hunk.original.join(eol) + eol;
+      }
+    }
+    editor.executeEdits("git-revert", [{ range, text, forceMoveMarkers: true }]);
+    editor.pushUndoStop?.();
+  }
+
+  // Click a glyph → show a popup. Git glyphs get Revert + Close; error/warning
+  // glyphs get the diagnostic message(s) + Close. Both can appear together.
+  function togglePeek(editor: any, fileId: string, line: number) {
     try {
-      const info = gitHunksRef.current[fileId]?.get(line);
       const existing = peekRef.current[fileId];
       if (existing) {
         editor.changeViewZones((acc: any) => acc.removeZone(existing.zoneId));
         peekRef.current[fileId] = null;
-        if (existing.line === line) return; // clicking the same glyph closes the peek
+        if (existing.line === line) return; // clicking the same glyph closes it
       }
-      // Nothing original to show (e.g. a purely added line) — only mark, no peek.
-      if (!info || info.original.length === 0) return;
+      const hunk = gitHunksRef.current[fileId]?.get(line);
+      const diags = markersByLineRef.current[fileId]?.get(line) || [];
+      if (!hunk && diags.length === 0) return;
 
       const dom = document.createElement("div");
-      dom.className = "git-diff-peek";
-      for (const text of info.original) {
-        const row = document.createElement("div");
-        row.className = "git-diff-peek-line";
-        row.textContent = text.length ? text : "\u00A0";
-        dom.appendChild(row);
+      dom.className = "editor-peek";
+      // The view-zone layer sits *below* Monaco's `.monaco-mouse-cursor-text`
+      // overlay, which would otherwise win the hit-test and swallow the press.
+      // Give the popup its own raised stacking context so it receives clicks.
+      dom.style.position = "relative";
+      dom.style.zIndex = "30";
+      dom.style.pointerEvents = "auto";
+      let rows = 0;
+
+      // Diagnostics section
+      if (diags.length) {
+        const sec = document.createElement("div");
+        sec.className = "editor-peek-section";
+        for (const d of diags) {
+          const sev = d.severity === 8 ? "error" : d.severity === 4 ? "warning" : "info";
+          const r = document.createElement("div");
+          r.className = "peek-diag peek-diag-" + sev;
+          const icon = sev === "error" ? "✕" : sev === "warning" ? "▲" : "ℹ";
+          const src = d.source ? `  (${d.source})` : "";
+          r.textContent = `${icon} ${d.message}${src}`;
+          sec.appendChild(r);
+          rows++;
+        }
+        dom.appendChild(sec);
       }
-      editor.changeViewZones((acc: any) => {
-        const zoneId = acc.addZone({
-          afterLineNumber: Math.max(0, line - 1),
-          heightInLines: info.original.length,
-          domNode: dom,
+
+      // Git diff section
+      if (hunk) {
+        const sec = document.createElement("div");
+        sec.className = "editor-peek-section";
+        const title = document.createElement("div");
+        title.className = "peek-git-title";
+        title.textContent =
+          hunk.kind === "added" ? "Added lines" :
+          hunk.kind === "removed" ? "Removed lines (original)" : "Modified — original ↓";
+        sec.appendChild(title); rows++;
+        // Show original (HEAD) lines for removed/modified.
+        for (const t of hunk.original) { sec.appendChild(makeLineRow(t, "peek-old")); rows++; }
+        // For added/modified, also show the current lines.
+        if (hunk.kind !== "removed") {
+          if (hunk.kind === "modified") {
+            const sub = document.createElement("div");
+            sub.className = "peek-git-title peek-git-subtitle";
+            sub.textContent = "current ↓";
+            sec.appendChild(sub); rows++;
+          }
+          for (const t of hunk.current) { sec.appendChild(makeLineRow(t, "peek-new")); rows++; }
+        }
+        dom.appendChild(sec);
+      }
+
+      // Button bar. NOTE: act on `mousedown`, not `click` — Monaco re-lays-out
+      // view zones on the editor mousedown that precedes the click and can
+      // recreate this DOM node, so a `click` handler would never fire.
+      const bar = document.createElement("div");
+      bar.className = "editor-peek-bar";
+      const makeBtn = (label: string, cls: string, action: () => void) => {
+        const b = document.createElement("button");
+        b.className = "peek-btn " + cls;
+        b.textContent = label;
+        b.addEventListener("mousedown", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          action();
         });
+        return b;
+      };
+      if (hunk) {
+        bar.appendChild(makeBtn("Revert", "peek-btn-revert", () => {
+          revertHunk(editor, hunk);
+          closePeek(editor, fileId);
+        }));
+      }
+      bar.appendChild(makeBtn("Close", "peek-btn-close", () => closePeek(editor, fileId)));
+      dom.appendChild(bar);
+      rows++;
+
+      const zone: any = {
+        afterLineNumber: line,
+        heightInPx: rows * 20 + 24, // initial estimate
+        domNode: dom,
+      };
+      editor.changeViewZones((acc: any) => {
+        const zoneId = acc.addZone(zone);
         peekRef.current[fileId] = { line, zoneId };
+        // After the DOM reflows, re-layout the zone to its true content height
+        // so the button bar can never be clipped (and stays clickable).
+        requestAnimationFrame(() => {
+          const cur = peekRef.current[fileId];
+          if (!cur || cur.zoneId !== zoneId) return;
+          const h = dom.scrollHeight;
+          if (h && Math.abs(h - zone.heightInPx) > 2) {
+            editor.changeViewZones((acc2: any) => {
+              zone.heightInPx = h;
+              acc2.layoutZone(zoneId);
+            });
+          }
+        });
       });
     } catch { /* */ }
   }
@@ -1061,7 +1235,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
                     // Apply decorations immediately with whatever is available
                     applyDecorations(ed, f.id, gitDiffs[f.id], markersByFileId[f.id]);
 
-                    // Click a git glyph / line-decoration to peek the original (HEAD) lines inline
+                    // Click a glyph (git change or error/warning) to open the inline popup.
                     (editor as any).onMouseDown?.((e: any) => {
                       const mt = (window as any).monaco?.editor?.MouseTargetType;
                       const t = e.target?.type;
@@ -1069,7 +1243,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
                         ? (t === mt.GUTTER_GLYPH_MARGIN || t === mt.GUTTER_LINE_DECORATIONS)
                         : (t === 2 || t === 4);
                       if (isGutter && e.target?.position) {
-                        toggleDiffPeek(editor, f.id, e.target.position.lineNumber);
+                        togglePeek(editor, f.id, e.target.position.lineNumber);
                       }
                     });
 

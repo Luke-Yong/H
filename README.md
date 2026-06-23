@@ -84,6 +84,54 @@ In Electron mode, Harness includes a full browser in the editor area powered by 
 
 > **Note:** Geolocation requires `https://` or `localhost`. The Windows Location API must be enabled in Windows Settings (`Privacy > Location`).
 
+## Language Support (LSP)
+
+Harness provides editor intelligence — continuous error/warning checking, completions, and hover — through two layers:
+
+**1. Built-in (no setup):** Monaco validates these in the browser, live as you type:
+
+- JavaScript / TypeScript (JSX/TSX)
+- JSON, CSS / SCSS / LESS, HTML
+
+**2. Language Server (LSP):** For everything else, Harness talks to a standard language server over stdio (`server/lsp.ts`). Diagnostics are pushed to `/api/lsp/diagnostics` (debounced while editing) and surfaced in the editor tab, the left glyph column, the overview ruler, and the Problems panel.
+
+A language server is only used **if its executable is found on your `PATH`**. If it isn't installed, that language is simply skipped — no errors, no setup required.
+
+### Supported languages and their servers
+
+| Language        | Server binary                  | Install (example)                                      |
+| --------------- | ------------------------------ | ------------------------------------------------------ |
+| Python          | `pylsp`                        | `pip install python-lsp-server pyflakes`               |
+| JavaScript / TS | *(Monaco built-in)*            | —                                                      |
+| HTML / CSS / JSON | *(Monaco built-in)*          | —                                                      |
+| Java            | `jdtls`                        | install Eclipse JDT Language Server                    |
+| C#              | `omnisharp`                    | install OmniSharp (`-lsp`)                             |
+| C / C++         | `clangd`                       | install LLVM/clangd                                    |
+| Go              | `gopls`                        | `go install golang.org/x/tools/gopls@latest`          |
+| Rust            | `rust-analyzer`                | `rustup component add rust-analyzer`                   |
+| Ruby            | `solargraph`                   | `gem install solargraph`                               |
+| PHP             | `intelephense`                 | `npm i -g intelephense`                                |
+| Swift           | `sourcekit-lsp`                | ships with the Swift toolchain                         |
+| Kotlin          | `kotlin-language-server`       | install kotlin-language-server                         |
+| Markdown        | `marksman`                     | install marksman                                       |
+| YAML            | `yaml-language-server`         | `npm i -g yaml-language-server`                        |
+| SQL             | `sqls`                         | `go install github.com/lighttiger2505/sqls@latest`    |
+
+> Additional servers are also mapped out of the box (Lua, Dockerfile, Vue, Svelte, Dart, Elixir, Haskell, Terraform, Clojure, OCaml, Zig, Scala, TOML, Bash) — install the corresponding binary and reload.
+
+After installing a server, **restart the backend** (`npm run dev:server`, or `npm run dev`) so the new executable is detected.
+
+### Reducing false positives
+
+To keep diagnostics signal-heavy, Harness tunes two noisy defaults:
+
+- **JavaScript** runs **syntax-only** validation (semantic/type checks are disabled), since plain browser JS has no type or module information. TypeScript keeps full semantic checking.
+- **Python (`pylsp`)** keeps `pyflakes` (real bugs: undefined/unused names, syntax) and disables the style/complexity linters (`pycodestyle`, `pydocstyle`, `mccabe`, `flake8`, `pylint`).
+
+### Adding a language
+
+Add an entry to `SERVER_SPECS` in `server/lsp.ts` mapping the language id to its server binary, and (if needed) the file extension in `detectLanguage` in `client/src/panes/fileModel.ts`.
+
 ## How it works
 
 1. Write HTML/CSS/JS in the Monaco Editor
