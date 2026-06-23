@@ -75,6 +75,30 @@ function safePath(userPath: string): string {
   return resolved;
 }
 
+// Write a file, tolerating transient Windows lock errors (EPERM/EACCES/EBUSY)
+// caused by antivirus scans, cloud sync, or auto-reload dev servers briefly
+// holding the file. Clears any read-only attribute and retries with backoff.
+async function writeFileResilient(resolved: string, content: string): Promise<void> {
+  const delays = [0, 60, 150, 300, 600];
+  let lastErr: any;
+  for (const wait of delays) {
+    if (wait) await new Promise((r) => setTimeout(r, wait));
+    try {
+      fs.writeFileSync(resolved, content, "utf-8");
+      return;
+    } catch (err: any) {
+      lastErr = err;
+      const code = err?.code;
+      if (code !== "EPERM" && code !== "EACCES" && code !== "EBUSY") throw err;
+      // Read-only attribute? Clear it before the next attempt.
+      if ((code === "EPERM" || code === "EACCES") && fs.existsSync(resolved)) {
+        try { fs.chmodSync(resolved, 0o666); } catch { /* */ }
+      }
+    }
+  }
+  throw lastErr;
+}
+
 app.get("/api/fs/list", (req, res) => {
   try {
     const dirPath = safePath((req.query.path as string) || process.cwd());
@@ -175,12 +199,16 @@ app.get("/api/project/detect", (req, res) => {
   }
 });
 
-app.post("/api/fs/write", (req, res) => {
+app.post("/api/fs/write", async (req, res) => {
   try {
     const { path: filePath, content } = req.body;
-    if (!filePath || content === undefined) return res.status(400).json({ error: "Missing path or content" });
-    fs.writeFileSync(safePath(filePath), content, "utf-8");
-    broadcast({ type: "log", data: `Saved: ${path.basename(filePath)}` });
+    if (!filePath || content === undefined || content === null) {
+      return res.status(400).json({ error: "Missing path or content" });
+    }
+    const resolved = safePath(filePath);
+    // Ensure parent directory exists (covers new files in not-yet-created subfolders)
+    fs.mkdirSync(path.dirname(resolved), { recursive: true });
+    await writeFileResilient(resolved, String(content));
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: String(err) });
@@ -662,6 +690,39 @@ app.get("/api/git/diff", (req, res) => {
     res.json({ ok: true, file, diff: raw });
   } catch (err: any) {
     res.json({ ok: false, error: err?.message || "Diff failed" });
+  }
+});
+
+// ── LSP (Language Server) endpoints ──
+import { getCompletions, getFileDiagnostics } from "./lsp";
+
+app.post("/api/lsp/complete", (req, res) => {
+  try {
+    const { rootPath, language, filePath, line, column } = req.body || {};
+    if (!rootPath || !language || !filePath) {
+      return res.json({ ok: false, items: [] });
+    }
+    getCompletions(rootPath, language, filePath, line || 1, column || 1)
+      .then((items) => res.json({ ok: true, items }))
+      .catch(() => res.json({ ok: false, items: [] }));
+  } catch {
+    res.json({ ok: false, items: [] });
+  }
+});
+
+// Continuous diagnostics: push latest file text to the language server and
+// return any errors/warnings it reports (Monaco marker shape).
+app.post("/api/lsp/diagnostics", (req, res) => {
+  try {
+    const { rootPath, language, filePath, text } = req.body || {};
+    if (!rootPath || !language || !filePath) {
+      return res.json({ ok: false, markers: [] });
+    }
+    getFileDiagnostics(rootPath, language, filePath, text || "")
+      .then((markers) => res.json({ ok: true, markers }))
+      .catch(() => res.json({ ok: false, markers: [] }));
+  } catch {
+    res.json({ ok: false, markers: [] });
   }
 });
 

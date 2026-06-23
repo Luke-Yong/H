@@ -66,14 +66,20 @@ function FsTree({ entries, basePath, onOpenFile, onOpenFolder, depth, gitChanges
   );
 }
 
+// Normalize a path for comparison: unify separators + uppercase drive letter
+// (must match the key normalization used when the git-change map is built).
+function normPath(p: string): string {
+  return p.replace(/\\/g, "/").replace(/^([a-zA-Z]):/, (_m, d) => d.toUpperCase() + ":");
+}
+
 function hasDescendantChanges(dirPath: string, changes: Map<string, string>): string | null {
-  const prefix = (dirPath.endsWith("/") ? dirPath : dirPath + "/").replace(/\\/g, "/");
+  const norm = normPath(dirPath);
+  const prefix = norm.endsWith("/") ? norm : norm + "/";
   // Priority: M > A > D > U
   let best: string | null = null;
   const prio: Record<string, number> = { "M": 4, "A": 3, "D": 2, "U": 1, "?": 0 };
   for (const [filePath, status] of changes) {
-    const fp = filePath.replace(/\\/g, "/");
-    if (!fp.startsWith(prefix)) continue;
+    if (!normPath(filePath).startsWith(prefix)) continue;
     if (!best || (prio[status] || 0) > (prio[best] || 0)) best = status;
   }
   return best;
@@ -96,7 +102,7 @@ function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth, gitChanges }
     if (entry.isDirectory) {
       return hasDescendantChanges(entry.path, gitChanges);
     }
-    return gitChanges.get(entry.path.replace(/\\/g, "/")) || null;
+    return gitChanges.get(normPath(entry.path)) || null;
   }, [entry, gitChanges]);
 
   const handleToggle = useCallback(async () => {

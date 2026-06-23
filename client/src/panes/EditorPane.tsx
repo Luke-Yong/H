@@ -82,12 +82,38 @@ interface MarkerSnapshot {
   code?: string | { value: string };
 }
 
+// Normalize a filesystem path for comparison: unify separators and uppercase
+// the Windows drive letter (git/Node/browser can disagree on drive-letter case).
+function normPath(p: string | undefined | null): string {
+  if (!p) return "";
+  return p.replace(/\\/g, "/").replace(/^([a-zA-Z]):/, (_m, d) => d.toUpperCase() + ":");
+}
+
+// Map LSP CompletionItemKind to Monaco CompletionItemKind
+function mapLspKind(kind: number | undefined): number {
+  // Monaco kind range: 0..27 (see monaco.languages.CompletionItemKind)
+  // LSP kind uses same numbering as Monaco (0-based)
+  if (typeof kind === "number") return Math.min(Math.max(kind, 0), 27);
+  return 1; // Text
+}
+
 interface EditorViewHandle {
   focus: () => void;
   setPosition: (position: { lineNumber: number; column: number }) => void;
   revealPositionInCenter: (position: { lineNumber: number; column: number }) => void;
   onDidChangeCursorPosition: (cb: (e: { position: { lineNumber: number; column: number } }) => void) => { dispose: () => void };
 }
+
+// Module-level: track which languages have LSP completion providers registered
+const lspRegistered = new Set<string>();
+
+// Languages we do NOT send to the LSP diagnostics endpoint:
+//  - Monaco validates these itself via its built-in workers (feeds markers through onValidate)
+//  - or they have no meaningful diagnostics
+const LSP_SKIP_LANGS = new Set<string>([
+  "javascript", "typescript", "json", "jsonc", "css", "scss", "less", "html",
+  "plaintext", "xml", "bat", "ini",
+]);
 
 const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   { fsRoot, fsBasePath, terminalVenvDir, terminalActivateScript, browserTabs, activeBrowserTabId,
@@ -118,6 +144,10 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   const [dirtyFiles, setDirtyFiles] = useState<Set<string>>(new Set()); // file ids that have unsaved changes
   const [gitDiffs, setGitDiffs] = useState<Record<string, string>>({}); // fileId → unified diff text
   const diffDecorationsRef = useRef<Record<string, string[]>>({}); // fileId → decorationIds
+  // fileId → (lineNumber → change info) used for click-to-peek
+  const gitHunksRef = useRef<Record<string, Map<number, { kind: "added" | "modified" | "removed"; original: string[] }>>>({});
+  // fileId → currently open inline diff peek (so it can be toggled/closed)
+  const peekRef = useRef<Record<string, { line: number; zoneId: string } | null>>({});
 
   function applyDecorations(editor: any, fileId: string, diffText: string | undefined, markers: MarkerSnapshot[] | undefined) {
     try {
@@ -133,33 +163,80 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
       const newDecorations: any[] = [];
 
       // ── Git diff decorations (left gutter + overview ruler) ──
+      const hunkMap = new Map<number, { kind: "added" | "modified" | "removed"; original: string[] }>();
       if (diffText) {
         const lines = diffText.split("\n");
-        let oldLine = 0, newLine = 0;
+        let newLine = 0;
+        // Accumulators for a contiguous run of removed (-) / added (+) lines
+        let delBuf: string[] = [];
+        let addStart = 0, addCount = 0;
+
+        const pushDeco = (line: number, kind: "added" | "modified" | "removed", original: string[]) => {
+          if (line < 1 || line > lineCount) return;
+          hunkMap.set(line, { kind, original });
+          if (kind === "removed") {
+            newDecorations.push({
+              range: new monaco.Range(line, 1, line, 1),
+              options: {
+                glyphMarginClassName: "git-removed-glyph",
+                glyphMarginHoverMessage: { value: "Removed lines (click to view)" },
+                overviewRuler: { color: "#f85149", position: monaco.editor.OverviewRulerLane.Right },
+              },
+            });
+          } else {
+            const isAdded = kind === "added";
+            newDecorations.push({
+              range: new monaco.Range(line, 1, line, 1),
+              options: {
+                isWholeLine: true,
+                linesDecorationsClassName: isAdded ? "git-added-line" : "git-modified-line",
+                glyphMarginClassName: isAdded ? "git-added-glyph" : "git-modified-glyph",
+                overviewRuler: {
+                  color: isAdded ? "#2ea043" : "#388bfd",
+                  position: monaco.editor.OverviewRulerLane.Right,
+                },
+              },
+            });
+          }
+        };
+
+        const flush = () => {
+          if (addCount > 0) {
+            // Added (no removals) vs modified (removals replaced by additions)
+            const kind = delBuf.length > 0 ? "modified" : "added";
+            for (let i = 0; i < addCount; i++) {
+              pushDeco(addStart + i, kind, i === 0 ? delBuf.slice() : []);
+            }
+          } else if (delBuf.length > 0) {
+            // Pure deletion — mark the surviving line where the lines used to be
+            pushDeco(Math.min(Math.max(newLine, 1), lineCount), "removed", delBuf.slice());
+          }
+          delBuf = []; addStart = 0; addCount = 0;
+        };
+
         for (const line of lines) {
           if (line.startsWith("@@")) {
-            const m = line.match(/@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
-            if (m) { oldLine = parseInt(m[1], 10); newLine = parseInt(m[3], 10); }
-          } else if (line.startsWith("+") && !line.startsWith("+++")) {
-            if (newLine <= lineCount) {
-              newDecorations.push({
-                range: new monaco.Range(newLine, 1, newLine, 1),
-                options: {
-                  isWholeLine: true,
-                  linesDecorationsClassName: "git-added-line",
-                  glyphMarginClassName: "git-added-glyph",
-                  overviewRuler: { color: "#2ea043", position: monaco.editor.OverviewRulerLane.Right },
-                },
-              });
-            }
+            flush();
+            const m = line.match(/@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+            if (m) newLine = parseInt(m[1], 10);
+          } else if (line.startsWith("+++") || line.startsWith("---")) {
+            continue;
+          } else if (line.startsWith("+")) {
+            if (addCount === 0) addStart = newLine;
+            addCount++;
             newLine++;
-          } else if (line.startsWith("-") && !line.startsWith("---")) {
-            oldLine++;
-          } else if (!line.startsWith("\\")) {
-            oldLine++; newLine++;
+          } else if (line.startsWith("-")) {
+            delBuf.push(line.slice(1));
+          } else if (line.startsWith("\\")) {
+            continue; // "\ No newline at end of file"
+          } else {
+            flush();
+            newLine++;
           }
         }
+        flush();
       }
+      gitHunksRef.current[fileId] = hunkMap;
 
       // ── Error/warning decorations (overview ruler + left gutter) ──
       if (markers && markers.length > 0) {
@@ -177,7 +254,8 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
                 isWholeLine: true,
                 overviewRuler: {
                   color: isError ? "#f85149" : "#d29922",
-                  position: monaco.editor.OverviewRulerLane.Full,
+                  // Lane 0 = Left (errors), Lane 1 = Center (warnings), avoid lane 2 (Right = git)
+                  position: isError ? monaco.editor.OverviewRulerLane.Left : monaco.editor.OverviewRulerLane.Center,
                 },
                 glyphMarginClassName: isError ? "error-glyph" : "warning-glyph",
               },
@@ -191,37 +269,66 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     } catch { /* */ }
   }
 
-  // Fetch git status for FilesPanel markers and diff annotations
-  useEffect(() => {
+  // Show/hide an inline peek of the original (HEAD) lines for a changed/removed hunk.
+  function toggleDiffPeek(editor: any, fileId: string, line: number) {
+    try {
+      const info = gitHunksRef.current[fileId]?.get(line);
+      const existing = peekRef.current[fileId];
+      if (existing) {
+        editor.changeViewZones((acc: any) => acc.removeZone(existing.zoneId));
+        peekRef.current[fileId] = null;
+        if (existing.line === line) return; // clicking the same glyph closes the peek
+      }
+      // Nothing original to show (e.g. a purely added line) — only mark, no peek.
+      if (!info || info.original.length === 0) return;
+
+      const dom = document.createElement("div");
+      dom.className = "git-diff-peek";
+      for (const text of info.original) {
+        const row = document.createElement("div");
+        row.className = "git-diff-peek-line";
+        row.textContent = text.length ? text : "\u00A0";
+        dom.appendChild(row);
+      }
+      editor.changeViewZones((acc: any) => {
+        const zoneId = acc.addZone({
+          afterLineNumber: Math.max(0, line - 1),
+          heightInLines: info.original.length,
+          domNode: dom,
+        });
+        peekRef.current[fileId] = { line, zoneId };
+      });
+    } catch { /* */ }
+  }
+
+  // Fetch git status — reusable so saveFile can refresh after write
+  const refreshGitStatus = useCallback(async () => {
     if (!fsBasePath) { setGitChanges(new Map()); return; }
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await fetch(`/api/git/status?path=${encodeURIComponent(fsBasePath)}`);
-        const data = await res.json();
-        if (cancelled || !data.ok) return;
-        const gitRoot: string = data.gitRoot || fsBasePath;
-        const m = new Map<string, string>();
-        for (const c of ([] as Array<{ path: string; status: string }>).concat(data.staged || [], data.unstaged || [])) {
-          const absPath = gitRoot.replace(/\\/g, "/").replace(/\/$/, "") + "/" + c.path.replace(/\\/g, "/");
-          // Keep highest priority status: M > A > D > U
-          const existing = m.get(absPath);
-          const prio: Record<string, number> = { "M": 4, "A": 3, "D": 2, "U": 1, "?": 0 };
-          const s = c.status[0];
-          if (!existing || (prio[s] || 0) > (prio[existing] || 0)) {
-            m.set(absPath, s);
-          }
+    try {
+      const res = await fetch(`/api/git/status?path=${encodeURIComponent(fsBasePath)}`);
+      const data = await res.json();
+      if (!data.ok) return;
+      const gitRoot: string = data.gitRoot || fsBasePath;
+      const m = new Map<string, string>();
+      for (const c of ([] as Array<{ path: string; status: string }>).concat(data.staged || [], data.unstaged || [])) {
+        const absPath = normPath(gitRoot.replace(/\/$/, "") + "/" + c.path);
+        const existing = m.get(absPath);
+        const prio: Record<string, number> = { "M": 4, "A": 3, "D": 2, "U": 1, "?": 0 };
+        const s = c.status[0];
+        if (!existing || (prio[s] || 0) > (prio[existing] || 0)) {
+          m.set(absPath, s);
         }
-        setGitChanges(m);
-      } catch { /* */ }
-    })();
-    return () => { cancelled = true; };
+      }
+      setGitChanges(m);
+    } catch { /* */ }
   }, [fsBasePath]);
 
-  // Fetch git diff for active file and apply decorations
+  useEffect(() => { refreshGitStatus(); }, [refreshGitStatus]);
+
+  // Fetch git diff for active file
   useEffect(() => {
     const f = files.find((x) => x.id === activeFileId);
-    if (!f?._fsPath) return;
+    if (!f?._fsPath) { setGitDiffs((prev) => { const n = { ...prev }; delete n[activeFileId]; return n; }); return; }
     let cancelled = false;
     (async () => {
       try {
@@ -245,6 +352,35 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     const markers = markersByFileId[activeFileId];
     if (editor) applyDecorations(editor, activeFileId, diffText, markers);
   }, [activeFileId, gitDiffs, markersByFileId]);
+
+  // Continuous error/warning checking via language servers, for any language
+  // Monaco doesn't validate itself. The server gracefully returns no markers
+  // when no language server is installed for that language.
+  useEffect(() => {
+    const f = files.find((x) => x.id === activeFileId);
+    if (!f || !f._fsPath || !fsBasePath) return;
+    const lang = f.language;
+    if (LSP_SKIP_LANGS.has(lang)) return;
+    const handle = setTimeout(async () => {
+      try {
+        const res = await fetch("/api/lsp/diagnostics", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ rootPath: fsBasePath, language: lang, filePath: f._fsPath, text: f.content }),
+        });
+        const data = await res.json();
+        if (!data.ok) return;
+        const markers: MarkerSnapshot[] = data.markers || [];
+        setMarkersByFileId((prev) => ({ ...prev, [f.id]: markers }));
+        const monaco = (window as any).monaco;
+        const editor = editorByFileIdRef.current[f.id] as any;
+        const model = editor?.getModel?.();
+        if (monaco && model) {
+          monaco.editor.setModelMarkers(model, "lsp", markers);
+        }
+      } catch { /* LSP server unavailable — ignore */ }
+    }, 700);
+    return () => clearTimeout(handle);
+  }, [activeFileId, files, fsBasePath]);
 
   const handleBrowserConsoleEntry = useCallback((entryTabId: string, entry: BrowserConsoleEntry) => {
     setBrowserConsoleMap((prev) => {
@@ -414,25 +550,32 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   }, [files]);
 
   const openFsFile = useCallback(async (filePath: string, handle?: FileSystemFileHandle) => {
-    const existing = files.find((f) => f._fsPath === filePath);
+    const target = normPath(filePath);
+    // Fast path: tab already open → just focus it, skip the read entirely.
+    const existing = files.find((f) => normPath(f._fsPath) === target);
     if (existing) { setActiveFileId(existing.id); return; }
     try {
       const name = filePath.split(/[/\\]/).pop() || "untitled";
+      const f = createFile(name);
+      f._fsPath = filePath;
       if (handle) {
-        const content = await readFileFromHandle(handle);
-        const f = createFile(name, content);
-        f._fsPath = filePath; f._fsHandle = handle;
-        setFiles((prev) => [...prev, f]);
-        setActiveFileId(f.id);
+        f.content = await readFileFromHandle(handle);
+        f._fsHandle = handle;
       } else {
         const res = await fetch(`/api/fs/read?path=${encodeURIComponent(filePath)}`);
         const data = await res.json();
-        const f = createFile(name, data.content);
-        f._fsPath = filePath;
+        f.content = data.content;
         f._encoding = data.encoding || "utf8";
-        setFiles((prev) => [...prev, f]);
-        setActiveFileId(f.id);
       }
+      // Authoritative check against the *latest* tab list to avoid a duplicate
+      // when two reads for the same file are in flight (rapid clicks).
+      let openId = f.id;
+      setFiles((prev) => {
+        const already = prev.find((x) => normPath(x._fsPath) === target);
+        if (already) { openId = already.id; return prev; }
+        return [...prev, f];
+      });
+      setActiveFileId(openId);
     } catch (err) { console.error("Failed to open file:", err); }
   }, [files]);
 
@@ -487,19 +630,41 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     ));
   }, []);
 
-  const saveFile = useCallback((id: string) => {
+  const saveFile = useCallback(async (id: string) => {
     const f = files.find((x) => x.id === id);
     if (!f) return;
-    if (f._fsHandle) {
-      writeFileToHandle(f._fsHandle, f.content).catch(() => {});
-    } else if (f._fsPath) {
-      fetch("/api/fs/write", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: f._fsPath, content: f.content }),
-      }).catch(() => {});
+    // Attempt the write; only mark clean / refresh git when it actually succeeded.
+    try {
+      if (f._fsHandle) {
+        await writeFileToHandle(f._fsHandle, f.content);
+      } else if (f._fsPath) {
+        const res = await fetch("/api/fs/write", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: f._fsPath, content: f.content }),
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data?.error || `Save failed (${res.status})`);
+        }
+      }
+    } catch (err) {
+      console.error("Failed to save file:", err);
+      return; // keep dirty flag so the user knows it wasn't saved
     }
     setDirtyFiles((prev) => { const next = new Set(prev); next.delete(id); return next; });
-  }, [files]);
+    // Refresh git status so tab markers (M/A/D/U) and file-tree markers update after save
+    refreshGitStatus();
+    // Refresh git diff for this specific file too
+    if (f._fsPath) {
+      fetch(`/api/git/diff?path=${encodeURIComponent(fsBasePath)}&file=${encodeURIComponent(f._fsPath)}`)
+        .then(r => r.json())
+        .then(data => {
+          if (data.ok && data.diff) setGitDiffs(prev => ({ ...prev, [id]: data.diff }));
+          else setGitDiffs(prev => { const n = { ...prev }; delete n[id]; return n; });
+        })
+        .catch(() => {});
+    }
+  }, [files, refreshGitStatus, fsBasePath]);
 
   // Ctrl+S save
   useEffect(() => {
@@ -760,13 +925,16 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
           )}
           {files.map((f) => {
             const fileMarkers = markersByFileId[f.id] || [];
-            const errCount = fileMarkers.filter((m: any) => m.severity === 8).length;
-            const warnCount = fileMarkers.filter((m: any) => m.severity === 4).length;
+            const errCount = fileMarkers.filter((m) => m.severity === 8).length;
+            const warnCount = fileMarkers.filter((m) => m.severity === 4).length;
             const hasError = errCount > 0;
             const hasWarning = warnCount > 0;
+            const gitStatus = f._fsPath ? gitChanges.get(normPath(f._fsPath)) || "" : "";
+            const gitCls = gitStatus === "?" ? "u" : gitStatus.toLowerCase();
             return (
             <button key={f.id} className={`editor-tab${f.id === activeFileId ? " active" : ""}`} onClick={() => setActiveFileId(f.id)}>
-              {dirtyFiles.has(f.id) && <span className="tab-dirty-dot" title="Unsaved"> ● </span>}
+              {dirtyFiles.has(f.id) && <span className="tab-dirty-dot" title="Unsaved">●</span>}
+              {gitStatus && <span className={`tab-git-marker tab-git-${gitCls}`} title={`git: ${gitStatus}`}>{gitStatus} </span>}
               <span className={`tab-name${hasError ? " tab-name-err" : ""}${!hasError && hasWarning ? " tab-name-warn" : ""}`}>{f.name}</span>
               <span className="tab-close" onClick={(e) => { e.stopPropagation(); closeTab(f.id); }}>✕</span>
             </button>
@@ -842,6 +1010,45 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
                 <Editor
                   height="100%" language={f.language} theme="vs-dark"
                   value={f.content} onChange={(val) => updateFile(f.id, val || "")}
+                  beforeMount={(monaco) => {
+                    // Enable TypeScript diagnostics with lax settings for editing
+                    monaco.languages.typescript.typescriptDefaults.setCompilerOptions({
+                      target: monaco.languages.typescript.ScriptTarget.ESNext,
+                      module: monaco.languages.typescript.ModuleKind.ESNext,
+                      allowJs: true,
+                      checkJs: true,
+                      jsx: monaco.languages.typescript.JsxEmit.React,
+                      strict: false,
+                      noImplicitAny: false,
+                      moduleResolution: monaco.languages.typescript.ModuleResolutionKind.NodeJs,
+                      allowNonTsExtensions: true,
+                      allowSyntheticDefaultImports: true,
+                    });
+                    monaco.languages.typescript.typescriptDefaults.setDiagnosticsOptions({
+                      noSemanticValidation: false,
+                      noSyntaxValidation: false,
+                    });
+                    // JS side — keep syntax checking but DISABLE semantic (type)
+                    // validation. Plain browser JS has no type info / module graph,
+                    // so semantic checks produce many false positives
+                    // ("Cannot find name 'require'", "Property X does not exist", …).
+                    monaco.languages.typescript.javascriptDefaults.setCompilerOptions({
+                      target: monaco.languages.typescript.ScriptTarget.ESNext,
+                      module: monaco.languages.typescript.ModuleKind.ESNext,
+                      allowJs: true,
+                      checkJs: false,
+                      jsx: monaco.languages.typescript.JsxEmit.React,
+                      strict: false,
+                      noImplicitAny: false,
+                      moduleResolution: monaco.languages.typescript.ModuleResolutionKind.NodeJs,
+                      allowNonTsExtensions: true,
+                      allowSyntheticDefaultImports: true,
+                    });
+                    monaco.languages.typescript.javascriptDefaults.setDiagnosticsOptions({
+                      noSemanticValidation: true,
+                      noSyntaxValidation: false,
+                    });
+                  }}
                   onMount={(editor) => {
                     const ed = editor as EditorViewHandle;
                     editorByFileIdRef.current[f.id] = ed;
@@ -850,9 +1057,81 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
                         setCursorPos({ line: e.position.lineNumber, column: e.position.column });
                       }
                     });
+
+                    // Apply decorations immediately with whatever is available
+                    applyDecorations(ed, f.id, gitDiffs[f.id], markersByFileId[f.id]);
+
+                    // Click a git glyph / line-decoration to peek the original (HEAD) lines inline
+                    (editor as any).onMouseDown?.((e: any) => {
+                      const mt = (window as any).monaco?.editor?.MouseTargetType;
+                      const t = e.target?.type;
+                      const isGutter = mt
+                        ? (t === mt.GUTTER_GLYPH_MARGIN || t === mt.GUTTER_LINE_DECORATIONS)
+                        : (t === 2 || t === 4);
+                      if (isGutter && e.target?.position) {
+                        toggleDiffPeek(editor, f.id, e.target.position.lineNumber);
+                      }
+                    });
+
+                    // Register LSP-backed completion provider for languages Monaco
+                    // doesn't handle natively (same set we run diagnostics for).
+                    const lang = f.language;
+                    if (!LSP_SKIP_LANGS.has(lang) && !lspRegistered.has(lang)) {
+                      const monaco = (window as any).monaco;
+                      if (monaco) {
+                        lspRegistered.add(lang);
+                        monaco.languages.registerCompletionItemProvider(lang, {
+                          triggerCharacters: ["."],
+                          provideCompletionItems: async (model: any, position: any) => {
+                            const textUntil = model.getValueInRange({
+                              startLineNumber: position.lineNumber,
+                              startColumn: 1,
+                              endLineNumber: position.lineNumber,
+                              endColumn: position.column,
+                            });
+                            // Only trigger after . or at least 2 chars
+                            if (!textUntil.endsWith(".") && textUntil.trim().length < 2) return { suggestions: [] };
+
+                            try {
+                              const res = await fetch("/api/lsp/complete", {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({
+                                  rootPath: fsBasePath,
+                                  language: lang,
+                                  filePath: f._fsPath || "",
+                                  line: position.lineNumber,
+                                  column: position.column,
+                                }),
+                              });
+                              const data = await res.json();
+                              if (data.ok && data.items) {
+                                return {
+                                  suggestions: data.items.map((item: any) => ({
+                                    label: item.label,
+                                    kind: mapLspKind(item.kind),
+                                    detail: item.detail,
+                                    documentation: item.documentation,
+                                    insertText: item.insertText || item.label,
+                                    sortText: item.sortText || item.label,
+                                    range: {
+                                      startLineNumber: position.lineNumber,
+                                      startColumn: position.column - (textUntil.match(/\w*$/) || [""])[0].length,
+                                      endLineNumber: position.lineNumber,
+                                      endColumn: position.column,
+                                    },
+                                  })),
+                                };
+                              }
+                            } catch { /* LSP server not available — fall through to default */ }
+                            return { suggestions: [] };
+                          },
+                        });
+                      }
+                    }
                   }}
                   onValidate={(markers) => updateProblemMarkers(f.id, markers)}
-                  options={{ minimap: { enabled: false }, fontSize: 13, wordWrap: "on", scrollBeyondLastLine: false, automaticLayout: true, tabSize: 2, lineNumbers: "on", renderWhitespace: "selection", glyphMargin: true, overviewRulerLanes: 3 }}
+                  options={{ minimap: { enabled: false }, fontSize: 13, wordWrap: "on", scrollBeyondLastLine: false, automaticLayout: true, tabSize: 2, lineNumbers: "on", renderWhitespace: "selection", glyphMargin: true, overviewRulerLanes: 3, hideCursorInOverviewRuler: true, overviewRulerBorder: false, scrollbar: { vertical: "visible", verticalScrollbarSize: 14, alwaysConsumeMouseWheel: false } }}
                 />
               </div>
             ))}
