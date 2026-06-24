@@ -941,6 +941,8 @@ body.resizing iframe { pointer-events: none; }
   position: relative;
   transition: color 0.15s;
 }
+/* Codicons hardcode 16px on .codicon; size them up for the activity bar. */
+.activity-bar-btn .codicon { font-size: 22px; }
 .activity-bar-btn:hover { color: var(--text); background: #3c3c3c; }
 .activity-bar-btn.active { color: var(--accent); }
 .activity-bar-btn.active::before {

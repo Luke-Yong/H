@@ -570,13 +570,13 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   }, [activeBrowserTabId]);
 
   const sidebarItems = [
-    { id: "files", icon: "📁", label: "Explorer", title: "Explorer (Ctrl+Shift+E)" },
-    { id: "search", icon: "🔍", label: "Search", title: "Search (Ctrl+Shift+F)" },
-    { id: "scm", icon: "⎇", label: "Source Control", title: "Source Control (Ctrl+Shift+G)" },
-    { id: "browser", icon: "🌐", label: "Preview", title: "Browser Preview" },
-    { id: "debug", icon: "🐛", label: "Debug", title: "Run and Debug (Ctrl+Shift+D)" },
-    { id: "remote", icon: "⊞", label: "Remote Explorer", title: "Remote Explorer" },
-    { id: "extensions", icon: "🧩", label: "Extensions", title: "Extensions (Ctrl+Shift+X)" },
+    { id: "files", icon: "files", label: "Explorer", title: "Explorer (Ctrl+Shift+E)" },
+    { id: "search", icon: "search", label: "Search", title: "Search (Ctrl+Shift+F)" },
+    { id: "scm", icon: "source-control", label: "Source Control", title: "Source Control (Ctrl+Shift+G)" },
+    { id: "browser", icon: "globe", label: "Preview", title: "Browser Preview" },
+    { id: "debug", icon: "debug-alt", label: "Debug", title: "Run and Debug (Ctrl+Shift+D)" },
+    { id: "remote", icon: "remote", label: "Remote Explorer", title: "Remote Explorer" },
+    { id: "extensions", icon: "extensions", label: "Extensions", title: "Extensions (Ctrl+Shift+X)" },
   ];
 
   const hasBrowserTabs = browserTabs.length > 0;
@@ -974,11 +974,11 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
               }}
               title={item.title}
             >
-              {item.icon}
+              <i className={`codicon codicon-${item.icon}`} />
             </button>
           ))}
           <div className="activity-bar-spacer" />
-          <button className="activity-bar-btn" title="Manage">⚙</button>
+          <button className="activity-bar-btn" title="Manage"><i className="codicon codicon-settings-gear" /></button>
         </div>
         {sidebarVisible && sidebarPanel && sidebarPanel !== "browser" && sidebarPanel !== "files" && sidebarPanel !== "scm" && (
           <div className="sidebar-placeholder">
@@ -1048,11 +1048,11 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
             }}
             title={item.title}
           >
-            {item.icon}
+            <i className={`codicon codicon-${item.icon}`} />
           </button>
         ))}
         <div className="activity-bar-spacer" />
-        <button className="activity-bar-btn" title="Manage">⚙</button>
+        <button className="activity-bar-btn" title="Manage"><i className="codicon codicon-settings-gear" /></button>
       </div>
       {sidebarVisible && sidebarPanel === "files" && (
         <>
