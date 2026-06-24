@@ -1,5 +1,5 @@
 import { useState, useCallback, useMemo } from "react";
-import { VFile, createFile, detectLanguage } from "./fileModel";
+import { VFile, fileIconUrl, folderIconUrl } from "./fileModel";
 import { enumerateHandle } from "./browserFs";
 
 export interface FsEntry {
@@ -27,11 +27,6 @@ interface Props {
   /** Git change map: file path → status letter (M/A/D/U/?) */
   gitChanges?: Map<string, string>;
 }
-
-const FILE_ICONS: Record<string, string> = {
-  html: "🟠", css: "🔵", javascript: "🟡", typescript: "🔷",
-  json: "🟢", markdown: "📘", python: "🐍", default: "📄",
-};
 
 function statusColor(s: string): string {
   if (s === "M") return "#e2b714";
@@ -128,7 +123,7 @@ function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth, gitChanges }
     }
   }, [entry, children, expanded]);
 
-  const icon = entry.isDirectory ? (expanded ? "📂" : "📁") : "📄";
+  const iconUrl = entry.isDirectory ? folderIconUrl(expanded) : fileIconUrl(entry.name);
 
   return (
     <>
@@ -138,7 +133,7 @@ function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth, gitChanges }
         onClick={handleToggle}
       >
         <span className="file-icon">
-          {loading ? "⏳" : icon}
+          {loading ? "⏳" : <img className="file-icon-img" src={iconUrl} alt="" draggable={false} />}
         </span>
         <span className="file-name">{entry.name}</span>
         {gitMarker && (
@@ -198,14 +193,13 @@ export default function FilesPanel({
           </div>
           <div className="files-list">
             {files.map((f) => {
-              const icon = FILE_ICONS[f.language] || FILE_ICONS.default;
               return (
                 <div
                   key={f.id}
                   className={`file-item${f.id === activeFileId ? " active" : ""}`}
                   onClick={() => onSelect(f.id)}
                 >
-                  <span className="file-icon">{icon}</span>
+                  <span className="file-icon"><img className="file-icon-img" src={fileIconUrl(f.name)} alt="" draggable={false} /></span>
                   <span className="file-name">{f.name}</span>
                   <span className="file-actions">
                     <button

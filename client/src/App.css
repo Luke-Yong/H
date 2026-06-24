@@ -1031,8 +1031,12 @@ body.resizing iframe { pointer-events: none; }
 .file-item:hover { background: #2a2d2e; }
 .file-item.active { background: #37373d; color: var(--text); }
 
-.file-icon { font-size: 11px; flex-shrink: 0; }
+.file-icon { font-size: 11px; flex-shrink: 0; display: inline-flex; align-items: center; }
 .file-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* File-type SVG icons (Material Icon Theme) */
+.file-icon-img { width: 16px; height: 16px; display: block; }
+.tab-icon { width: 16px; height: 16px; display: inline-block; vertical-align: middle; margin-right: 5px; }
 
 .file-actions { display: none; gap: 2px; }
 .file-item:hover .file-actions { display: flex; }

@@ -3,7 +3,7 @@ import Editor from "@monaco-editor/react";
 import FilesPanel from "./FilesPanel";
 import BrowserView from "./BrowserView";
 import TerminalPane, { type DebugConsoleEntry, type OutputEntry, type ProblemEntry, type BrowserConsoleEntry } from "./TerminalPane";
-import { VFile, createFile, detectLanguage } from "./fileModel";
+import { VFile, createFile, detectLanguage, fileIconUrl } from "./fileModel";
 import { readFileFromHandle, writeFileToHandle } from "./browserFs";
 import { useResizable, ResizeHandle } from "../hooks/useResizable";
 import NameDialog from "./NameDialog";
