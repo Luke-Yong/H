@@ -569,6 +569,48 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     setBrowserConsoleMap((prev) => ({ ...prev, [activeId]: [] }));
   }, [activeBrowserTabId]);
 
+  // Ref tracking tabId → last known URL so we can detect page navigations.
+  const browserUrlRef = useRef<Record<string, string>>({});
+
+  // Clear console entries when a tab navigates to a new URL (page load).
+  useEffect(() => {
+    for (const tab of browserTabs) {
+      const prev = browserUrlRef.current[tab.id];
+      if (prev !== undefined && prev !== tab.url) {
+        setBrowserConsoleMap((m) => ({ ...m, [tab.id]: [] }));
+      }
+      browserUrlRef.current[tab.id] = tab.url;
+    }
+  }, [browserTabs]);
+
+  // Clear console entries when switching to a different browser tab.
+  useEffect(() => {
+    if (!activeBrowserTabId) return;
+    setBrowserConsoleMap((prev) => {
+      if (prev[activeBrowserTabId]?.length) return { ...prev, [activeBrowserTabId]: [] };
+      return prev;
+    });
+  }, [activeBrowserTabId]);
+
+  // Directly remove console entries for a closed browser tab — no dependence on
+  // effect timing. Called from the BrowserView close button (individual tab)
+  // and from closeTab for the editor-level browser tab.
+  const handleBrowserTabCloseInner = useCallback((id: string) => {
+    setBrowserConsoleMap((prev) => { const n = { ...prev }; delete n[id]; return n; });
+    onBrowserTabClose(id);
+  }, [onBrowserTabClose]);
+
+  // Clear all browser console entries when the user navigates away from the
+  // browser editor tab (switches to a file).
+  useEffect(() => {
+    if (activeFileId && activeFileId !== BROWSER_EDITOR_TAB_ID) {
+      setBrowserConsoleMap((prev) => {
+        const count = Object.values(prev).reduce((s, e) => s + e.length, 0);
+        return count > 0 ? {} : prev;
+      });
+    }
+  }, [activeFileId]);
+
   const sidebarItems = [
     { id: "files", icon: "files", label: "Explorer", title: "Explorer (Ctrl+Shift+E)" },
     { id: "search", icon: "search", label: "Search", title: "Search (Ctrl+Shift+F)" },
@@ -913,6 +955,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   const closeTab = useCallback((id: string) => {
     if (id === BROWSER_EDITOR_TAB_ID) {
       onCloseBrowser();
+      setBrowserConsoleMap({});
       if (activeFileIdRef.current === id) setActiveFileId(files[0]?.id || "");
       return;
     }
@@ -1169,7 +1212,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
                   tabs={browserTabs}
                   activeTabId={activeBrowserTab?.id || ""}
                   onSelectTab={onActiveBrowserTabChange}
-                  onCloseTab={onBrowserTabClose}
+                  onCloseTab={handleBrowserTabCloseInner}
                   onAddTab={onAddBrowserTab}
                   onTitleChange={onBrowserTabUpdateLabel}
                   onUrlChange={onBrowserTabUpdateUrl}

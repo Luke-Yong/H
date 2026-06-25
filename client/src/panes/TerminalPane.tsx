@@ -428,6 +428,12 @@ export default function TerminalPane({
     return () => window.removeEventListener("message", handler);
   }, []);
 
+  // Clear the DOM tree when the browser console entries go empty (tab closed /
+  // navigated away / all browsers gone), so stale elements don't linger.
+  useEffect(() => {
+    if (browserConsoleEntries.length === 0) setDomTreeNodes([]);
+  }, [browserConsoleEntries]);
+
   // Auto-expand ancestors + scroll to hovered node (only when hover from webview, not tree)
   useEffect(() => {
     if (!hoveredUid) return;
