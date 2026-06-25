@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, useEffect } from "react";
 import { VFile, fileIconUrl, folderIconUrl } from "./fileModel";
 import { enumerateHandle } from "./browserFs";
 
@@ -13,7 +13,7 @@ interface Props {
   files: VFile[];
   activeFileId: string | null;
   onSelect: (id: string) => void;
-  onAdd: () => void;
+  onAdd: (parentDir?: string) => void;
   onDelete: (id: string) => void;
   onRename: (id: string) => void;
   /** File-system tree entries (from backend) */
@@ -26,6 +26,13 @@ interface Props {
   width?: number;
   /** Git change map: file path → status letter (M/A/D/U/?) */
   gitChanges?: Map<string, string>;
+  /** Selected folder path (highlighted) — used when adding new files */
+  selectedFolder: string | null;
+  onSelectFolder: (path: string | null) => void;
+  onFsDelete: (path: string) => void;
+  onFsRename: (oldPath: string) => void;
+  /** Path of the currently active editor file (for tree highlight). */
+  activeFilePath: string | null;
 }
 
 function statusColor(s: string): string {
@@ -36,13 +43,17 @@ function statusColor(s: string): string {
   return "#e2b714";
 }
 
-function FsTree({ entries, basePath, onOpenFile, onOpenFolder, depth, gitChanges }: {
+function FsTree({ entries, basePath, onOpenFile, onOpenFolder, depth, gitChanges, selectedFolder, onSelectFolder, onContextMenu, activeFilePath }: {
   entries: FsEntry[];
   basePath: string;
   onOpenFile: (p: string, h?: FileSystemFileHandle) => void;
   onOpenFolder: (p: string) => void;
   depth: number;
   gitChanges?: Map<string, string>;
+  selectedFolder: string | null;
+  onSelectFolder: (path: string | null) => void;
+  onContextMenu: (e: React.MouseEvent, entry: FsEntry) => void;
+  activeFilePath: string | null;
 }) {
   return (
     <>
@@ -55,6 +66,10 @@ function FsTree({ entries, basePath, onOpenFile, onOpenFolder, depth, gitChanges
           onOpenFolder={onOpenFolder}
           depth={depth}
           gitChanges={gitChanges}
+          selectedFolder={selectedFolder}
+          onSelectFolder={onSelectFolder}
+          onContextMenu={onContextMenu}
+          activeFilePath={activeFilePath}
         />
       ))}
     </>
@@ -80,17 +95,50 @@ function hasDescendantChanges(dirPath: string, changes: Map<string, string>): st
   return best;
 }
 
-function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth, gitChanges }: {
+function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth, gitChanges, selectedFolder, onSelectFolder, onContextMenu, activeFilePath }: {
   entry: FsEntry;
   basePath: string;
   onOpenFile: (p: string, h?: FileSystemFileHandle) => void;
   onOpenFolder: (p: string) => void;
   depth: number;
   gitChanges?: Map<string, string>;
+  selectedFolder: string | null;
+  onSelectFolder: (path: string | null) => void;
+  onContextMenu: (e: React.MouseEvent, entry: FsEntry) => void;
+  activeFilePath: string | null;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [children, setChildren] = useState<FsEntry[] | null>(null);
   const [loading, setLoading] = useState(false);
+  const isSelected = selectedFolder === entry.path;
+  const isActiveFile = activeFilePath ? normPath(entry.path) === normPath(activeFilePath) : false;
+  // Is the active file under this directory? If so, auto-expand + highlight the folder.
+  const containsActive = activeFilePath && entry.isDirectory
+    ? normPath(activeFilePath).startsWith(normPath(entry.path) + "/")
+    : false;
+
+  // Auto-expand the folder that contains the active file.
+  useEffect(() => {
+    if (containsActive && children === null) {
+      setExpanded(true);
+      setLoading(true);
+      // eager-fetch children so the file highlight is visible
+      fetchChildren();
+    }
+  }, [containsActive, children]);
+
+  const fetchChildren = async () => {
+    try {
+      if (entry._handle && entry._handle.kind === "directory") {
+        setChildren(await enumerateHandle(entry._handle as FileSystemDirectoryHandle));
+      } else {
+        const res = await fetch(`/api/fs/list?path=${encodeURIComponent(entry.path)}`);
+        const data = await res.json();
+        setChildren(data.entries || []);
+      }
+    } catch { /* ignore */ }
+    setLoading(false);
+  };
 
   const gitMarker = useMemo(() => {
     if (!gitChanges || gitChanges.size === 0) return null;
@@ -102,35 +150,35 @@ function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth, gitChanges }
 
   const handleToggle = useCallback(async () => {
     if (entry.isDirectory) {
+      // Select the folder (for adding files inside it)
+      onSelectFolder(isSelected ? null : entry.path);
       if (children === null) {
         setExpanded(true);
         setLoading(true);
-        try {
-          if (entry._handle && entry._handle.kind === "directory") {
-            setChildren(await enumerateHandle(entry._handle as FileSystemDirectoryHandle));
-          } else {
-            const res = await fetch(`/api/fs/list?path=${encodeURIComponent(entry.path)}`);
-            const data = await res.json();
-            setChildren(data.entries || []);
-          }
-        } catch { /* ignore */ }
-        setLoading(false);
+        fetchChildren();
       } else {
         setExpanded(!expanded);
       }
     } else {
       onOpenFile(entry.path, entry._handle as FileSystemFileHandle | undefined);
     }
-  }, [entry, children, expanded]);
+  }, [entry, children, expanded, isSelected, onSelectFolder]);
+
+  const handleContext = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    onContextMenu(e, entry);
+  }, [entry, onContextMenu]);
 
   const iconUrl = entry.isDirectory ? folderIconUrl(expanded) : fileIconUrl(entry.name);
 
   return (
     <>
       <div
-        className="fs-tree-item"
+        className={`fs-tree-item${isSelected ? " selected" : ""}${isActiveFile ? " active-file" : ""}${containsActive ? " contains-active" : ""}`}
         style={{ paddingLeft: 8 + depth * 14 }}
         onClick={handleToggle}
+        onContextMenu={handleContext}
       >
         <span className="file-icon">
           {loading ? "⏳" : <img className="file-icon-img" src={iconUrl} alt="" draggable={false} />}
@@ -150,6 +198,10 @@ function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth, gitChanges }
           onOpenFolder={onOpenFolder}
           depth={depth + 1}
           gitChanges={gitChanges}
+          selectedFolder={selectedFolder}
+          onSelectFolder={onSelectFolder}
+          onContextMenu={onContextMenu}
+          activeFilePath={activeFilePath}
         />
       )}
     </>
@@ -160,7 +212,31 @@ export default function FilesPanel({
   files, activeFileId, onSelect, onAdd, onDelete, onRename,
   fsRoot, fsBasePath, onOpenFsFile, onRefreshFs,
   width, gitChanges,
+  selectedFolder, onSelectFolder, onFsDelete, onFsRename,
+  activeFilePath,
 }: Props) {
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; entry: FsEntry } | null>(null);
+
+  const handleContextMenu = useCallback((e: React.MouseEvent, entry: FsEntry) => {
+    setContextMenu({ x: e.clientX, y: e.clientY, entry });
+  }, []);
+
+  const closeContextMenu = useCallback(() => setContextMenu(null), []);
+
+  // Close context menu on any mousedown outside (fires before click, so
+  // our menu item onMouseDown handlers fire first).
+  useEffect(() => {
+    if (!contextMenu) return;
+    const h = (e: MouseEvent) => {
+      // Ignore if the click is on the menu itself
+      const target = e.target as HTMLElement | null;
+      if (target?.closest(".fs-context-menu")) return;
+      closeContextMenu();
+    };
+    window.addEventListener("mousedown", h);
+    return () => window.removeEventListener("mousedown", h);
+  }, [contextMenu, closeContextMenu]);
+
   return (
     <div className="files-panel" style={width ? { width, minWidth: width } : {}}>
       {fsRoot ? (
@@ -169,7 +245,7 @@ export default function FilesPanel({
             <span>{fsBasePath ? fsBasePath.split(/[/\\]/).pop() || "FOLDER" : "FOLDER"}</span>
             <div className="files-header-actions">
               <button className="files-add-btn" onClick={onRefreshFs} title="Refresh">↻</button>
-              <button className="files-add-btn" onClick={onAdd} title="New file">+</button>
+              <button className="files-add-btn" onClick={() => onAdd(selectedFolder || undefined)} title={selectedFolder ? `New file in ${selectedFolder.split(/[/\\]/).pop()}` : "New file"}>+</button>
             </div>
           </div>
           <div className="files-list">
@@ -180,6 +256,10 @@ export default function FilesPanel({
               onOpenFolder={() => {}}
               depth={0}
               gitChanges={gitChanges}
+              selectedFolder={selectedFolder}
+              onSelectFolder={onSelectFolder}
+              onContextMenu={handleContextMenu}
+              activeFilePath={activeFilePath}
             />
           </div>
         </>
@@ -188,7 +268,7 @@ export default function FilesPanel({
           <div className="files-header">
             <span>FILES</span>
             <div className="files-header-actions">
-              <button className="files-add-btn" onClick={onAdd} title="New file">+</button>
+              <button className="files-add-btn" onClick={() => onAdd()} title="New file">+</button>
             </div>
           </div>
           <div className="files-list">
@@ -218,6 +298,22 @@ export default function FilesPanel({
             })}
           </div>
         </>
+      )}
+      {/* Context menu (right-click on fs-tree item) */}
+      {contextMenu && (
+        <div
+          className="fs-context-menu"
+          style={{ position: "fixed", left: contextMenu.x, top: contextMenu.y }}
+        >
+          <button
+            className="fs-context-item"
+            onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); onFsRename(contextMenu.entry.path); closeContextMenu(); }}
+          >Rename</button>
+          <button
+            className="fs-context-item fs-context-item-danger"
+            onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); onFsDelete(contextMenu.entry.path); closeContextMenu(); }}
+          >Delete</button>
+        </div>
       )}
     </div>
   );

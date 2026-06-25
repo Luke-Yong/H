@@ -1,10 +1,25 @@
-import { useRef, useCallback, useState, useEffect, useLayoutEffect, useMemo } from "react";
+import { useRef, useCallback, useState, useEffect, useLayoutEffect, useMemo, forwardRef, useImperativeHandle } from "react";
 import type { BrowserConsoleEntry } from "./TerminalPane";
 
 interface BrowserTab {
   id: string;
   url: string;
   label: string;
+}
+
+export interface BrowserViewHandle {
+  /** Run JS in the browser page and return the result (serialized). */
+  evalInPage: (code: string) => Promise<string>;
+  /** Get the DOM as indexed clickable elements. */
+  getIndexedDom: () => Promise<string>;
+  /** Click element at index (from getIndexedDom). */
+  clickElement: (index: number) => Promise<void>;
+  /** Type text into element at index. */
+  typeIntoElement: (index: number, text: string) => Promise<void>;
+  /** Get a base64 screenshot of the page. Uses html2canvas if available, otherwise returns empty. */
+  getScreenshot: () => Promise<string>;
+  /** Navigate to a URL in the current tab. */
+  navigateTo: (url: string) => Promise<void>;
 }
 
 interface Props {
@@ -108,7 +123,7 @@ function supportsGeolocation(url: string): boolean {
   }
 }
 
-export default function BrowserView({
+export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   tabs,
   activeTabId,
   onSelectTab,
@@ -119,7 +134,7 @@ export default function BrowserView({
   onNewTab,
   onConsoleEntry,
   onOpenDevtools,
-}: Props) {
+}: Props, ref) {
   const isDesktop = !!window.harnessDesktop?.isDesktop;
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const webviewRef = useRef<BrowserGuest | null>(null);
@@ -1274,6 +1289,108 @@ export default function BrowserView({
   const geolocationNeedsSecureContext = perms.geolocation && currentUrl && !supportsGeolocation(currentUrl);
   const desktopSrc = navTabId === tabId ? navUrl : url;
 
+  // ── Agent tool methods exposed via ref ──
+  const getIframe = useCallback((): HTMLIFrameElement | null => {
+    if (isDesktop) return null;
+    return iframeRef.current;
+  }, [isDesktop]);
+  const getWebview = useCallback((): BrowserGuest | null => {
+    if (!isDesktop) return null;
+    return webviewRef.current;
+  }, [isDesktop]);
+
+  const evalInPage = useCallback(async (code: string): Promise<string> => {
+    try {
+      const wv = getWebview();
+      if (wv && webviewReadyRef.current) {
+        const result = await (wv as any).executeJavaScript(code);
+        return String(result ?? "");
+      }
+      const win = getIframe()?.contentWindow as any;
+      if (win) {
+        const result = (win as any).eval?.(code);
+        return String(result ?? "");
+      }
+    } catch (e: any) { return `Error: ${e?.message || e}`; }
+    return "No browser page loaded.";
+  }, [getIframe, getWebview]);
+
+  const getIndexedDom = useCallback(async (): Promise<string> => {
+    return evalInPage(`
+      (() => {
+        const w = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+        const els = []; let i = 0; let el;
+        while ((el = w.nextNode())) {
+          const tag = el.tagName.toLowerCase();
+          const id = el.id ? ' id="' + el.id + '"' : '';
+          const cls = el.className && typeof el.className === 'string'
+            ? ' class="' + el.className + '"' : '';
+          const text = (el.textContent || '').trim().slice(0, 80);
+          const ph = el.getAttribute('placeholder');
+          const tp = el.getAttribute('type');
+          const attrs = [];
+          if (ph) attrs.push('placeholder="' + ph + '"');
+          if (tp) attrs.push('type="' + tp + '"');
+          const t = text ? ' "' + text + '"' : '';
+          els.push('[' + i + '] <' + tag + id + cls + (attrs.length ? ' ' + attrs.join(' ') : '') + '>' + t);
+          i++;
+        }
+        return els.join('\\n');
+      })()
+    `);
+  }, [evalInPage]);
+
+  const clickElement = useCallback(async (index: number) => {
+    return evalInPage(`
+      (() => {
+        const w = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+        let i = 0; let el;
+        while ((el = w.nextNode())) { if (i++ === ${index}) { el.click(); return 'clicked'; } }
+        return 'element not found at index ${index}';
+      })()
+    `).then(async () => { await new Promise((r) => setTimeout(r, 400)); });
+  }, [evalInPage]);
+
+  const typeIntoElement = useCallback(async (index: number, text: string) => {
+    return evalInPage(`
+      (() => {
+        const w = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+        let i = 0; let el;
+        while ((el = w.nextNode())) {
+          if (i++ !== ${index}) continue;
+          const inp = el;
+          inp.focus(); inp.value = ''; inp.value = ${JSON.stringify(text)};
+          inp.dispatchEvent(new Event('input', { bubbles: true }));
+          inp.dispatchEvent(new Event('change', { bubbles: true }));
+          return 'typed';
+        }
+        return 'element not found at index ${index}';
+      })()
+    `).then(async () => { await new Promise((r) => setTimeout(r, 300)); });
+  }, [evalInPage]);
+
+  const getScreenshot = useCallback(async (): Promise<string> => {
+    return evalInPage(`
+      new Promise((resolve) => {
+        if (typeof html2canvas !== 'undefined') {
+          html2canvas(document.body).then((canvas) => resolve(canvas.toDataURL('image/png')));
+        } else {
+          resolve('ERR:html2canvas not loaded in page');
+        }
+      })
+    `);
+  }, [evalInPage]);
+
+  const navigateTo = useCallback(async (url: string): Promise<void> => {
+    if (activeTab) {
+      onUrlChange?.(activeTab.id, url);
+    }
+  }, [activeTab, onUrlChange]);
+
+  useImperativeHandle(ref, () => ({
+    evalInPage, getIndexedDom, clickElement, typeIntoElement, getScreenshot, navigateTo,
+  }), [evalInPage, getIndexedDom, clickElement, typeIntoElement, getScreenshot, navigateTo]);
+
   return (
     <div className="browser-iframe-container">
       <div className="browser-tabs">
@@ -1480,4 +1597,4 @@ export default function BrowserView({
       )}
     </div>
   );
-}
+});

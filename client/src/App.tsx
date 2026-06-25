@@ -641,6 +641,11 @@ export default function App() {
             onGoalChange={setGoal}
             onRun={handleRun}
             connected={connected}
+            getConsoleContext={() => editorRef.current?.getConsoleContext() || ""}
+            executeBrowserAction={(name, params) => editorRef.current?.executeBrowserAction(name, params) ?? Promise.resolve("Browser not available")}
+            getProjectFiles={() => editorRef.current?.getProjectFiles() ?? Promise.resolve([])}
+            getFsBasePath={() => editorRef.current?.getFsBasePath() || ""}
+            refreshEditor={(files) => editorRef.current?.applyAiFiles(files)}
           />
         </div>
         )}

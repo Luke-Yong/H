@@ -2,6 +2,7 @@ import { useState, forwardRef, useImperativeHandle, useCallback, useEffect, useR
 import Editor from "@monaco-editor/react";
 import FilesPanel from "./FilesPanel";
 import BrowserView from "./BrowserView";
+import type { BrowserViewHandle } from "./BrowserView";
 import TerminalPane, { type DebugConsoleEntry, type OutputEntry, type ProblemEntry, type BrowserConsoleEntry } from "./TerminalPane";
 import { VFile, createFile, detectLanguage, fileIconUrl } from "./fileModel";
 import { readFileFromHandle, writeFileToHandle } from "./browserFs";
@@ -21,13 +22,17 @@ const BROWSER_EDITOR_TAB_ID = "browser";
 export interface EditorPaneHandle {
   getCode: () => { html: string; css: string; js: string };
   getFiles: () => VFile[];
-  applyAiFiles: (files: { name: string; content: string }[]) => void;
+  applyAiFiles: (files: { name: string; content: string; fsPath?: string }[]) => void;
   goToLine: (line: number) => void;
   goToBracket: () => void;
   setLanguage: (lang: string) => void;
   setIndent: (opts: { tabSize: number; insertSpaces: boolean }) => void;
   setLineEnding: (le: string) => void;
   setEncoding: (enc: string) => Promise<void>;
+  getConsoleContext: () => string;
+  executeBrowserAction: (toolName: string, params: Record<string, unknown>) => Promise<string>;
+  getProjectFiles: () => Promise<string[]>;
+  getFsBasePath: () => string;
 }
 
 export interface StatusBarState {
@@ -142,6 +147,8 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   const { size: termH, onMouseDown: onTermDrag } = useResizable(220, 80, 600, true);
   const [sidebarPanel, setSidebarPanel] = useState<string>("");
   const [sidebarVisible, setSidebarVisible] = useState(true);
+  const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
+  const browserViewRef = useRef<BrowserViewHandle>(null);
   const [browserConsoleMap, setBrowserConsoleMap] = useState<Record<string, BrowserConsoleEntry[]>>({});
   const [nameDialog, setNameDialog] = useState<{
     title: string;
@@ -807,7 +814,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     } catch { /* */ }
   }, [files, activeFileId]);
 
-  const applyAiFiles = useCallback((aiFiles: { name: string; content: string }[]) => {
+  const applyAiFiles = useCallback((aiFiles: { name: string; content: string; fsPath?: string }[]) => {
     let newFileId = "";
     setFiles((prev) => {
       const updated = [...prev];
@@ -823,6 +830,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
           }
         } else {
           const f = createFile(af.name, af.content);
+          if (af.fsPath) f._fsPath = af.fsPath;
           updated.push(f);
           newFileId = newFileId || f.id;
         }
@@ -832,12 +840,147 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     if (newFileId) setActiveFileId(newFileId);
   }, []);
 
+  // Build a text snapshot of the entire console state (problems, debug, output,
+  // browser console, DOM tree) so DeepSeek can see what's happening.
+  const getConsoleContext = useCallback((): string => {
+    const lines: string[] = [];
+    lines.push("### CONSOLE STATE SNAPSHOT ###");
+
+    // ── Problems (errors/warnings from editor) ──
+    const problems = problemEntries;
+    const errs = problems.filter((p) => p.severity === "error").length;
+    const warns = problems.filter((p) => p.severity === "warning").length;
+    const infos = problems.filter((p) => p.severity === "info" || p.severity === "hint").length;
+    if (errs + warns + infos > 0) {
+      lines.push(`Problems: ${errs} errors, ${warns} warnings, ${infos} info/hints`);
+      const sample = problems.slice(0, 15);
+      for (const p of sample) {
+        lines.push(`  ${p.severity.toUpperCase()}: ${p.fileName}:${p.line} – ${p.message}`);
+      }
+      if (problems.length > 15) lines.push(`  ... and ${problems.length - 15} more`);
+    } else {
+      lines.push("Problems: none");
+    }
+
+    // ── Debug Console (WebSocket events from test runs / server) ──
+    const dEntries = (debugEntries || []).length;
+    if (dEntries > 0) {
+      lines.push(`Debug Console: ${dEntries} entries`);
+      const sample = (debugEntries || []).slice(-10);
+      for (const d of sample) {
+        const txt = (d.text || "").slice(0, 200);
+        lines.push(`  [${d.source}] ${txt}`);
+      }
+    } else {
+      lines.push("Debug Console: empty");
+    }
+
+    // ── Output ──
+    const oEntries = (outputEntries || []).length;
+    if (oEntries > 0) {
+      lines.push(`Output: ${oEntries} entries`);
+      const sample = (outputEntries || []).slice(-10);
+      for (const o of sample) {
+        lines.push(`  [${o.kind}] ${(o.text || "").slice(0, 200)}`);
+      }
+    } else {
+      lines.push("Output: empty");
+    }
+
+    // ── Browser Console ──
+    const activeBrowserEntries = browserConsoleMap[activeBrowserTabId] || [];
+    const totalBrowserEntries = Object.values(browserConsoleMap).reduce((s, e) => s + e.length, 0);
+    if (totalBrowserEntries > 0) {
+      lines.push(`Browser Console: ${totalBrowserEntries} entries total (active tab: ${activeBrowserEntries.length})`);
+      const sample = activeBrowserEntries.slice(-10);
+      for (const b of sample) {
+        const txt = (b.text || "").slice(0, 200);
+        const src = b.source === "domNode" ? `DOM` : `console.${b.level}`;
+        const timeStr = b.time ? new Date(b.time).toISOString().slice(11, 19) : "?";
+        lines.push(`  [${timeStr}] ${src} – ${txt}`);
+      }
+    } else {
+      lines.push("Browser Console: empty");
+    }
+
+    // ── Files ──
+    lines.push(`Open files: ${files.length} (active: ${activeFile?.name || "none"})`);
+    for (const f of files.slice(0, 10)) {
+      lines.push(`  ${f.name}${f.id === activeFileId ? " *ACTIVE*" : ""}${dirtyFiles.has(f.id) ? " [unsaved]" : ""}`);
+    }
+
+    // ── Project file tree ──
+    if (fsRoot && fsRoot.length > 0) {
+      lines.push(`Project tree (${fsBasePath}):`);
+      const trim = (p: string) => p.replace(/\\/g, "/").replace(/\/$/, "");
+      const root = trim(fsBasePath);
+      // Recursively flatten the entry tree (breadth-first, capped).
+      const queue: { entry: FsEntry; depth: number }[] = fsRoot.map((e) => ({ entry: e, depth: 1 }));
+      let shown = 0, maxShown = 30;
+      while (queue.length > 0 && shown < maxShown) {
+        const { entry, depth } = queue.shift()!;
+        const relName = trim(entry.path).startsWith(root)
+          ? trim(entry.path).slice(root.length + 1)
+          : entry.name;
+        const isOpen = files.some((f) => f._fsPath && normPath(f._fsPath) === normPath(entry.path));
+        const marker = entry.isDirectory ? "/" : "";
+        const openTag = isOpen ? " (open)" : "";
+        const indent = "  ".repeat(depth);
+        lines.push(`${indent}${relName}${marker}${openTag}`);
+        shown++;
+        // Only expand one level deep (depth 1 entries) for a compact snapshot.
+        // Deeper expansion happens on-demand via the files panel UI.
+      }
+      if (shown >= maxShown) lines.push("  ... (more entries not shown)");
+    } else if (fsBasePath) {
+      lines.push(`Project: ${fsBasePath} (loading...)`);
+    }
+
+    // ── Git status on active file ──
+    if (activeFile?._fsPath) {
+      const gs = gitChanges.get(normPath(activeFile._fsPath));
+      if (gs) lines.push(`Git: ${activeFile.name} is '${gs}' (${gs === "M" ? "modified" : gs === "A" ? "added" : gs === "D" ? "deleted" : gs === "?" ? "untracked" : "unknown"})`);
+    }
+
+    return lines.join("\n");
+  }, [problemEntries, debugEntries, outputEntries, browserConsoleMap, activeBrowserTabId, files, activeFileId, activeFile, dirtyFiles, gitChanges, fsRoot, fsBasePath]);
+
+  // Execute a browser tool on behalf of the agent.
+  const executeBrowserAction = useCallback(async (toolName: string, params: Record<string, unknown>): Promise<string> => {
+    const bv = browserViewRef.current;
+    if (!bv) return "Browser not available (no page loaded).";
+    switch (toolName) {
+      case "browser_screenshot": return bv.getScreenshot();
+      case "browser_get_dom": return bv.getIndexedDom();
+      case "browser_click": await bv.clickElement(Number(params.index || 0)); return "Clicked element.";
+      case "browser_type": await bv.typeIntoElement(Number(params.index || 0), String(params.text || "")); return "Typed text.";
+      case "browser_eval": return bv.evalInPage(String(params.code || ""));
+      case "browser_navigate": bv.navigateTo(String(params.url || "")); return `Navigating to ${params.url}...`;
+      default: return `Unknown browser tool: ${toolName}`;
+    }
+  }, []);
+
+  // Flat list of project-file paths for the agent's file-mention autocomplete.
+  const getProjectFiles = useCallback(async (): Promise<string[]> => {
+    if (fsBasePath) {
+      try {
+        const res = await fetch(`/api/fs/list-recursive?path=${encodeURIComponent(fsBasePath)}`);
+        const data = await res.json();
+        return (data.files || []) as string[];
+      } catch { return []; }
+    }
+    return [];
+  }, [fsBasePath]);
+
+  const getFsBasePath = useCallback((): string => fsBasePath, [fsBasePath]);
+
   useImperativeHandle(ref, () => ({
     getCode, getFiles: () => files, applyAiFiles,
     goToLine: handleGoToLine, goToBracket: handleGoToBracket,
     setLanguage: handleSetLanguage, setIndent: handleIndentChange,
     setLineEnding: handleLineEnding, setEncoding,
-  }), [getCode, files, applyAiFiles, handleGoToLine, handleGoToBracket, handleSetLanguage, handleIndentChange, handleLineEnding, setEncoding]);
+    getConsoleContext, executeBrowserAction, getProjectFiles, getFsBasePath,
+  }), [getCode, files, applyAiFiles, handleGoToLine, handleGoToBracket, handleSetLanguage, handleIndentChange, handleLineEnding, setEncoding, getConsoleContext, executeBrowserAction, getProjectFiles, getFsBasePath]);
 
   const updateFile = useCallback((id: string, content: string) => {
     setDirtyFiles((prev) => { const next = new Set(prev); next.add(id); return next; });
@@ -921,12 +1064,12 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     }
   }, []);
 
-  const addFile = useCallback(() => {
+  const addFile = useCallback((parentDir?: string) => {
     setNameDialog({ title: "New File", defaultValue: "untitled.js", onOk: async (name) => {
-      if (fsBasePath) {
+      if (fsBasePath || parentDir) {
         // Create file on disk, refresh tree, open in editor
-        const sep = fsBasePath.includes("/") ? "/" : "\\";
-        const filePath = fsBasePath + sep + name;
+        const sep = (parentDir || fsBasePath || "").includes("/") ? "/" : "\\";
+        const filePath = (parentDir || fsBasePath || "") + sep + name;
         try {
           await fetch("/api/fs/create-file", {
             method: "POST",
@@ -997,6 +1140,39 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
       setNameDialog(null);
     }});
   }, [files]);
+
+  const handleFsDelete = useCallback(async (targetPath: string) => {
+    try {
+      await fetch("/api/fs/delete", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: targetPath }),
+      });
+      onRefreshFs();
+      // Close any open tabs for files inside the deleted path
+      setFiles((prev) => prev.filter((f) => !(f._fsPath && normPath(f._fsPath).startsWith(normPath(targetPath)))));
+      if (selectedFolder === targetPath) setSelectedFolder(null);
+    } catch { /* ignore */ }
+  }, [onRefreshFs, selectedFolder]);
+
+  const handleFsRename = useCallback((oldPath: string) => {
+    const name = oldPath.split(/[/\\]/).pop() || "item";
+    setNameDialog({ title: "Rename", defaultValue: name, onOk: async (newName) => {
+      if (newName === name) { setNameDialog(null); return; }
+      const parent = oldPath.replace(/[/\\][^/\\]*$/, "");
+      const newPath = parent + (oldPath.includes("/") ? "/" : "\\") + newName;
+      try {
+        await fetch("/api/fs/rename", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ oldPath, newPath }),
+        });
+      } catch { /* ignore */ }
+      onRefreshFs();
+      if (selectedFolder === oldPath) setSelectedFolder(newPath);
+      setNameDialog(null);
+    }});
+  }, [onRefreshFs, selectedFolder]);
 
   if (!hasContent && !terminalVisible) {
     return (
@@ -1106,6 +1282,11 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
             onAdd={addFile}
             onDelete={(id) => closeTab(id)}
             onRename={renameFile}
+            selectedFolder={selectedFolder}
+            onSelectFolder={setSelectedFolder}
+            onFsDelete={handleFsDelete}
+            onFsRename={handleFsRename}
+            activeFilePath={activeFile?._fsPath || null}
             fsRoot={fsRoot}
             fsBasePath={fsBasePath}
             onOpenFsFile={openFsFile}
@@ -1209,6 +1390,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
             {hasBrowserTabs && activeFileId === BROWSER_EDITOR_TAB_ID && (
               <div style={{ height: "100%" }}>
                 <BrowserView
+                  ref={browserViewRef}
                   tabs={browserTabs}
                   activeTabId={activeBrowserTab?.id || ""}
                   onSelectTab={onActiveBrowserTabChange}

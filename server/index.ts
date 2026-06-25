@@ -51,7 +51,7 @@ app.post("/api/run", async (req, res) => {
   }
 });
 
-// ── Agentic coding chat ──
+// ── Agentic coding chat (simple, single-turn) ──
 app.post("/api/chat", async (req, res) => {
   const { message, context, history } = req.body;
   if (!message) return res.status(400).json({ error: "Missing message" });
@@ -65,6 +65,158 @@ app.post("/api/chat", async (req, res) => {
     const msg = err instanceof Error ? err.message : String(err);
     broadcast({ type: "error", data: msg });
     res.status(500).json({ error: msg });
+  }
+});
+
+// ── Agentic chat (tool-calling loop) ──
+import { createAgentSession, getAgentSession, addToolResult, addToolResultStream, agentLoop, agentLoopStream, type AgentState, type AgentResponse, type AgentSseEvent } from "./agent";
+
+app.post("/api/chat/agent", async (req, res) => {
+  const { message, context, projectRoot } = req.body || {};
+  if (!message) return res.status(400).json({ error: "Missing message" });
+
+  try {
+    broadcast({ type: "log", data: `User (agent): ${message}` });
+    const root = projectRoot || process.cwd();
+    const sessionId = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const state = createAgentSession(sessionId, root, message, context || "");
+
+    const result = await agentLoop(root, state, context || "");
+
+    if (result.phase === "tool_needed") {
+      broadcast({ type: "agent_tool", data: { sessionId, tool: result.tool, executedTools: result.executedTools } });
+      res.json({
+        phase: "tool_needed",
+        sessionId,
+        tool: result.tool,
+        executedTools: result.executedTools,
+        messages: result.messages,
+      });
+    } else {
+      broadcast({ type: "assistant", data: result.reply });
+      res.json({ phase: "done", reply: result.reply, messages: result.messages });
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    broadcast({ type: "error", data: msg });
+    res.status(500).json({ error: msg });
+  }
+});
+
+app.post("/api/chat/agent/continue", async (req, res) => {
+  const { sessionId, toolCallId, toolResult, projectRoot } = req.body || {};
+  if (!sessionId || !toolCallId || toolResult === undefined) {
+    return res.status(400).json({ error: "Missing sessionId, toolCallId, or toolResult" });
+  }
+
+  try {
+    const state = getAgentSession(sessionId);
+    if (!state) return res.status(404).json({ error: "Session not found" });
+
+    addToolResult(sessionId, toolCallId, String(toolResult));
+    broadcast({ type: "agent_tool_result", data: { sessionId, toolCallId, toolResult: String(toolResult).slice(0, 500) } });
+
+    const result = await agentLoop(projectRoot || state.projectRoot, state, "");
+
+    if (result.phase === "tool_needed") {
+      broadcast({ type: "agent_tool", data: { sessionId, tool: result.tool, executedTools: result.executedTools } });
+      res.json({
+        phase: "tool_needed",
+        sessionId,
+        tool: result.tool,
+        executedTools: result.executedTools,
+        messages: result.messages,
+      });
+    } else {
+      broadcast({ type: "assistant", data: result.reply });
+      res.json({ phase: "done", reply: result.reply, messages: result.messages });
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    broadcast({ type: "error", data: msg });
+    res.status(500).json({ error: msg });
+  }
+});
+
+// ── Streaming agent (SSE) ──
+// The client opens an SSE connection, receives progressive events,
+// and may need to call /continue/stream when a browser tool is needed.
+
+app.post("/api/chat/agent/stream", async (req, res) => {
+  const { message, context, projectRoot } = req.body || {};
+  if (!message) return res.status(400).json({ error: "Missing message" });
+
+  try {
+    broadcast({ type: "log", data: `User (agent): ${message}` });
+    const root = projectRoot || process.cwd();
+    const sessionId = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const state = createAgentSession(sessionId, root, message, context || "");
+
+    // SSE headers
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+
+    const sendEvent = (event: AgentSseEvent) => {
+      const data = JSON.stringify({ ...event, sessionId });
+      res.write(`data: ${data}\n\n`);
+    };
+
+    for await (const event of agentLoopStream(root, state, context || "", sessionId)) {
+      sendEvent(event);
+      if (event.type === "browser_tool" || event.type === "done" || event.type === "error") break;
+    }
+
+    res.end();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    broadcast({ type: "error", data: msg });
+    if (!res.writableEnded) {
+      res.write(`data: ${JSON.stringify({ type: "error", error: msg })}\n\n`);
+      res.end();
+    }
+  }
+});
+
+app.post("/api/chat/agent/stream/continue", async (req, res) => {
+  const { sessionId, toolCallId, toolResult } = req.body || {};
+  if (!sessionId || !toolCallId || toolResult === undefined) {
+    return res.status(400).json({ error: "Missing sessionId, toolCallId, or toolResult" });
+  }
+
+  try {
+    const state = addToolResultStream(sessionId, toolCallId, String(toolResult));
+    if (!state) return res.status(404).json({ error: "Session not found" });
+    broadcast({ type: "agent_tool_result", data: { sessionId, toolCallId, toolResult: String(toolResult).slice(0, 500) } });
+
+    // SSE headers
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+
+    const sendEvent = (event: AgentSseEvent) => {
+      res.write(`data: ${JSON.stringify({ ...event, sessionId })}\n\n`);
+    };
+
+    for await (const event of agentLoopStream(state.projectRoot, state, "", sessionId)) {
+      sendEvent(event);
+      if (event.type === "browser_tool" || event.type === "done" || event.type === "error") break;
+    }
+
+    res.end();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    broadcast({ type: "error", data: msg });
+    if (!res.writableEnded) {
+      res.write(`data: ${JSON.stringify({ type: "error", error: msg })}\n\n`);
+      res.end();
+    }
   }
 });
 
@@ -115,6 +267,29 @@ app.get("/api/fs/list", (req, res) => {
         return a.name.localeCompare(b.name);
       });
     res.json({ path: dirPath, entries: result });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// Recursively list ALL files under a directory (flat array of paths).
+app.get("/api/fs/list-recursive", (req, res) => {
+  try {
+    const dirPath = safePath((req.query.path as string) || process.cwd());
+    const result: string[] = [];
+    const walk = (d: string) => {
+      for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
+        if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
+        const full = path.join(d, entry.name);
+        if (entry.isDirectory()) {
+          walk(full);
+        } else {
+          result.push(full);
+        }
+      }
+    };
+    walk(dirPath);
+    res.json({ path: dirPath, files: result });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -229,9 +404,45 @@ app.post("/api/fs/create-file", (req, res) => {
   try {
     const { path: filePath, content } = req.body;
     if (!filePath) return res.status(400).json({ error: "Missing path" });
-    if (!fs.existsSync(filePath)) {
-      fs.writeFileSync(safePath(filePath), content || "", "utf-8");
+    const resolved = safePath(filePath);
+    // Ensure parent directory exists
+    fs.mkdirSync(path.dirname(resolved), { recursive: true });
+    if (!fs.existsSync(resolved)) {
+      fs.writeFileSync(resolved, content || "", "utf-8");
     }
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// Delete a file or directory (recursive).
+app.delete("/api/fs/delete", (req, res) => {
+  try {
+    const { path: targetPath } = req.body || {};
+    if (!targetPath) return res.status(400).json({ error: "Missing path" });
+    const resolved = safePath(targetPath);
+    if (!fs.existsSync(resolved)) return res.json({ success: true });
+    if (fs.statSync(resolved).isDirectory()) {
+      fs.rmSync(resolved, { recursive: true, force: true });
+    } else {
+      fs.unlinkSync(resolved);
+    }
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// Rename / move a file or directory.
+app.post("/api/fs/rename", (req, res) => {
+  try {
+    const { oldPath, newPath } = req.body || {};
+    if (!oldPath || !newPath) return res.status(400).json({ error: "Missing oldPath or newPath" });
+    const from = safePath(oldPath);
+    const to = safePath(newPath);
+    fs.mkdirSync(path.dirname(to), { recursive: true });
+    fs.renameSync(from, to);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: String(err) });

@@ -105,3 +105,130 @@ Respond ONLY with valid JSON in this exact format:
 
   return JSON.parse(jsonMatch[0]) as AIResponse;
 }
+
+// ── Tool-calling variant (for the agent) ──
+// Returns either a text reply or a set of tool calls, depending on what
+// DeepSeek decides. Follows the OpenAI function-calling shape.
+
+export interface ToolCallResult {
+  text: string | null;
+  toolCalls: Array<{
+    id: string;
+    type: "function";
+    function: { name: string; arguments: string };
+  }> | null;
+}
+
+export async function chatDeepSeekTool(
+  messages: Array<{ role: string; content: string | null; tool_calls?: any[]; tool_call_id?: string; name?: string }>,
+  tools: Array<{ name: string; description: string; parameters: Record<string, unknown> }>,
+): Promise<ToolCallResult> {
+  const response = await client.chat.completions.create({
+    model: "deepseek-chat",
+    messages: messages as any,
+    // @ts-ignore DeepSeek supports tools in OpenAI shape
+    tools: tools.map((t) => ({
+      type: "function",
+      function: { name: t.name, description: t.description, parameters: t.parameters },
+    })),
+    tool_choice: "auto",
+    temperature: 0.1,
+    max_tokens: 4000,
+  });
+
+  const choice = response.choices[0]?.message;
+  return {
+    text: choice?.content || null,
+    toolCalls: choice?.tool_calls as any || null,
+  };
+}
+
+// ── Streaming tool-calling variant ──
+// Yields chunks as they arrive: {type: "thinking", text}, {type: "text", text},
+// {type: "tool_delta", index, name?, args}, {type: "done", text, toolCalls?}.
+
+export interface StreamChunk {
+  type: "thinking" | "text" | "tool_delta" | "done";
+  text?: string;
+  /** Final accumulated text content (on done). */
+  finalText?: string | null;
+  /** Final tool calls (on done). */
+  toolCalls?: Array<{
+    id: string;
+    type: "function";
+    function: { name: string; arguments: string };
+  }> | null;
+  /** Index of the tool call being streamed (on tool_delta). */
+  toolIndex?: number;
+  /** Name of the function (may arrive in later chunks). */
+  toolName?: string;
+}
+
+export async function* chatDeepSeekToolStream(
+  messages: Array<{ role: string; content: string | null; tool_calls?: any[]; tool_call_id?: string; name?: string }>,
+  tools: Array<{ name: string; description: string; parameters: Record<string, unknown> }>,
+): AsyncGenerator<StreamChunk> {
+  const stream = await client.chat.completions.create({
+    model: "deepseek-chat",
+    messages: messages as any,
+    // @ts-ignore
+    tools: tools.map((t) => ({
+      type: "function",
+      function: { name: t.name, description: t.description, parameters: t.parameters },
+    })),
+    tool_choice: "auto",
+    temperature: 0.1,
+    max_tokens: 4000,
+    stream: true,
+  });
+
+  let fullText = "";
+  const toolCalls: Map<number, { id: string; name: string; args: string }> = new Map();
+
+  for await (const chunk of stream) {
+    const delta = (chunk as any).choices?.[0]?.delta;
+    if (!delta) continue;
+
+    // Reasoning / thinking content (DeepSeek-R1 style)
+    if (delta.reasoning_content) {
+      yield { type: "thinking", text: delta.reasoning_content };
+    }
+
+    // Text content
+    if (delta.content) {
+      fullText += delta.content;
+      yield { type: "text", text: delta.content };
+    }
+
+    // Tool call deltas
+    if (delta.tool_calls) {
+      for (const tc of delta.tool_calls) {
+        const idx = tc.index ?? 0;
+        let entry = toolCalls.get(idx);
+        if (!entry) {
+          entry = { id: tc.id || "", name: tc.function?.name || "", args: "" };
+          toolCalls.set(idx, entry);
+        }
+        if (tc.id) entry.id = tc.id;
+        if (tc.function?.name) entry.name = tc.function.name;
+        if (tc.function?.arguments) entry.args += tc.function.arguments;
+        yield { type: "tool_delta", toolIndex: idx, toolName: entry.name || undefined, text: tc.function?.arguments || "" };
+      }
+    }
+  }
+
+  // Emit final done with accumulated data
+  const finalToolCalls = toolCalls.size > 0
+    ? Array.from(toolCalls.values()).map((tc) => ({
+        id: tc.id,
+        type: "function" as const,
+        function: { name: tc.name, arguments: tc.args },
+      }))
+    : null;
+
+  yield {
+    type: "done",
+    finalText: fullText || null,
+    toolCalls: finalToolCalls,
+  };
+}

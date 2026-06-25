@@ -132,6 +132,38 @@ To keep diagnostics signal-heavy, Harness tunes two noisy defaults:
 
 Add an entry to `SERVER_SPECS` in `server/lsp.ts` mapping the language id to its server binary, and (if needed) the file extension in `detectLanguage` in `client/src/panes/fileModel.ts`.
 
+## File Management
+
+Harness includes a file explorer tree (`FilesPanel`) with full create, delete, and rename capabilities — both for your manual use and for the AI agent.
+
+**Creating files**
+- Click the **+** button in the files header to create a new file. If no folder is selected in the tree, the file is created in the project root. If a folder is **selected** (click it once — it highlights), the new file is created inside that folder.
+- Folders are automatically created on demand when you add a file under a path that doesn't exist yet.
+
+**Right-click context menu**
+- Right-click any item in the file tree to **Rename** or **Delete** it.
+- Deleting a folder removes it recursively.
+
+**AI Agent file access**
+The AI agent has five filesystem tools:
+
+| Tool | Description |
+|------|-------------|
+| `read_file` | Reads a file with line numbers |
+| `write_file` | Creates or overwrites a file |
+| `list_files` | Lists directory contents (skips `.git` / `node_modules`) |
+| `create_directory` | Creates a new directory (and any parent dirs) |
+| `delete_file` | Deletes a file or directory (recursively) |
+
+All tools operate relative to the project root. The agent can browse, create, edit, and clean up files on its own — no manual intervention needed.
+
+**Server APIs**
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/fs/create-file` | POST | Creates a file (and parent dirs) if it doesn't already exist |
+| `/api/fs/delete` | DELETE | Deletes a file or directory (recursive for dirs) |
+| `/api/fs/rename` | POST | Renames / moves a file or directory |
+
 ## How it works
 
 1. Write HTML/CSS/JS in the Monaco Editor
