@@ -55,7 +55,7 @@ export interface AgentResponse {
 // ── SSE event types for streaming agent ──
 
 export interface AgentSseEvent {
-  type: "thinking" | "text" | "tool_start" | "tool_end" | "browser_tool" | "done" | "error";
+  type: "thinking" | "text" | "tool_start" | "tool_end" | "browser_tool" | "done" | "error" | "warning";
   /** Chunk of thinking/reasoning text. */
   text?: string;
   /** Tool name (on tool_start / tool_end / browser_tool). */
@@ -76,6 +76,10 @@ export interface AgentSseEvent {
   sessionId?: string;
   /** Error message (on error). */
   error?: string;
+  /** Warning message (on warning — shown to user as a system notice). */
+  warning?: string;
+  /** Usage stats (on done). */
+  usage?: { estimatedTokens: number; contextLimit: number; turns: number };
 }
 
 // ── Tool registry ──
@@ -290,12 +294,28 @@ async function runFsTool(name: string, params: Record<string, unknown>, root: st
   if (name === "delete_file") {
     const targetPath = resolve(String(params.path || ""));
     if (!fs.existsSync(targetPath)) return `Not found: ${params.path}`;
-    if (fs.statSync(targetPath).isDirectory()) {
-      fs.rmSync(targetPath, { recursive: true, force: true });
-    } else {
-      fs.unlinkSync(targetPath);
+    // Retry on Windows lock errors (antivirus, editor holding handle, etc.)
+    const delays = [0, 60, 150, 300, 600];
+    let lastErr: any;
+    for (const wait of delays) {
+      if (wait) await new Promise((r) => setTimeout(r, wait));
+      try {
+        if (fs.statSync(targetPath).isDirectory()) {
+          fs.rmSync(targetPath, { recursive: true, force: true });
+        } else {
+          fs.unlinkSync(targetPath);
+        }
+        return `Deleted: ${params.path}`;
+      } catch (err: any) {
+        lastErr = err;
+        const code = err?.code;
+        if (code !== "EPERM" && code !== "EACCES" && code !== "EBUSY") throw err;
+        if ((code === "EPERM" || code === "EACCES") && fs.existsSync(targetPath)) {
+          try { fs.chmodSync(targetPath, 0o666); } catch { /* */ }
+        }
+      }
     }
-    return `Deleted: ${params.path}`;
+    throw lastErr;
   }
   return null; // not a filesystem tool
 }
@@ -464,9 +484,45 @@ export async function* agentLoopStream(
     return msgs;
   };
 
+  // Track whether we've already warned about history length
+  // (only warn once per session to avoid spam).
+  let historyWarned = false;
+  let turnsWarned = false;
+  let finalEstTokens = 0;
+
+  const makeUsage = (turns: number) => ({
+    estimatedTokens: finalEstTokens,
+    contextLimit: 8192,
+    turns,
+  });
+
   for (let iter = 0; iter < MAX_ITERS; iter++) {
     state.iteration++;
     const openaiMessages = buildMessages();
+
+    // ── Heuristic warnings ──
+    // Estimate token count: ~4 chars per token for English text.
+    const totalChars = state.messages.reduce((sum, m) => sum + (m.content?.length || 0) + (m.tool_call_id?.length || 0) + (m.name?.length || 0), 0);
+    const estTokens = Math.round(totalChars / 4);
+    finalEstTokens = estTokens;
+
+    // Warn when approaching the DeepSeek context limit (~8K for deepseek-chat).
+    if (!historyWarned && estTokens > 4500) {
+      historyWarned = true;
+      yield {
+        type: "warning",
+        warning: `Conversation history is ~${estTokens} tokens. Consider starting a "New Task" if the agent seems to lose context or you're starting a different topic.`,
+      };
+    }
+
+    // Warn when approaching the iteration limit.
+    if (!turnsWarned && iter >= 8) {
+      turnsWarned = true;
+      yield {
+        type: "warning",
+        warning: `${iter + 1}/${MAX_ITERS} turns used. If the task hasn't completed soon, try breaking it into smaller steps.`,
+      };
+    }
 
     // Stream response from DeepSeek
     const stream = chatDeepSeekToolStream(openaiMessages, TOOLS);
@@ -495,7 +551,7 @@ export async function* agentLoopStream(
     if (!finalToolCalls || finalToolCalls.length === 0) {
       const reply = finalText || "Task completed.";
       state.messages.push({ role: "assistant", content: reply });
-      yield { type: "done", reply };
+      yield { type: "done", reply, usage: makeUsage(iter + 1) };
       return;
     }
 
@@ -532,7 +588,7 @@ export async function* agentLoopStream(
         const summary = String(params.summary || "Task completed.");
         state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName });
         state.messages.push({ role: "tool", content: "OK", tool_call_id: tc.id });
-        yield { type: "done", reply: summary };
+        yield { type: "done", reply: summary, usage: makeUsage(iter + 1) };
         return;
       }
 
@@ -558,7 +614,11 @@ export async function* agentLoopStream(
     // No browser tool but executed fs tools — continue the loop
   }
 
-  yield { type: "done", reply: "Reached maximum iterations." };
+  yield {
+    type: "warning",
+    warning: `Reached the maximum of ${MAX_ITERS} turns. Start a "New Task" to continue with a fresh context.`,
+  };
+  yield { type: "done", reply: "Reached maximum iterations.", usage: makeUsage(MAX_ITERS) };
 }
 
 // Helper to add a tool result and get state for continuation

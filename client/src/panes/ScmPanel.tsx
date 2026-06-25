@@ -40,11 +40,17 @@ function statusClass(s: string): string {
   if (s === "M" || s.includes("M")) return "scm-status-modified";
   if (s === "A" || s.includes("A")) return "scm-status-added";
   if (s === "D" || s.includes("D")) return "scm-status-deleted";
-  if (s === "U" || s === "??") return "scm-status-untracked";
+  if (s === "U" || s === "??" || s === "?") return "scm-status-untracked";
   return "scm-status-modified";
 }
 
-export default function ScmPanel({ fsBasePath }: { fsBasePath: string }) {
+// Normalize git status: "?" / "??" → "U" for display.
+function displayStatus(s: string): string {
+  if (s === "?" || s === "??") return "U";
+  return s;
+}
+
+export default function ScmPanel({ fsBasePath, newFilePaths }: { fsBasePath: string; newFilePaths?: Set<string> }) {
   const [status, setStatus] = useState<GitStatus | null>(null);
   const [log, setLog] = useState<GitLog | null>(null);
   const [statusLoading, setStatusLoading] = useState(false);
@@ -183,7 +189,7 @@ export default function ScmPanel({ fsBasePath }: { fsBasePath: string }) {
               )}
               {status!.staged.map((c, i) => (
                 <div key={i} className="scm-item">
-                  <span className={`scm-status ${statusClass(c.status)}`}>{c.status}</span>
+                  <span className={`scm-status ${statusClass(c.status)}`}>{displayStatus(c.status)}</span>
                   <span className="scm-path">{c.path}</span>
                 </div>
               ))}
@@ -207,7 +213,7 @@ export default function ScmPanel({ fsBasePath }: { fsBasePath: string }) {
               )}
               {status!.unstaged.map((c, i) => (
                 <div key={i} className="scm-item">
-                  <span className={`scm-status ${statusClass(c.status)}`}>{c.status === "?" ? "U" : c.status}</span>
+                  <span className={`scm-status ${statusClass(c.status)}`}>{displayStatus(c.status)}</span>
                   <span className="scm-path">{c.path}</span>
                   <div className="scm-item-actions">
                     {/* File action stubs */}
@@ -216,6 +222,25 @@ export default function ScmPanel({ fsBasePath }: { fsBasePath: string }) {
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {/* Agent-created files (not yet in git) */}
+      {newFilePaths && newFilePaths.size > 0 && (
+        <div className="scm-section">
+          <div className="scm-section-header">
+            <span className="scm-section-toggle">▾</span>
+            <span className="scm-section-title">New Files</span>
+            <span className="scm-section-count">{newFilePaths.size}</span>
+          </div>
+          <div className="scm-section-body">
+            {[...newFilePaths].map((p) => (
+              <div key={p} className="scm-item">
+                <span className="scm-status scm-status-untracked">U</span>
+                <span className="scm-path">{p}</span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

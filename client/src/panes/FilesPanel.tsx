@@ -33,17 +33,19 @@ interface Props {
   onFsRename: (oldPath: string) => void;
   /** Path of the currently active editor file (for tree highlight). */
   activeFilePath: string | null;
+  /** Set of file paths marked as "created by agent". */
+  newFilePaths?: Set<string>;
 }
 
 function statusColor(s: string): string {
   if (s === "M") return "#e2b714";
   if (s === "A") return "#4ec94e";
   if (s === "D") return "#f44747";
-  if (s === "U" || s === "?") return "#569cd6";
+  if (s === "U" || s === "?") return "#4ec94e";
   return "#e2b714";
 }
 
-function FsTree({ entries, basePath, onOpenFile, onOpenFolder, depth, gitChanges, selectedFolder, onSelectFolder, onContextMenu, activeFilePath }: {
+function FsTree({ entries, basePath, onOpenFile, onOpenFolder, depth, gitChanges, selectedFolder, onSelectFolder, onContextMenu, activeFilePath, newFilePaths }: {
   entries: FsEntry[];
   basePath: string;
   onOpenFile: (p: string, h?: FileSystemFileHandle) => void;
@@ -54,6 +56,7 @@ function FsTree({ entries, basePath, onOpenFile, onOpenFolder, depth, gitChanges
   onSelectFolder: (path: string | null) => void;
   onContextMenu: (e: React.MouseEvent, entry: FsEntry) => void;
   activeFilePath: string | null;
+  newFilePaths?: Set<string>;
 }) {
   return (
     <>
@@ -70,6 +73,7 @@ function FsTree({ entries, basePath, onOpenFile, onOpenFolder, depth, gitChanges
           onSelectFolder={onSelectFolder}
           onContextMenu={onContextMenu}
           activeFilePath={activeFilePath}
+          newFilePaths={newFilePaths}
         />
       ))}
     </>
@@ -95,7 +99,7 @@ function hasDescendantChanges(dirPath: string, changes: Map<string, string>): st
   return best;
 }
 
-function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth, gitChanges, selectedFolder, onSelectFolder, onContextMenu, activeFilePath }: {
+function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth, gitChanges, selectedFolder, onSelectFolder, onContextMenu, activeFilePath, newFilePaths }: {
   entry: FsEntry;
   basePath: string;
   onOpenFile: (p: string, h?: FileSystemFileHandle) => void;
@@ -106,12 +110,14 @@ function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth, gitChanges, 
   onSelectFolder: (path: string | null) => void;
   onContextMenu: (e: React.MouseEvent, entry: FsEntry) => void;
   activeFilePath: string | null;
+  newFilePaths?: Set<string>;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [children, setChildren] = useState<FsEntry[] | null>(null);
   const [loading, setLoading] = useState(false);
   const isSelected = selectedFolder === entry.path;
   const isActiveFile = activeFilePath ? normPath(entry.path) === normPath(activeFilePath) : false;
+  const isNewFile = !entry.isDirectory && !!newFilePaths?.has(normPath(entry.path));
   // Is the active file under this directory? If so, auto-expand + highlight the folder.
   const containsActive = activeFilePath && entry.isDirectory
     ? normPath(activeFilePath).startsWith(normPath(entry.path) + "/")
@@ -148,6 +154,8 @@ function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth, gitChanges, 
     return gitChanges.get(normPath(entry.path)) || null;
   }, [entry, gitChanges]);
 
+  const isUntracked = !entry.isDirectory && (isNewFile || gitMarker === "?");
+
   const handleToggle = useCallback(async () => {
     if (entry.isDirectory) {
       // Select the folder (for adding files inside it)
@@ -183,11 +191,14 @@ function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth, gitChanges, 
         <span className="file-icon">
           {loading ? "⏳" : <img className="file-icon-img" src={iconUrl} alt="" draggable={false} />}
         </span>
-        <span className="file-name">{entry.name}</span>
+        <span className={`file-name${isUntracked ? " file-name-new" : ""}`}>{entry.name}</span>
         {gitMarker && (
           <span className="fs-git-marker" style={{ color: statusColor(gitMarker) }}>
-            {gitMarker}
+            {gitMarker === "?" ? "U" : gitMarker}
           </span>
+        )}
+        {isNewFile && !gitMarker && (
+          <span className="fs-git-marker" style={{ color: "#4ec94e" }}>U</span>
         )}
       </div>
       {expanded && children && (
@@ -202,6 +213,7 @@ function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth, gitChanges, 
           onSelectFolder={onSelectFolder}
           onContextMenu={onContextMenu}
           activeFilePath={activeFilePath}
+          newFilePaths={newFilePaths}
         />
       )}
     </>
@@ -213,7 +225,7 @@ export default function FilesPanel({
   fsRoot, fsBasePath, onOpenFsFile, onRefreshFs,
   width, gitChanges,
   selectedFolder, onSelectFolder, onFsDelete, onFsRename,
-  activeFilePath,
+  activeFilePath, newFilePaths,
 }: Props) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; entry: FsEntry } | null>(null);
 
@@ -260,6 +272,7 @@ export default function FilesPanel({
               onSelectFolder={onSelectFolder}
               onContextMenu={handleContextMenu}
               activeFilePath={activeFilePath}
+              newFilePaths={newFilePaths}
             />
           </div>
         </>

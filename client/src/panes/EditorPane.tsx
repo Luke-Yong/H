@@ -33,6 +33,8 @@ export interface EditorPaneHandle {
   executeBrowserAction: (toolName: string, params: Record<string, unknown>) => Promise<string>;
   getProjectFiles: () => Promise<string[]>;
   getFsBasePath: () => string;
+  /** Refresh the git status for untracked/modified markers. */
+  refreshGitStatus?: () => Promise<void>;
 }
 
 export interface StatusBarState {
@@ -776,7 +778,13 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     const target = normPath(filePath);
     // Fast path: tab already open → just focus it, skip the read entirely.
     const existing = files.find((f) => normPath(f._fsPath) === target);
-    if (existing) { setActiveFileId(existing.id); return; }
+    if (existing) {
+      if (existing._isNew) {
+        // Clear "new" badge on user interaction.
+        setFiles((prev) => prev.map((f) => f.id === existing.id ? { ...f, _isNew: false } : f));
+      }
+      setActiveFileId(existing.id); return;
+    }
     try {
       const name = filePath.split(/[/\\]/).pop() || "untitled";
       const f = createFile(name);
@@ -819,9 +827,15 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     setFiles((prev) => {
       const updated = [...prev];
       for (const af of aiFiles) {
-        const existing = updated.find((f) => f.name === af.name);
+        // Dedup: match by _fsPath first, then by name.
+        const target = af.fsPath ? normPath(af.fsPath) : "";
+        const existing = target
+          ? updated.find((f) => normPath(f._fsPath) === target)
+          : updated.find((f) => f.name === af.name);
         if (existing) {
           existing.content = af.content;
+          // Don't clear _isNew — git status will take over once the file
+          // appears as untracked. Keep the green "U" until then.
           if (existing._fsPath) {
             fetch("/api/fs/write", {
               method: "POST", headers: { "Content-Type": "application/json" },
@@ -831,6 +845,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
         } else {
           const f = createFile(af.name, af.content);
           if (af.fsPath) f._fsPath = af.fsPath;
+          f._isNew = true; // marked for "new" badge
           updated.push(f);
           newFileId = newFileId || f.id;
         }
@@ -974,13 +989,22 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
 
   const getFsBasePath = useCallback((): string => fsBasePath, [fsBasePath]);
 
+  const newFilePaths = useMemo(() => {
+    const s = new Set<string>();
+    for (const f of files) {
+      if (f._isNew && f._fsPath) s.add(normPath(f._fsPath));
+    }
+    return s;
+  }, [files]);
+
   useImperativeHandle(ref, () => ({
     getCode, getFiles: () => files, applyAiFiles,
     goToLine: handleGoToLine, goToBracket: handleGoToBracket,
     setLanguage: handleSetLanguage, setIndent: handleIndentChange,
     setLineEnding: handleLineEnding, setEncoding,
     getConsoleContext, executeBrowserAction, getProjectFiles, getFsBasePath,
-  }), [getCode, files, applyAiFiles, handleGoToLine, handleGoToBracket, handleSetLanguage, handleIndentChange, handleLineEnding, setEncoding, getConsoleContext, executeBrowserAction, getProjectFiles, getFsBasePath]);
+    refreshGitStatus,
+  }), [getCode, files, applyAiFiles, handleGoToLine, handleGoToBracket, handleSetLanguage, handleIndentChange, handleLineEnding, setEncoding, getConsoleContext, executeBrowserAction, getProjectFiles, getFsBasePath, refreshGitStatus]);
 
   const updateFile = useCallback((id: string, content: string) => {
     setDirtyFiles((prev) => { const next = new Set(prev); next.add(id); return next; });
@@ -1208,7 +1232,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
             {sidebarPanel === "extensions" && <div className="placeholder-sub">Extension marketplace coming soon</div>}
           </div>
         )}
-        {sidebarVisible && sidebarPanel === "scm" && <ScmPanel fsBasePath={fsBasePath} />}
+        {sidebarVisible && sidebarPanel === "scm" && <ScmPanel fsBasePath={fsBasePath} newFilePaths={newFilePaths} />}
         <div className="editor-welcome">
           <div className="welcome-logo">Harness</div>
           <div className="welcome-subtitle">AI-Powered Browser Test IDE</div>
@@ -1294,6 +1318,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
             onRefreshFs={onRefreshFs}
             width={filePanelW}
             gitChanges={gitChanges}
+            newFilePaths={newFilePaths}
           />
           <ResizeHandle onMouseDown={onFilePanelDrag} />
         </>
@@ -1315,7 +1340,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
           )}
         </div>
       )}
-      {sidebarVisible && sidebarPanel === "scm" && <ScmPanel fsBasePath={fsBasePath} />}
+      {sidebarVisible && sidebarPanel === "scm" && <ScmPanel fsBasePath={fsBasePath} newFilePaths={newFilePaths} />}
       <div className="ide-editor-area">
         <div className="editor-tabs">
           {files.length === 0 && !hasBrowserTabs && (
@@ -1329,11 +1354,13 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
             const hasWarning = warnCount > 0;
             const gitStatus = f._fsPath ? gitChanges.get(normPath(f._fsPath)) || "" : "";
             const gitCls = gitStatus === "?" ? "u" : gitStatus.toLowerCase();
+            const isNew = !!f._isNew;
+            const isUntracked = gitStatus === "?" || (isNew && !gitStatus); // green "U" + green name
             return (
             <button key={f.id} className={`editor-tab${f.id === activeFileId ? " active" : ""}`} onClick={() => setActiveFileId(f.id)}>
               {dirtyFiles.has(f.id) && <span className="tab-dirty-dot" title="Unsaved">●</span>}
-              {gitStatus && <span className={`tab-git-marker tab-git-${gitCls}`} title={`git: ${gitStatus}`}>{gitStatus} </span>}
-              <span className={`tab-name${hasError ? " tab-name-err" : ""}${!hasError && hasWarning ? " tab-name-warn" : ""}`}>{f.name}</span>
+              {(gitStatus || isNew) && <span className={`tab-git-marker${isUntracked ? " tab-git-u" : ` tab-git-${gitCls}`}`} title={isUntracked ? "Untracked" : `git: ${gitStatus}`}>{isUntracked ? "U" : `${gitStatus} `}</span>}
+              <span className={`tab-name${hasError ? " tab-name-err" : ""}${!hasError && hasWarning ? " tab-name-warn" : ""}${isUntracked ? " tab-name-new" : ""}`}>{f.name}</span>
               <span className="tab-close" onClick={(e) => { e.stopPropagation(); closeTab(f.id); }}>✕</span>
             </button>
             );

@@ -20,6 +20,8 @@ interface ConsoleMessage {
   todos?: TodoItem[];
   /** Pending file change operations with diff stats (rendered as file-change cards). */
   fileChanges?: FileChange[];
+  /** True if this system message is a warning (amber accent). */
+  isWarning?: boolean;
 }
 
 interface TodoItem {
@@ -38,13 +40,15 @@ interface FileChange {
   /** Number of lines added / removed (shown when done). */
   linesAdded?: number;
   linesRemoved?: number;
-  /** New file content (for accept). */
+  /** New file content (for write_file accept). */
   content?: string;
   /** Original file content before the write (for reject/restore). */
   originalContent?: string | null;
   /** Whether this change has been accepted or rejected. */
   accepted?: boolean;
   rejected?: boolean;
+  /** Kind of change: "write" (default), "create" (new dir), "delete". */
+  changeType?: "write" | "create" | "delete";
 }
 
 interface ChatThread {
@@ -56,6 +60,12 @@ interface ChatThread {
 
 let _mid = 0;
 function nextId() { return String(++_mid); }
+/** Ensure the global counter is ahead of all message IDs in an array. */
+function syncMid(messages: ConsoleMessage[]) {
+  if (messages.length === 0) return;
+  const maxId = messages.reduce((max, m) => Math.max(max, Number(m.id) || 0), 0);
+  if (_mid <= maxId) _mid = maxId + 1;
+}
 
 const STORAGE_KEY = "harness-chat-threads";
 
@@ -70,7 +80,6 @@ function saveThreads(threads: ChatThread[]) {
 }
 
 // ── Props ──
-
 interface Props {
   events: LoopEvent[];
   goal: string;
@@ -83,11 +92,13 @@ interface Props {
   getFsBasePath?: () => string;
   /** Reflect a file change in the editor (open tab, set content). */
   refreshEditor?: (files: { name: string; content: string }[]) => void;
+  /** Refresh the file explorer panel. */
+  onRefreshFs?: () => void;
 }
 
 // ── Component ──
 
-export default function TestConsole({ events, goal, onGoalChange, onRun, connected, getConsoleContext, executeBrowserAction, getProjectFiles, getFsBasePath, refreshEditor }: Props) {
+export default function TestConsole({ events, goal, onGoalChange, onRun, connected, getConsoleContext, executeBrowserAction, getProjectFiles, getFsBasePath, refreshEditor, onRefreshFs }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<ConsoleMessage[]>([]);
@@ -95,19 +106,24 @@ export default function TestConsole({ events, goal, onGoalChange, onRun, connect
   const preRoundRef = useRef<ConsoleMessage[]>([]);
   const abortRef = useRef<AbortController | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  // Agent completion footer state
+  const [agentStatus, setAgentStatus] = useState<"idle" | "completed" | "stopped">("idle");
+  const [agentUsage, setAgentUsage] = useState<{ estimatedTokens: number; contextLimit: number; turns: number } | null>(null);
 
   // ── Thread management ──
   const [threads, setThreads] = useState<ChatThread[]>(loadThreads);
   const [activeThreadId, setActiveThreadId] = useState<string>("");
   const [showHistory, setShowHistory] = useState(false);
   const [fileList, setFileList] = useState<string[]>([]);
+  const [fileLoading, setFileLoading] = useState(false);
 
   // Load project files async for mention dropdown
   useEffect(() => {
     let active = true;
+    setFileLoading(true);
     (async () => {
       const files = await (getProjectFiles?.() ?? Promise.resolve([]));
-      if (active) setFileList(files);
+      if (active) { setFileList(files); setFileLoading(false); }
     })();
     return () => { active = false; };
   }, [getProjectFiles, messages]); // reload on messages change (files may be created)
@@ -375,16 +391,31 @@ export default function TestConsole({ events, goal, onGoalChange, onRun, connect
             });
           }
         } else if (evt.type === "tool_start") {
-          // Track file changes from write_file
-          if (evt.toolName === "write_file" && evt.toolParams?.path) {
+          // Track file changes from write_file, delete_file, create_directory
+          const tn = evt.toolName;
+          if (tn === "write_file" && evt.toolParams?.path) {
             const p = String(evt.toolParams.path);
             const name = p.split(/[/\\]/).pop() || p;
             const content = String(evt.toolParams.content || "");
             const tokenCount = content.length;
             fileChangesRef.current.push({
-              path: p, name, content,
+              path: p, name, content, changeType: "write",
               status: "streaming",
               tokenCount,
+            });
+          } else if (tn === "delete_file" && evt.toolParams?.path) {
+            const p = String(evt.toolParams.path);
+            const name = p.split(/[/\\]/).pop() || p;
+            fileChangesRef.current.push({
+              path: p, name, changeType: "delete",
+              status: "done",
+            });
+          } else if (tn === "create_directory" && evt.toolParams?.path) {
+            const p = String(evt.toolParams.path);
+            const name = p.split(/[/\\]/).pop() || p;
+            fileChangesRef.current.push({
+              path: p, name, changeType: "create",
+              status: "done",
             });
           }
           // End the assistant message's streaming state
@@ -460,10 +491,17 @@ export default function TestConsole({ events, goal, onGoalChange, onRun, connect
           if (evt.reply && !assistantMsgId) {
             push({ role: "assistant", content: evt.reply, thought: currentThought, fileChanges: fileChangesRef.current.length > 0 ? [...fileChangesRef.current] : undefined });
           }
+          setAgentStatus("completed");
+          if (evt.usage) setAgentUsage(evt.usage);
+          onRefreshFs?.();
           setLoading(false);
           return false;
+        } else if (evt.type === "warning") {
+          push({ role: "system", content: `\u26A0 ${evt.warning || ""}`, isWarning: true });
+          return true; // continue consuming
         } else if (evt.type === "error") {
           push({ role: "system", content: `Error: ${evt.error || "Unknown"}` });
+          setAgentStatus("stopped");
           setLoading(false);
           return false;
         }
@@ -537,12 +575,18 @@ export default function TestConsole({ events, goal, onGoalChange, onRun, connect
               } else if (evt.reply) {
                 push({ role: "assistant", content: evt.reply, thought: currentThought });
               }
+              setAgentStatus("completed");
+              if (evt.usage) setAgentUsage(evt.usage);
+              onRefreshFs?.();
               setLoading(false);
+            } else if (evt.type === "warning") {
+              push({ role: "system", content: `\u26A0 ${evt.warning || ""}`, isWarning: true });
             } else if (evt.type === "error") {
               push({ role: "system", content: `Error: ${evt.error || "Unknown"}` });
+              setAgentStatus("stopped");
               setLoading(false);
             }
-            return evt.type !== "done" && evt.type !== "error";
+            return evt.type !== "done" && evt.type !== "error" && evt.type !== "warning";
           });
         } catch (err: any) {
           if (err?.name !== "AbortError") push({ role: "system", content: `Error: ${String(err)}` });
@@ -551,7 +595,7 @@ export default function TestConsole({ events, goal, onGoalChange, onRun, connect
     }
 
     setLoading(false);
-  }, [getConsoleContext, executeBrowserAction, push, getFsBasePath, applyEditorFiles]);
+  }, [getConsoleContext, executeBrowserAction, push, getFsBasePath, applyEditorFiles, onRefreshFs]);
 
   // helper: push a message with explicit id
   const pushRaw = useCallback((id: string, msg: Omit<ConsoleMessage, "id" | "when">) => {
@@ -567,6 +611,9 @@ export default function TestConsole({ events, goal, onGoalChange, onRun, connect
     updateThreadTitle(msg);
     setInput("");
     setLoading(true);
+    setAgentStatus("idle");
+    setAgentUsage(null);
+    setThumbsFeedback(null);
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     preRoundRef.current = messages;
@@ -585,6 +632,7 @@ export default function TestConsole({ events, goal, onGoalChange, onRun, connect
     abortRef.current?.abort();
     abortRef.current = null;
     setLoading(false);
+    setAgentStatus("stopped");
     push({ role: "system", content: "Stopped." });
   }, [push]);
 
@@ -594,6 +642,36 @@ export default function TestConsole({ events, goal, onGoalChange, onRun, connect
     setMentionIndex(0);
     inputRef.current?.focus();
   }, []);
+
+  // ── Footer actions ──
+
+  const retryLast = useCallback(() => {
+    // Find the last user message and re-send its content.
+    const lastUser = [...messages].reverse().find((m) => m.role === "user");
+    if (lastUser) setInput(lastUser.content);
+    setAgentStatus("idle");
+    setAgentUsage(null);
+  }, [messages]);
+
+  const forkChat = useCallback(() => {
+    const id = `thread-${Date.now()}`;
+    const t: ChatThread = { id, title: `Fork of ${activeThreadId || "chat"}`, messages: [...messages], createdAt: Date.now() };
+    setThreads((prev) => [...prev, t]);
+    setActiveThreadId(id);
+    setAgentStatus("idle");
+    setAgentUsage(null);
+  }, [messages, activeThreadId]);
+
+  const copyChat = useCallback(() => {
+    const text = messages.map((m) => {
+      const prefix = m.role === "user" ? "You" : m.role === "assistant" ? "AI" : m.toolName ? `Tool: ${m.toolName}` : "System";
+      return `### ${prefix}\n${m.content}`;
+    }).join("\n\n");
+    navigator.clipboard?.writeText(text).catch(() => {});
+  }, [messages]);
+
+  const [thumbsFeedback, setThumbsFeedback] = useState<"up" | "down" | null>(null);
+  const feedback = useCallback((v: "up" | "down") => setThumbsFeedback(v), []);
 
   // ── Accept/reject pending diff ──
 
@@ -617,8 +695,18 @@ export default function TestConsole({ events, goal, onGoalChange, onRun, connect
   // ── Accept / reject file changes ──
 
   const acceptFile = useCallback((fc: FileChange, msgId: string) => {
-    // Apply to editor
-    if (fc.content) applyEditorFiles([fc]);
+    if (fc.changeType === "write" && fc.content) {
+      applyEditorFiles([fc]);
+    } else if (fc.changeType === "delete") {
+      // Delete via server
+      fetch("/api/fs/delete", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: fc.path }),
+      }).catch(() => {});
+    }
+    // For "create" — directory already exists, just acknowledge.
+    onRefreshFs?.();
     setMessages((prev) => {
       const next = [...prev];
       const idx = next.findIndex((m) => m.id === msgId);
@@ -627,7 +715,7 @@ export default function TestConsole({ events, goal, onGoalChange, onRun, connect
       }
       return next;
     });
-  }, [applyEditorFiles]);
+  }, [applyEditorFiles, onRefreshFs]);
 
   const rejectFile = useCallback((fc: FileChange, msgId: string) => {
     setMessages((prev) => {
@@ -650,9 +738,19 @@ export default function TestConsole({ events, goal, onGoalChange, onRun, connect
   const FileChangeCard = ({ fc, msgId, onAccept, onReject }: { fc: FileChange; msgId: string; onAccept: (fc: FileChange, msgId: string) => void; onReject: (fc: FileChange, msgId: string) => void }) => {
     const isStreaming = fc.status === "streaming";
     const isResolved = fc.accepted || fc.rejected;
+    const ct = fc.changeType || "write";
+    const icon = isStreaming ? "loading"
+      : fc.accepted ? "check"
+      : fc.rejected ? "close"
+      : ct === "delete" ? "trash"
+      : ct === "create" ? "folder-opened"
+      : "diff";
+    const actionLabel = ct === "delete" ? (fc.accepted ? "Deleted" : "Kept")
+      : ct === "create" ? (fc.accepted ? "Created" : "Skipped")
+      : fc.accepted ? "Applied" : "Dismissed";
     return (
       <div className={`agent-fc${isStreaming ? " streaming" : ""}${isResolved ? " resolved" : ""}${fc.accepted ? " accepted" : ""}${fc.rejected ? " rejected" : ""}`}>
-        <i className={`codicon codicon-${isStreaming ? "loading" : fc.accepted ? "check" : fc.rejected ? "close" : "diff"}`} />
+        <i className={`codicon codicon-${icon}`} />
         <span className="agent-fc-name">
           {isResolved ? <s>{fc.name}</s> : fc.name}
         </span>
@@ -664,11 +762,25 @@ export default function TestConsole({ events, goal, onGoalChange, onRun, connect
           </>
         ) : !isResolved ? (
           <>
-            <span className="agent-fc-delta">
-              {fc.linesAdded != null && <span className="agent-fc-added">+{fc.linesAdded}</span>}
-              {fc.linesRemoved != null && <span className="agent-fc-removed">-{fc.linesRemoved}</span>}
-            </span>
-            <button className="agent-fc-diff-btn" title="Open diff"><i className="codicon codicon-diff" /></button>
+            {ct === "write" && (
+              <span className="agent-fc-delta">
+                {fc.linesAdded != null && <span className="agent-fc-added">+{fc.linesAdded}</span>}
+                {fc.linesRemoved != null && <span className="agent-fc-removed">-{fc.linesRemoved}</span>}
+              </span>
+            )}
+            {ct === "delete" && (
+              <span className="agent-fc-delta">
+                <span className="agent-fc-removed">Delete</span>
+              </span>
+            )}
+            {ct === "create" && (
+              <span className="agent-fc-delta">
+                <span className="agent-fc-added">New</span>
+              </span>
+            )}
+            {ct === "write" && (
+              <button className="agent-fc-diff-btn" title="Open diff"><i className="codicon codicon-diff" /></button>
+            )}
             <div className="agent-fc-actions">
               <button className="agent-btn agent-btn-accept" onClick={(e) => { e.stopPropagation(); onAccept(fc, msgId); }} title="Accept">
                 <i className="codicon codicon-check" />
@@ -679,9 +791,7 @@ export default function TestConsole({ events, goal, onGoalChange, onRun, connect
             </div>
           </>
         ) : (
-          <span className="agent-fc-label">
-            {fc.accepted ? "Applied" : "Dismissed"}
-          </span>
+          <span className="agent-fc-label">{actionLabel}</span>
         )}
       </div>
     );
@@ -734,6 +844,9 @@ export default function TestConsole({ events, goal, onGoalChange, onRun, connect
 
   // ── UI ──
 
+  // Ensure message-id counter survives HMR (which resets module-level _mid).
+  syncMid(messages);
+
   return (
     <div className="console-panel">
       {/* ── Toolbar ── */}
@@ -775,7 +888,7 @@ export default function TestConsole({ events, goal, onGoalChange, onRun, connect
           <div className="agent-empty">Ask the agent to do anything — write code, run tests, browse the web, manage files...</div>
         )}
         {messages.map((msg) => (
-          <div key={msg.id} className={`agent-msg agent-msg-${msg.role}`}>
+          <div key={msg.id} className={`agent-msg agent-msg-${msg.role}${msg.isWarning ? " agent-msg-warning" : ""}`}>
             {msg.state && (
               <div className="agent-state">
                 {msg.state === "thinking" && <span className="agent-spinner" />}
@@ -785,7 +898,8 @@ export default function TestConsole({ events, goal, onGoalChange, onRun, connect
             {msg.viewingFile && (
               <div className="agent-file-view"><i className="codicon codicon-eye" /> {msg.viewingFile}</div>
             )}
-            {msg.sandboxOutput && (
+            {/* Sandbox only shown inside tool card for tool messages; standalone for non-tool */}
+            {msg.role !== "tool" && msg.sandboxOutput && (
               <div className="agent-sandbox">
                 <div className="agent-sandbox-header"><i className="codicon codicon-terminal" /> Terminal</div>
                 <pre className="agent-sandbox-out">{msg.sandboxOutput}</pre>
@@ -834,7 +948,7 @@ export default function TestConsole({ events, goal, onGoalChange, onRun, connect
             {msg.role === "tool" && msg.toolName && (
               <div className={`agent-tool-card${msg.state === "waiting" ? " streaming" : ""}`}>
                 <div className="agent-tool-card-header">
-                  <span className="agent-spinner" />
+                  {msg.state === "waiting" ? <span className="agent-spinner" /> : <i className="codicon codicon-check" />}
                   <i className={`codicon codicon-${msg.toolName.startsWith("browser_") ? "globe" : msg.toolName === "run_command" ? "terminal" : msg.toolName === "read_file" ? "file-code" : "tools"}`} />
                   <span className="agent-tool-card-name">{msg.toolName.replace("browser_", "").replace(/_/g, " ")}</span>
                   {msg.toolParams && (
@@ -883,25 +997,73 @@ export default function TestConsole({ events, goal, onGoalChange, onRun, connect
             <div className="agent-state"><span className="agent-spinner" /> Thinking...</div>
           </div>
         )}
+        {/* ── Completion footer ── */}
+        {!loading && agentStatus !== "idle" && messages.length > 0 && (
+          <div className="agent-footer">
+            <div className="agent-footer-status">
+              {agentStatus === "completed" ? (
+                <><i className="codicon codicon-check-all" /> Completed</>
+              ) : (
+                <><i className="codicon codicon-debug-stop" /> Manually Stopped</>
+              )}
+            </div>
+            {agentUsage && (
+              <div className="agent-footer-usage">
+                <div className="agent-footer-usage-bar">
+                  <div
+                    className={`agent-footer-usage-fill${agentUsage.estimatedTokens > agentUsage.contextLimit * 0.8 ? " high" : ""}`}
+                    style={{ width: `${Math.min(100, (agentUsage.estimatedTokens / agentUsage.contextLimit) * 100)}%` }}
+                  />
+                </div>
+                <span className="agent-footer-usage-text">
+                  ~{agentUsage.estimatedTokens} / {agentUsage.contextLimit} tokens &middot; {agentUsage.turns} turns
+                </span>
+              </div>
+            )}
+            <div className="agent-footer-actions">
+              <button className={`agent-footer-btn${thumbsFeedback === "up" ? " active" : ""}`} title="Good response" onClick={() => feedback("up")}>
+                <i className={`codicon codicon-${thumbsFeedback === "up" ? "thumbsup-filled" : "thumbsup"}`} />
+              </button>
+              <button className={`agent-footer-btn${thumbsFeedback === "down" ? " active" : ""}`} title="Bad response" onClick={() => feedback("down")}>
+                <i className={`codicon codicon-${thumbsFeedback === "down" ? "thumbsdown-filled" : "thumbsdown"}`} />
+              </button>
+              <button className="agent-footer-btn" title="Copy entire chat" onClick={copyChat}>
+                <i className="codicon codicon-copy" />
+              </button>
+              <button className="agent-footer-btn" title="Retry last prompt" onClick={retryLast}>
+                <i className="codicon codicon-refresh" />
+              </button>
+              <button className="agent-footer-btn" title="Create a copy of this chat" onClick={forkChat}>
+                <i className="codicon codicon-repo-forked" />
+              </button>
+            </div>
+          </div>
+        )}
         <div ref={bottomRef} />
       </div>
 
       {/* ── Input area (textarea + overlaid buttons) ── */}
       <div className="agent-input-area">
-        {mentionOpen && filteredFiles.length > 0 && (
+        {mentionOpen && (
           <div className="agent-mention-dropdown">
-            {filteredFiles.map((f, i) => (
-              <button
-                key={f.full}
-                className={`agent-mention-item${i === mentionIndex ? " active" : ""}`}
-                onMouseDown={(e) => { e.preventDefault(); insertMention(f.full); }}
-                onMouseEnter={() => setMentionIndex(i)}
-              >
-                <i className="codicon codicon-file" />
-                <span className="agent-mention-name">{f.name}</span>
-                <span className="agent-mention-path">{f.display}</span>
-              </button>
-            ))}
+            {fileLoading && filteredFiles.length === 0 ? (
+              <div className="agent-mention-hint"><span className="agent-spinner" /> Loading files...</div>
+            ) : filteredFiles.length > 0 ? (
+              filteredFiles.map((f, i) => (
+                <button
+                  key={f.full}
+                  className={`agent-mention-item${i === mentionIndex ? " active" : ""}`}
+                  onMouseDown={(e) => { e.preventDefault(); insertMention(f.full); }}
+                  onMouseEnter={() => setMentionIndex(i)}
+                >
+                  <i className="codicon codicon-file" />
+                  <span className="agent-mention-name">{f.name}</span>
+                  <span className="agent-mention-path">{f.display}</span>
+                </button>
+              ))
+            ) : (
+              <div className="agent-mention-hint">No project files found. Open a folder or refresh.</div>
+            )}
           </div>
         )}
         <textarea
@@ -911,8 +1073,8 @@ export default function TestConsole({ events, goal, onGoalChange, onRun, connect
           onChange={(e) => { setInput(e.target.value); setMentionIndex(0); }}
           onKeyDown={(e) => {
             if (mentionOpen) {
-              if (e.key === "ArrowDown") { e.preventDefault(); setMentionIndex((i) => Math.min(i + 1, filteredFiles.length - 1)); return; }
-              if (e.key === "ArrowUp") { e.preventDefault(); setMentionIndex((i) => Math.max(i - 1, 0)); return; }
+              if (e.key === "ArrowDown" && filteredFiles.length > 0) { e.preventDefault(); setMentionIndex((i) => Math.min(i + 1, filteredFiles.length - 1)); return; }
+              if (e.key === "ArrowUp" && filteredFiles.length > 0) { e.preventDefault(); setMentionIndex((i) => Math.max(i - 1, 0)); return; }
               if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
                 e.preventDefault();
                 if (filteredFiles[mentionIndex]) { insertMention(filteredFiles[mentionIndex].full); }

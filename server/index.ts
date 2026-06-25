@@ -417,18 +417,34 @@ app.post("/api/fs/create-file", (req, res) => {
 });
 
 // Delete a file or directory (recursive).
-app.delete("/api/fs/delete", (req, res) => {
+app.delete("/api/fs/delete", async (req, res) => {
   try {
     const { path: targetPath } = req.body || {};
     if (!targetPath) return res.status(400).json({ error: "Missing path" });
     const resolved = safePath(targetPath);
     if (!fs.existsSync(resolved)) return res.json({ success: true });
-    if (fs.statSync(resolved).isDirectory()) {
-      fs.rmSync(resolved, { recursive: true, force: true });
-    } else {
-      fs.unlinkSync(resolved);
+    // Retry on transient Windows lock errors (EBUSY/EPERM/EACCES).
+    const delays = [0, 60, 150, 300, 600];
+    let lastErr: any;
+    for (const wait of delays) {
+      if (wait) await new Promise((r) => setTimeout(r, wait));
+      try {
+        if (fs.statSync(resolved).isDirectory()) {
+          fs.rmSync(resolved, { recursive: true, force: true });
+        } else {
+          fs.unlinkSync(resolved);
+        }
+        return res.json({ success: true });
+      } catch (err: any) {
+        lastErr = err;
+        const code = err?.code;
+        if (code !== "EPERM" && code !== "EACCES" && code !== "EBUSY") throw err;
+        if ((code === "EPERM" || code === "EACCES") && fs.existsSync(resolved)) {
+          try { fs.chmodSync(resolved, 0o666); } catch { /* */ }
+        }
+      }
     }
-    res.json({ success: true });
+    throw lastErr;
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }

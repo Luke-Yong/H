@@ -6,6 +6,8 @@ export interface VFile {
   _fsPath?: string;
   _fsHandle?: FileSystemFileHandle;
   _encoding?: string;
+  /** True when created by the agent — shows a "New" badge, cleared on user interaction. */
+  _isNew?: boolean;
 }
 
 export function detectLanguage(filename: string): string {

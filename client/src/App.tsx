@@ -373,6 +373,8 @@ export default function App() {
     if (isBrowserFs.current || !fsBasePath) return;
     try { const res = await fetch(`/api/fs/list?path=${encodeURIComponent(fsBasePath)}`); const data = await res.json(); setFsRoot(data.entries || []); }
     catch { /* ignore */ }
+    // Also refresh git status so green "U" markers update.
+    editorRef.current?.refreshGitStatus?.();
   }, [fsBasePath]);
 
   const createNewProject = useCallback(async (projectName: string) => {
@@ -646,6 +648,7 @@ export default function App() {
             getProjectFiles={() => editorRef.current?.getProjectFiles() ?? Promise.resolve([])}
             getFsBasePath={() => editorRef.current?.getFsBasePath() || ""}
             refreshEditor={(files) => editorRef.current?.applyAiFiles(files)}
+            onRefreshFs={refreshFs}
           />
         </div>
         )}
