@@ -53,12 +53,13 @@ app.post("/api/run", async (req, res) => {
 
 // ── Agentic coding chat (simple, single-turn) ──
 app.post("/api/chat", async (req, res) => {
-  const { message, context, history } = req.body;
+  const { message, context, history, apiKey } = req.body;
   if (!message) return res.status(400).json({ error: "Missing message" });
+  if (!apiKey) return res.status(400).json({ error: "Missing API key" });
 
   try {
     broadcast({ type: "log", data: `User: ${message}` });
-    const reply = await chatDeepSeek(message, context || "", history || []);
+    const reply = await chatDeepSeek(message, context || "", history || [], apiKey);
     broadcast({ type: "assistant", data: reply });
     res.json({ reply });
   } catch (err) {
@@ -69,10 +70,10 @@ app.post("/api/chat", async (req, res) => {
 });
 
 // ── Agentic chat (tool-calling loop) ──
-import { createAgentSession, getAgentSession, addToolResult, addToolResultStream, agentLoop, agentLoopStream, type AgentState, type AgentResponse, type AgentSseEvent } from "./agent";
+import { createAgentSession, getAgentSession, addToolResult, addToolResultStream, agentLoop, agentLoopStream, runFsTool, type AgentState, type AgentResponse, type AgentSseEvent } from "./agent";
 
 app.post("/api/chat/agent", async (req, res) => {
-  const { message, context, projectRoot } = req.body || {};
+  const { message, context, projectRoot, apiKey, model } = req.body || {};
   if (!message) return res.status(400).json({ error: "Missing message" });
 
   try {
@@ -81,7 +82,7 @@ app.post("/api/chat/agent", async (req, res) => {
     const sessionId = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const state = createAgentSession(sessionId, root, message, context || "");
 
-    const result = await agentLoop(root, state, context || "");
+    const result = await agentLoop(root, state, context || "", { model, apiKey });
 
     if (result.phase === "tool_needed") {
       broadcast({ type: "agent_tool", data: { sessionId, tool: result.tool, executedTools: result.executedTools } });
@@ -104,7 +105,7 @@ app.post("/api/chat/agent", async (req, res) => {
 });
 
 app.post("/api/chat/agent/continue", async (req, res) => {
-  const { sessionId, toolCallId, toolResult, projectRoot } = req.body || {};
+  const { sessionId, toolCallId, toolResult, projectRoot, apiKey, model } = req.body || {};
   if (!sessionId || !toolCallId || toolResult === undefined) {
     return res.status(400).json({ error: "Missing sessionId, toolCallId, or toolResult" });
   }
@@ -116,7 +117,7 @@ app.post("/api/chat/agent/continue", async (req, res) => {
     addToolResult(sessionId, toolCallId, String(toolResult));
     broadcast({ type: "agent_tool_result", data: { sessionId, toolCallId, toolResult: String(toolResult).slice(0, 500) } });
 
-    const result = await agentLoop(projectRoot || state.projectRoot, state, "");
+    const result = await agentLoop(projectRoot || state.projectRoot, state, "", { model, apiKey });
 
     if (result.phase === "tool_needed") {
       broadcast({ type: "agent_tool", data: { sessionId, tool: result.tool, executedTools: result.executedTools } });
@@ -143,7 +144,7 @@ app.post("/api/chat/agent/continue", async (req, res) => {
 // and may need to call /continue/stream when a browser tool is needed.
 
 app.post("/api/chat/agent/stream", async (req, res) => {
-  const { message, context, projectRoot } = req.body || {};
+  const { message, context, projectRoot, model, apiKey } = req.body || {};
   if (!message) return res.status(400).json({ error: "Missing message" });
 
   try {
@@ -165,9 +166,10 @@ app.post("/api/chat/agent/stream", async (req, res) => {
       res.write(`data: ${data}\n\n`);
     };
 
-    for await (const event of agentLoopStream(root, state, context || "", sessionId)) {
+    const modelOpts = (model || apiKey) ? { model, apiKey } : undefined;
+    for await (const event of agentLoopStream(root, state, context || "", sessionId, modelOpts)) {
       sendEvent(event);
-      if (event.type === "browser_tool" || event.type === "done" || event.type === "error") break;
+      if (event.type === "browser_tool" || event.type === "permission_required" || event.type === "done" || event.type === "error") break;
     }
 
     res.end();
@@ -182,15 +184,31 @@ app.post("/api/chat/agent/stream", async (req, res) => {
 });
 
 app.post("/api/chat/agent/stream/continue", async (req, res) => {
-  const { sessionId, toolCallId, toolResult } = req.body || {};
-  if (!sessionId || !toolCallId || toolResult === undefined) {
-    return res.status(400).json({ error: "Missing sessionId, toolCallId, or toolResult" });
+  const { sessionId, toolCallId, toolResult, permissionGranted, apiKey, model } = req.body || {};
+  if (!sessionId || !toolCallId) {
+    return res.status(400).json({ error: "Missing sessionId or toolCallId" });
   }
 
   try {
-    const state = addToolResultStream(sessionId, toolCallId, String(toolResult));
+    const state = getAgentSession(sessionId);
     if (!state) return res.status(404).json({ error: "Session not found" });
-    broadcast({ type: "agent_tool_result", data: { sessionId, toolCallId, toolResult: String(toolResult).slice(0, 500) } });
+
+    // Handle permission response
+    if (state.pendingPermission && state.pendingPermission.toolCallId === toolCallId) {
+      const pp = state.pendingPermission;
+      state.pendingPermission = undefined;
+      let cmdResult: string;
+      if (permissionGranted) {
+        const fsResult = await runFsTool("run_command", { command: pp.command }, state.projectRoot);
+        cmdResult = fsResult || "(command completed with no output)";
+      } else {
+        cmdResult = "Permission denied by user.";
+      }
+      state.messages.push({ role: "tool", content: cmdResult, tool_call_id: pp.toolCallId });
+    } else {
+      addToolResultStream(sessionId, toolCallId, String(toolResult || ""));
+    }
+    broadcast({ type: "agent_tool_result", data: { sessionId, toolCallId, toolResult: String(toolResult || "").slice(0, 500) } });
 
     // SSE headers
     res.writeHead(200, {
@@ -204,7 +222,7 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
       res.write(`data: ${JSON.stringify({ ...event, sessionId })}\n\n`);
     };
 
-    for await (const event of agentLoopStream(state.projectRoot, state, "", sessionId)) {
+    for await (const event of agentLoopStream(state.projectRoot, state, "", sessionId, { model, apiKey })) {
       sendEvent(event);
       if (event.type === "browser_tool" || event.type === "done" || event.type === "error") break;
     }
@@ -299,8 +317,13 @@ app.get("/api/fs/read", (req, res) => {
   try {
     const filePath = safePath(req.query.path as string);
     const raw = fs.readFileSync(filePath);
-    const { content, encoding } = detectAndDecode(raw);
-    res.json({ path: filePath, content, encoding });
+    try {
+      const { content, encoding } = detectAndDecode(raw);
+      res.json({ path: filePath, content, encoding });
+    } catch {
+      // Fallback: return as base64 for binary/unreadable files
+      res.json({ path: filePath, content: "", encoding: "binary", base64: raw.toString("base64") });
+    }
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -1042,6 +1065,22 @@ app.use("/_browser", (req, res, next) => {
   });
 
   req.pipe(proxyReq);
+});
+
+// ── List DeepSeek models ──
+app.get("/api/models", async (req, res) => {
+  try {
+    const apiKey = req.query.apiKey as string || process.env.DEEPSEEK_API_KEY;
+    if (!apiKey) return res.status(400).json({ error: "No API key configured" });
+    const resp = await fetch("https://api.deepseek.com/models", {
+      headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
+    });
+    if (!resp.ok) return res.status(resp.status).json({ error: await resp.text() });
+    const data = await resp.json();
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
 });
 
 // Fallback: unrecognized /_browser path

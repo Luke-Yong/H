@@ -38,6 +38,7 @@ export interface AgentState {
   messages: AgentMessage[];
   iteration: number;
   projectRoot: string;
+  pendingPermission?: { toolCallId: string; command: string };
 }
 
 export interface AgentResponse {
@@ -55,14 +56,16 @@ export interface AgentResponse {
 // ── SSE event types for streaming agent ──
 
 export interface AgentSseEvent {
-  type: "thinking" | "text" | "tool_start" | "tool_end" | "browser_tool" | "done" | "error" | "warning";
+  type: "thinking" | "text" | "tool_start" | "tool_end" | "browser_tool" | "permission_required" | "done" | "error" | "warning";
   /** Chunk of thinking/reasoning text. */
   text?: string;
   /** Tool name (on tool_start / tool_end / browser_tool). */
   toolName?: string;
   /** Tool params (on tool_start / browser_tool). */
   toolParams?: Record<string, unknown>;
-  /** Tool call ID (on browser_tool, for /continue). */
+  /** Original file content before write (on tool_start for write_file). */
+  originalContent?: string | null;
+  /** Tool call ID (on browser_tool / permission_required, for /continue). */
   toolCallId?: string;
   /** Tool result text (on tool_end). */
   toolResult?: string;
@@ -80,6 +83,8 @@ export interface AgentSseEvent {
   warning?: string;
   /** Usage stats (on done). */
   usage?: { estimatedTokens: number; contextLimit: number; turns: number };
+  /** The shell command that needs permission (on permission_required). */
+  permissionCommand?: string;
 }
 
 // ── Tool registry ──
@@ -120,6 +125,36 @@ const TOOLS: ToolDef[] = [
         path: { type: "string", description: "Directory path relative to project root (use '.' for root)." },
       },
       required: ["path"],
+    },
+  },
+  {
+    name: "search_files",
+    description:
+      "Recursively search the project for files or folders matching a name pattern. "
+      + "Returns relative paths. Use this to find any file or folder in the project.",
+    parameters: {
+      type: "object",
+      properties: {
+        pattern: { type: "string", description: "Substring to match in file/directory names (case-insensitive)." },
+        subdir: { type: "string", description: "Optional subdirectory to search within (defaults to project root)." },
+      },
+      required: ["pattern"],
+    },
+  },
+  {
+    name: "grep",
+    description:
+      "Search file contents for a regex pattern across the project. "
+      + "Returns file paths, line numbers, and matching lines. "
+      + "Use this to find where a function, class, variable, or string is used.",
+    parameters: {
+      type: "object",
+      properties: {
+        pattern: { type: "string", description: "Regex or literal string to search for in file contents (case-insensitive)." },
+        subdir: { type: "string", description: "Optional subdirectory to search within (defaults to project root)." },
+        glob: { type: "string", description: "Optional file pattern to filter (e.g. '*.ts', '*.js')." },
+      },
+      required: ["pattern"],
     },
   },
   {
@@ -247,7 +282,7 @@ export type ToolExecutor = (
 ) => Promise<{ result: string; skipRenderer?: boolean }>;
 
 // Filesystem tools that the server can execute directly.
-async function runFsTool(name: string, params: Record<string, unknown>, root: string): Promise<string | null> {
+export async function runFsTool(name: string, params: Record<string, unknown>, root: string): Promise<string | null> {
   const resolve = (p: string) => path.resolve(root, p);
   if (name === "read_file") {
     const filePath = resolve(String(params.path || ""));
@@ -271,9 +306,78 @@ async function runFsTool(name: string, params: Record<string, unknown>, root: st
     if (!fs.existsSync(dirPath)) return `Directory not found: ${params.path}`;
     const entries = fs.readdirSync(dirPath, { withFileTypes: true });
     return entries
-      .filter((e) => !e.name.startsWith(".") && e.name !== "node_modules")
+      .filter((e) => e.name !== "node_modules" && e.name !== ".git")
       .map((e) => `${e.isDirectory() ? "[DIR]" : "[FILE]"} ${e.name}`)
       .join("\n");
+  }
+  if (name === "search_files") {
+    const base = resolve(String(params.subdir || "."));
+    if (!fs.existsSync(base)) return `Directory not found: ${params.subdir || "."}`;
+    const pattern = String(params.pattern || "").toLowerCase();
+    if (!pattern) return "Provide a non-empty pattern.";
+    const results: string[] = [];
+    const MAX_RESULTS = 80;
+    function walk(dir: string) {
+      if (results.length >= MAX_RESULTS) return;
+      let entries: fs.Dirent[];
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      for (const e of entries) {
+        if (e.name === "node_modules" || e.name === ".git") continue;
+        const full = path.join(dir, e.name);
+        if (e.name.toLowerCase().includes(pattern)) {
+          results.push(path.relative(root, full).replace(/\\/g, "/") + (e.isDirectory() ? "/" : ""));
+          if (results.length >= MAX_RESULTS) return;
+        }
+        if (e.isDirectory()) walk(full);
+      }
+    }
+    walk(base);
+    if (results.length === 0) return `No files or folders matching "${params.pattern}" found.`;
+    return results.join("\n") + (results.length >= MAX_RESULTS ? `\n... (truncated at ${MAX_RESULTS} results)` : "");
+  }
+  if (name === "grep") {
+    const base = resolve(String(params.subdir || "."));
+    if (!fs.existsSync(base)) return `Directory not found: ${params.subdir || "."}`;
+    const rawPattern = String(params.pattern || "");
+    if (!rawPattern) return "Provide a non-empty pattern.";
+    let regex: RegExp;
+    try { regex = new RegExp(rawPattern, "gi"); } catch { regex = new RegExp(rawPattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"); }
+    const globStr = String(params.glob || "");
+    const results: string[] = [];
+    const MAX_MATCHES = 80;
+    function walk(dir: string) {
+      if (results.length >= MAX_MATCHES) return;
+      let entries: fs.Dirent[];
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      for (const e of entries) {
+        if (e.name === "node_modules" || e.name === ".git") continue;
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) { walk(full); continue; }
+        // glob filter
+        if (globStr) {
+          const ext = path.extname(e.name).toLowerCase();
+          const g = globStr.toLowerCase();
+          if (g.startsWith("*.")) { if (ext !== g.slice(1)) continue; }
+          else if (g.startsWith(".")) { if (ext !== g) continue; }
+          else if (!e.name.toLowerCase().includes(g)) continue;
+        }
+        try {
+          const text = fs.readFileSync(full, "utf-8");
+          const lines = text.split("\n");
+          for (let i = 0; i < lines.length; i++) {
+            if (regex.test(lines[i])) {
+              regex.lastIndex = 0; // reset after test
+              const rel = path.relative(root, full).replace(/\\/g, "/");
+              results.push(`${rel}:${i + 1}: ${lines[i].trim().slice(0, 120)}`);
+              if (results.length >= MAX_MATCHES) return;
+            }
+          }
+        } catch { /* binary / unreadable */ }
+      }
+    }
+    walk(base);
+    if (results.length === 0) return `No matches for "${rawPattern}" found.`;
+    return results.join("\n") + (results.length >= MAX_MATCHES ? `\n... (truncated at ${MAX_MATCHES} results)` : "");
   }
   if (name === "run_command") {
     try {
@@ -339,7 +443,9 @@ You have access to tools that let you read/write files, run commands, interact w
 - All file paths are relative to the project root.
 - Use \`read_file\` to see existing code before editing it.
 - Use \`write_file\` to create or overwrite a file.
-- Use \`list_files\` to explore the project structure.
+- Use \`list_files\` to browse a specific directory.
+- Use \`search_files\` to find any file or folder anywhere in the project (by name pattern).
+- Use \`grep\` to search file contents for a string or regex — find definitions, usages, references.
 
 ### Browser usage
 - Use \`browser_navigate\` to go to a URL.
@@ -359,7 +465,12 @@ export async function agentLoop(
   projectRoot: string,
   state: AgentState,
   context: string,
+  modelOpts?: { model?: string; apiKey?: string },
 ): Promise<AgentResponse> {
+  const apiKey = modelOpts?.apiKey;
+  if (!apiKey) {
+    return { phase: "done", reply: "No API key configured. Set an API key in the Harness UI." };
+  }
   state.iteration++;
 
   if (state.iteration > MAX_ITERATIONS) {
@@ -401,7 +512,7 @@ export async function agentLoop(
     }
   }
 
-  const { text, toolCalls } = await chatDeepSeekTool(openaiMessages, TOOLS);
+  const { text, toolCalls } = await chatDeepSeekTool(openaiMessages, TOOLS, { model: modelOpts?.model, apiKey });
 
   if (toolCalls && toolCalls.length > 0) {
     const executedTools: { name: string; result: string }[] = [];
@@ -458,7 +569,13 @@ export async function* agentLoopStream(
   state: AgentState,
   context: string,
   sessionId: string,
+  modelOpts?: { model?: string; apiKey?: string },
 ): AsyncGenerator<AgentSseEvent> {
+  const apiKey = modelOpts?.apiKey;
+  if (!apiKey) {
+    yield { type: "error", error: "No API key configured. Set an API key in the Harness UI." };
+    return;
+  }
   const MAX_ITERS = 15;
   const systemMsg = context
     ? SYSTEM_PROMPT + `\n\n### Additional context from the IDE\n${context}`
@@ -525,7 +642,7 @@ export async function* agentLoopStream(
     }
 
     // Stream response from DeepSeek
-    const stream = chatDeepSeekToolStream(openaiMessages, TOOLS);
+    const stream = chatDeepSeekToolStream(openaiMessages, TOOLS, { model: modelOpts?.model, apiKey });
     let streamDone = false;
     let finalText: string | null = null;
     let finalToolCalls: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }> | null = null;
@@ -563,7 +680,33 @@ export async function* agentLoopStream(
       const fnName = tc.function.name;
       const params = (() => { try { return JSON.parse(tc.function.arguments); } catch { return {}; } })();
 
+      // Permission check for run_command
+      if (fnName === "run_command") {
+        const cmd = String(params.command || "");
+        // Add assistant tool_calls message to state before pausing
+        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName });
+        // Store the pending command so /continue can execute it after user approval
+        state.pendingPermission = { toolCallId: tc.id, command: cmd };
+        yield {
+          type: "tool_start", toolName: fnName, toolParams: params,
+        };
+        yield {
+          type: "permission_required",
+          toolCallId: tc.id,
+          toolName: fnName,
+          permissionCommand: cmd,
+          executedTools,
+        };
+        return;
+      }
+
       // Filesystem tool — execute directly
+      // For write_file, capture original content before the write
+      let originalContent: string | null = null;
+      if (fnName === "write_file") {
+        const targetPath = path.resolve(projectRoot, String(params.path || ""));
+        try { originalContent = fs.readFileSync(targetPath, "utf-8"); } catch { originalContent = null; }
+      }
       const fsResult = await runFsTool(fnName, params, projectRoot);
       if (fsResult !== null) {
         state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName });
@@ -571,6 +714,7 @@ export async function* agentLoopStream(
         const isCmd = fnName === "run_command";
         yield {
           type: "tool_start", toolName: fnName, toolParams: params,
+          ...(originalContent !== null ? { originalContent } : {}),
         };
         yield {
           type: "tool_end",

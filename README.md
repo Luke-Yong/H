@@ -171,3 +171,42 @@ All tools operate relative to the project root. The agent can browse, create, ed
 3. The DOM is extracted and sent to DeepSeek with your test goal
 4. DeepSeek returns actions (click/type) which Playwright executes
 5. Results and screenshots stream back in real-time
+
+## Agent Tools (DeepSeek-powered)
+
+The AI agent has access to these tools when working on your project:
+
+### Filesystem
+
+| Tool | Description |
+|------|-------------|
+| `read_file` | Read a file with line numbers — always read before editing |
+| `write_file` | Create or overwrite a file (accept/reject before applying) |
+| `list_files` | List files and directories in a given path |
+| `search_files` | Recursively find files/folders by name pattern (case-insensitive) |
+| `grep` | Search file contents for a regex pattern — find definitions, usages |
+| `create_directory` | Create a directory (and parents) |
+| `delete_file` | Delete a file or directory recursively |
+
+### Terminal
+
+| Tool | Description |
+|------|-------------|
+| `run_command` | Run a shell command in the project root (30s timeout, stdout+stderr returned) |
+
+### Browser
+
+| Tool | Description |
+|------|-------------|
+| `browser_screenshot` | Capture a screenshot of the current page |
+| `browser_get_dom` | Get indexed clickable/typable elements from the page |
+| `browser_click` | Click an element by DOM index |
+| `browser_type` | Type text into an input by DOM index |
+| `browser_eval` | Run arbitrary JavaScript in the page |
+| `browser_navigate` | Navigate to a URL |
+
+### Control
+
+| Tool | Description |
+|------|-------------|
+| `task_complete` | Signal completion with a summary of what was done |

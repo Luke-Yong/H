@@ -1,9 +1,8 @@
 import OpenAI from "openai";
 
-const client = new OpenAI({
-  apiKey: process.env.DEEPSEEK_API_KEY || "sk-your-key-here",
-  baseURL: "https://api.deepseek.com/v1",
-});
+function createClient(apiKey: string) {
+  return new OpenAI({ apiKey, baseURL: "https://api.deepseek.com/v1" });
+}
 
 interface AIAction {
   action: "click" | "type";
@@ -21,8 +20,10 @@ interface AIResponse {
 export async function chatDeepSeek(
   userMessage: string,
   context: string,
-  history: { role: "user" | "assistant"; content: string }[]
+  history: { role: "user" | "assistant"; content: string }[],
+  apiKey: string,
 ): Promise<string> {
+  const client = createClient(apiKey);
   const response = await client.chat.completions.create({
     model: "deepseek-chat",
     messages: [
@@ -55,8 +56,10 @@ ${context}`,
 export async function askDeepSeek(
   domStructure: string,
   userGoal: string,
-  previousActions: string[]
+  previousActions: string[],
+  apiKey: string,
 ): Promise<AIResponse> {
+  const client = createClient(apiKey);
   const systemPrompt = `You are a test automation agent. Given a DOM structure with indexed elements and a user's test goal, determine what actions to take.
 
 DOM elements are formatted as: [index] <tag attributes> "visible text"
@@ -122,9 +125,11 @@ export interface ToolCallResult {
 export async function chatDeepSeekTool(
   messages: Array<{ role: string; content: string | null; tool_calls?: any[]; tool_call_id?: string; name?: string }>,
   tools: Array<{ name: string; description: string; parameters: Record<string, unknown> }>,
+  opts?: { model?: string; apiKey: string },
 ): Promise<ToolCallResult> {
+  const client = createClient(opts?.apiKey || "");
   const response = await client.chat.completions.create({
-    model: "deepseek-chat",
+    model: opts?.model || "deepseek-chat",
     messages: messages as any,
     // @ts-ignore DeepSeek supports tools in OpenAI shape
     tools: tools.map((t) => ({
@@ -167,9 +172,11 @@ export interface StreamChunk {
 export async function* chatDeepSeekToolStream(
   messages: Array<{ role: string; content: string | null; tool_calls?: any[]; tool_call_id?: string; name?: string }>,
   tools: Array<{ name: string; description: string; parameters: Record<string, unknown> }>,
+  opts: { model?: string; apiKey: string },
 ): AsyncGenerator<StreamChunk> {
+  const client = createClient(opts.apiKey);
   const stream = await client.chat.completions.create({
-    model: "deepseek-chat",
+    model: opts.model || "deepseek-chat",
     messages: messages as any,
     // @ts-ignore
     tools: tools.map((t) => ({

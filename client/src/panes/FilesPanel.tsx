@@ -14,6 +14,7 @@ interface Props {
   activeFileId: string | null;
   onSelect: (id: string) => void;
   onAdd: (parentDir?: string) => void;
+  onAddFolder: (parentDir?: string) => void;
   onDelete: (id: string) => void;
   onRename: (id: string) => void;
   /** File-system tree entries (from backend) */
@@ -221,7 +222,7 @@ function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth, gitChanges, 
 }
 
 export default function FilesPanel({
-  files, activeFileId, onSelect, onAdd, onDelete, onRename,
+  files, activeFileId, onSelect, onAdd, onAddFolder, onDelete, onRename,
   fsRoot, fsBasePath, onOpenFsFile, onRefreshFs,
   width, gitChanges,
   selectedFolder, onSelectFolder, onFsDelete, onFsRename,
@@ -235,18 +236,17 @@ export default function FilesPanel({
 
   const closeContextMenu = useCallback(() => setContextMenu(null), []);
 
-  // Close context menu on any mousedown outside (fires before click, so
-  // our menu item onMouseDown handlers fire first).
+  // Close context menu on any mousedown outside (capture phase).
+  // Menu items use onMouseDown which fires in bubble phase after we check.
   useEffect(() => {
     if (!contextMenu) return;
     const h = (e: MouseEvent) => {
-      // Ignore if the click is on the menu itself
       const target = e.target as HTMLElement | null;
       if (target?.closest(".fs-context-menu")) return;
       closeContextMenu();
     };
-    window.addEventListener("mousedown", h);
-    return () => window.removeEventListener("mousedown", h);
+    window.addEventListener("mousedown", h, true);
+    return () => window.removeEventListener("mousedown", h, true);
   }, [contextMenu, closeContextMenu]);
 
   return (
@@ -256,8 +256,9 @@ export default function FilesPanel({
           <div className="files-header">
             <span>{fsBasePath ? fsBasePath.split(/[/\\]/).pop() || "FOLDER" : "FOLDER"}</span>
             <div className="files-header-actions">
-              <button className="files-add-btn" onClick={onRefreshFs} title="Refresh">↻</button>
-              <button className="files-add-btn" onClick={() => onAdd(selectedFolder || undefined)} title={selectedFolder ? `New file in ${selectedFolder.split(/[/\\]/).pop()}` : "New file"}>+</button>
+              <button className="files-action-btn" onClick={onRefreshFs} title="Refresh">↻</button>
+              <button className="files-action-btn" onClick={() => onAdd(selectedFolder || undefined)} title={selectedFolder ? `New file in ${selectedFolder.split(/[/\\]/).pop()}` : "New file"}>+F</button>
+              <button className="files-action-btn" onClick={() => onAddFolder(selectedFolder || undefined)} title={selectedFolder ? `New folder in ${selectedFolder.split(/[/\\]/).pop()}` : "New folder"}>+D</button>
             </div>
           </div>
           <div className="files-list">
@@ -281,7 +282,8 @@ export default function FilesPanel({
           <div className="files-header">
             <span>FILES</span>
             <div className="files-header-actions">
-              <button className="files-add-btn" onClick={() => onAdd()} title="New file">+</button>
+              <button className="files-action-btn" onClick={() => onAdd()} title="New file">+F</button>
+              <button className="files-action-btn" onClick={() => onAddFolder()} title="New folder">+D</button>
             </div>
           </div>
           <div className="files-list">
@@ -324,7 +326,7 @@ export default function FilesPanel({
           >Rename</button>
           <button
             className="fs-context-item fs-context-item-danger"
-            onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); onFsDelete(contextMenu.entry.path); closeContextMenu(); }}
+            onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); closeContextMenu(); onFsDelete(contextMenu.entry.path); }}
           >Delete</button>
         </div>
       )}

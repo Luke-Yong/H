@@ -22,7 +22,9 @@ const BROWSER_EDITOR_TAB_ID = "browser";
 export interface EditorPaneHandle {
   getCode: () => { html: string; css: string; js: string };
   getFiles: () => VFile[];
-  applyAiFiles: (files: { name: string; content: string; fsPath?: string }[]) => void;
+  applyAiFiles: (files: { name: string; content: string; fsPath?: string; isNew?: boolean }[]) => void;
+  /** Apply agent file changes with original content for inline diff highlighting. */
+  applyAgentFileChanges: (changes: { name: string; content: string; fsPath?: string; originalContent?: string | null }[]) => void;
   goToLine: (line: number) => void;
   goToBracket: () => void;
   setLanguage: (lang: string) => void;
@@ -35,6 +37,14 @@ export interface EditorPaneHandle {
   getFsBasePath: () => string;
   /** Refresh the git status for untracked/modified markers. */
   refreshGitStatus?: () => Promise<void>;
+  /** Close the active editor tab. */
+  closeActiveTab: () => void;
+  /** Accept agent changes for a file by its fsPath (clears diff decorations). */
+  acceptAgentChange: (fsPath: string) => void;
+  /** Reject agent changes for a file by its fsPath (restores original, clears decorations). */
+  rejectAgentChange: (fsPath: string) => void;
+  /** Switch active tab to a file by its fsPath. */
+  openFileByFsPath: (fsPath: string) => void;
 }
 
 export interface StatusBarState {
@@ -76,6 +86,10 @@ interface Props {
   onOpenDevtools?: () => void;
   devtoolsForceKey?: number;
   onStatusChange?: (state: StatusBarState) => void;
+  /** Called when user clicks Accept on the agent diff banner */
+  onBannerAcceptFile?: (filePath: string) => void;
+  /** Called when user clicks Reject on the agent diff banner */
+  onBannerRejectFile?: (filePath: string) => void;
 }
 
 interface MarkerSnapshot {
@@ -137,7 +151,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     onBrowserTabUpdateLabel, onBrowserTabUpdateUrl, onBrowserNewTabFromLink,
     onOpenFolder, onCreateProject, onCreateFile, onOpenFile, onRefreshFs,
     terminalVisible, onCloseTerminal, onDetectUrl, debugEntries, onClearDebugEntries, outputEntries, onClearOutputEntries,
-    onOpenDevtools, devtoolsForceKey, onStatusChange }, ref
+    onOpenDevtools, devtoolsForceKey, onStatusChange, onBannerAcceptFile, onBannerRejectFile }, ref
 ) {
   const [files, setFiles] = useState<VFile[]>([]);
   const [markersByFileId, setMarkersByFileId] = useState<Record<string, MarkerSnapshot[]>>({});
@@ -151,11 +165,13 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   const [sidebarVisible, setSidebarVisible] = useState(true);
   const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
   const browserViewRef = useRef<BrowserViewHandle>(null);
+  const welcomeClickLockRef = useRef(0);
   const [browserConsoleMap, setBrowserConsoleMap] = useState<Record<string, BrowserConsoleEntry[]>>({});
   const [nameDialog, setNameDialog] = useState<{
     title: string;
     defaultValue?: string;
-    onOk: (value: string) => void;
+    defaultExtra?: string;
+    onOk: (value: string, extra?: string) => void;
   } | null>(null);
   const [cursorPos, setCursorPos] = useState<{ line: number; column: number }>({ line: 1, column: 1 });
   const [gitChanges, setGitChanges] = useState<Map<string, string>>(new Map()); // absolutePath → status letter
@@ -168,6 +184,16 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   const markersByLineRef = useRef<Record<string, Map<number, MarkerSnapshot[]>>>({});
   // fileId → currently open inline peek (so it can be toggled/closed)
   const peekRef = useRef<Record<string, { line: number; zoneId: string } | null>>({});
+  // fileId → { originalContent, newContent } for agent-pending inline diffs
+  const [agentDiffs, setAgentDiffs] = useState<Record<string, { originalContent: string; newContent: string }>>({});
+  const agentDiffDecoRef = useRef<Record<string, string[]>>({}); // fileId → decorationIds
+
+  const handleWelcomeClick = useCallback((fn: () => void) => {
+    const now = Date.now();
+    if (now - welcomeClickLockRef.current < 800) return;
+    welcomeClickLockRef.current = now;
+    fn();
+  }, []);
 
   function applyDecorations(editor: any, fileId: string, diffText: string | undefined, markers: MarkerSnapshot[] | undefined) {
     try {
@@ -503,6 +529,17 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
         }
       }
       setGitChanges(m);
+      // Clear _isNew on any file now tracked by git.
+      // (Git status takes over the "U" / "M" / "A" marker.)
+      setFiles((prev) => {
+        let changed = false;
+        const updated = prev.map((f) => {
+          if (!f._isNew || !f._fsPath) return f;
+          if (m.has(normPath(f._fsPath))) { changed = true; return { ...f, _isNew: false }; }
+          return f;
+        });
+        return changed ? updated : prev;
+      });
     } catch { /* */ }
   }, [fsBasePath]);
 
@@ -776,17 +813,24 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
 
   const openFsFile = useCallback(async (filePath: string, handle?: FileSystemFileHandle) => {
     const target = normPath(filePath);
+    const name = filePath.split(/[/\\]/).pop() || "untitled";
     // Fast path: tab already open → just focus it, skip the read entirely.
-    const existing = files.find((f) => normPath(f._fsPath) === target);
+    // First try path-based dedup, then fallback to name match (fixes stale relative paths).
+    let existing = files.find((f) => normPath(f._fsPath) === target);
+    if (!existing) {
+      existing = files.find((f) => f.name === name);
+      if (existing) {
+        // Fix up stale relative paths that don't match by _fsPath.
+        setFiles((prev) => prev.map((f) => f.id === existing!.id ? { ...f, _fsPath: filePath } : f));
+      }
+    }
     if (existing) {
       if (existing._isNew) {
-        // Clear "new" badge on user interaction.
         setFiles((prev) => prev.map((f) => f.id === existing.id ? { ...f, _isNew: false } : f));
       }
       setActiveFileId(existing.id); return;
     }
     try {
-      const name = filePath.split(/[/\\]/).pop() || "untitled";
       const f = createFile(name);
       f._fsPath = filePath;
       if (handle) {
@@ -822,7 +866,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     } catch { /* */ }
   }, [files, activeFileId]);
 
-  const applyAiFiles = useCallback((aiFiles: { name: string; content: string; fsPath?: string }[]) => {
+  const applyAiFiles = useCallback((aiFiles: { name: string; content: string; fsPath?: string; isNew?: boolean }[]) => {
     let newFileId = "";
     setFiles((prev) => {
       const updated = [...prev];
@@ -831,21 +875,35 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
         const target = af.fsPath ? normPath(af.fsPath) : "";
         const existing = target
           ? updated.find((f) => normPath(f._fsPath) === target)
-          : updated.find((f) => f.name === af.name);
-        if (existing) {
-          existing.content = af.content;
-          // Don't clear _isNew — git status will take over once the file
-          // appears as untracked. Keep the green "U" until then.
-          if (existing._fsPath) {
+          : undefined;
+        // Fallback: match by name. If found, fix stale relative _fsPath.
+        const byName = !existing && target
+          ? updated.find((f) => f.name === af.name)
+          : undefined;
+        const match = existing || byName;
+        if (match) {
+          match.content = af.content;
+          // Fix stale relative path with the resolved absolute one.
+          if (byName && af.fsPath) {
+            const fp = normPath(af.fsPath);
+            match._fsPath = /^[A-Z]:/i.test(fp) || fp.startsWith("/") ? fp : normPath(fsBasePath + "/" + fp);
+          }
+          if (match._fsPath) {
             fetch("/api/fs/write", {
               method: "POST", headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ path: existing._fsPath, content: af.content }),
+              body: JSON.stringify({ path: match._fsPath, content: af.content }),
             }).catch(() => {});
           }
         } else {
           const f = createFile(af.name, af.content);
-          if (af.fsPath) f._fsPath = af.fsPath;
-          f._isNew = true; // marked for "new" badge
+          if (af.fsPath) {
+            // Resolve relative paths (from agent) against project root.
+            const fp = normPath(af.fsPath);
+            f._fsPath = /^[A-Z]:/i.test(fp) || fp.startsWith("/") ? fp : normPath(fsBasePath + "/" + fp);
+          }
+          // Note: _isNew is NOT set here. It's the caller's responsibility
+          // (e.g. agent applies it, user menu does not).
+          if (af.isNew) f._isNew = true;
           updated.push(f);
           newFileId = newFileId || f.id;
         }
@@ -853,7 +911,159 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
       return updated;
     });
     if (newFileId) setActiveFileId(newFileId);
+  }, [fsBasePath]);
+
+  const agentDiffsPendingRef = useRef<Record<string, { originalContent: string; newContent: string }>>({});
+
+  const applyAgentFileChanges = useCallback((changes: { name: string; content: string; fsPath?: string; originalContent?: string | null }[]) => {
+    applyAiFiles(changes);
+    // Store diffs by file name — resolved to file IDs by useEffect below.
+    // Include new files too (originalContent may be null for created files).
+    const pending: Record<string, { originalContent: string; newContent: string }> = {};
+    for (const c of changes) {
+      pending[c.name] = { originalContent: c.originalContent || "", newContent: c.content };
+    }
+    if (Object.keys(pending).length > 0) {
+      agentDiffsPendingRef.current = pending;
+    }
+  }, [applyAiFiles]);
+
+  // Resolve pending agent diffs when files state updates
+  useEffect(() => {
+    const pending = agentDiffsPendingRef.current;
+    if (Object.keys(pending).length === 0) return;
+    const idMap: Record<string, { originalContent: string; newContent: string }> = {};
+    for (const f of files) {
+      if (pending[f.name]) idMap[f.id] = pending[f.name];
+    }
+    if (Object.keys(idMap).length > 0) {
+      setAgentDiffs(idMap);
+      agentDiffsPendingRef.current = {};
+    }
+  }, [files]);
+
+  // Accept all agent changes for a file — clear decorations, keep content
+  const acceptAgentChanges = useCallback((fileId: string) => {
+    setAgentDiffs((prev) => {
+      const next = { ...prev };
+      delete next[fileId];
+      return next;
+    });
   }, []);
+
+  // Resolve fsPath to fileId and accept
+  const acceptAgentChangeByPath = useCallback((fsPath: string) => {
+    const f = files.find((x) => x._fsPath && normPath(x._fsPath) === normPath(fsPath));
+    if (f) acceptAgentChanges(f.id);
+  }, [files, acceptAgentChanges]);
+
+  // Reject all agent changes for a file — restore original content, clear decorations
+  const rejectAgentChanges = useCallback((fileId: string) => {
+    const diff = agentDiffs[fileId];
+    if (!diff) return;
+    const f = files.find((x) => x.id === fileId);
+    // Revert file on disk first
+    if (f?._fsPath) {
+      fetch("/api/fs/write", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: f._fsPath, content: diff.originalContent }),
+      }).then((r) => {
+        if (!r.ok) { console.error("Banner reject write failed:", r.status); return; }
+        onRefreshFs?.();
+      }).catch((err) => { console.error("Banner reject failed:", err); });
+    }
+    // Always clear diff UI and restore editor content
+    setFiles((prev) => prev.map((x) => x.id !== fileId ? x : { ...x, content: diff.originalContent }));
+    setAgentDiffs((prev) => {
+      const next = { ...prev };
+      delete next[fileId];
+      return next;
+    });
+  }, [agentDiffs, files, onRefreshFs]);
+
+  // Resolve fsPath to fileId and reject
+  const rejectAgentChangeByPath = useCallback((fsPath: string) => {
+    const f = files.find((x) => x._fsPath && normPath(x._fsPath) === normPath(fsPath));
+    if (f) rejectAgentChanges(f.id);
+  }, [files, rejectAgentChanges]);
+
+  // Switch to file by fsPath
+  const openFileByFsPath = useCallback((fsPath: string) => {
+    const f = files.find((x) => x._fsPath && normPath(x._fsPath) === normPath(fsPath));
+    if (f) setActiveFileId(f.id);
+  }, [files]);
+
+  // Apply agent diff decorations (inline red/green backgrounds)
+  const applyAgentDiffDecorations = useCallback((editor: any, fileId: string, diff: { originalContent: string; newContent: string } | undefined) => {
+    try {
+      const monaco = (window as any).monaco;
+      if (!monaco) return;
+      const model = editor.getModel();
+      if (!model) return;
+
+      // Clear previous agent decorations for this file
+      const old = agentDiffDecoRef.current[fileId];
+      if (old?.length) editor.deltaDecorations(old, []);
+
+      if (!diff) { agentDiffDecoRef.current[fileId] = []; return; }
+
+      const oLines = diff.originalContent.split("\n");
+      const nLines = diff.newContent.split("\n");
+      // LCS for diff
+      const m = oLines.length, n = nLines.length;
+      const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+      for (let i = 1; i <= m; i++)
+        for (let j = 1; j <= n; j++)
+          dp[i][j] = oLines[i - 1] === nLines[j - 1] ? dp[i - 1][j - 1] + 1 : Math.max(dp[i - 1][j], dp[i][j - 1]);
+
+      // Backtrack
+      const ops: (" " | "-" | "+")[] = [];
+      let i = m, j = n;
+      while (i > 0 || j > 0) {
+        if (i > 0 && j > 0 && oLines[i - 1] === nLines[j - 1]) { ops.unshift(" "); i--; j--; }
+        else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) { ops.unshift("+"); j--; }
+        else { ops.unshift("-"); i--; }
+      }
+
+      const decos: any[] = [];
+      let newLine = 1;
+      for (const op of ops) {
+        if (op === "-") {
+          // Removed line — highlight in red
+          decos.push({
+            range: new monaco.Range(newLine, 1, newLine, Number.MAX_SAFE_INTEGER),
+            options: {
+              isWholeLine: true,
+              className: "agent-diff-removed-line",
+              overviewRuler: { color: "#f85149", position: monaco.editor.OverviewRulerLane.Center },
+            },
+          });
+        } else if (op === "+") {
+          // Added line — highlight in green
+          decos.push({
+            range: new monaco.Range(newLine, 1, newLine, Number.MAX_SAFE_INTEGER),
+            options: {
+              isWholeLine: true,
+              className: "agent-diff-added-line",
+              overviewRuler: { color: "#4ec94e", position: monaco.editor.OverviewRulerLane.Center },
+            },
+          });
+          newLine++;
+        } else {
+          newLine++;
+        }
+      }
+
+      const ids = editor.deltaDecorations([], decos);
+      agentDiffDecoRef.current[fileId] = ids;
+    } catch { /* */ }
+  }, []);
+
+  // Apply agent diff decorations when agent changes or active file changes
+  useEffect(() => {
+    const editor = editorByFileIdRef.current[activeFileId];
+    if (editor) applyAgentDiffDecorations(editor, activeFileId, agentDiffs[activeFileId]);
+  }, [activeFileId, agentDiffs, applyAgentDiffDecorations]);
 
   // Build a text snapshot of the entire console state (problems, debug, output,
   // browser console, DOM tree) so DeepSeek can see what's happening.
@@ -998,13 +1208,43 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   }, [files]);
 
   useImperativeHandle(ref, () => ({
-    getCode, getFiles: () => files, applyAiFiles,
+    getCode, getFiles: () => files, applyAiFiles, applyAgentFileChanges,
+    acceptAgentChange: acceptAgentChangeByPath,
+    rejectAgentChange: rejectAgentChangeByPath,
+    openFileByFsPath,
     goToLine: handleGoToLine, goToBracket: handleGoToBracket,
     setLanguage: handleSetLanguage, setIndent: handleIndentChange,
     setLineEnding: handleLineEnding, setEncoding,
     getConsoleContext, executeBrowserAction, getProjectFiles, getFsBasePath,
     refreshGitStatus,
-  }), [getCode, files, applyAiFiles, handleGoToLine, handleGoToBracket, handleSetLanguage, handleIndentChange, handleLineEnding, setEncoding, getConsoleContext, executeBrowserAction, getProjectFiles, getFsBasePath, refreshGitStatus]);
+    closeActiveTab: () => {
+      if (!activeFileIdRef.current) return;
+      // Inline close-tab logic to avoid forward-reference to closeTab.
+      const id = activeFileIdRef.current;
+      if (id === BROWSER_EDITOR_TAB_ID) {
+        onCloseBrowser();
+        setBrowserConsoleMap({});
+        setActiveFileId(files[0]?.id || "");
+        return;
+      }
+      setMarkersByFileId((prev) => { const next = { ...prev }; delete next[id]; return next; });
+      delete editorByFileIdRef.current[id];
+      if (pendingProblemSelectionRef.current?.fileId === id) {
+        pendingProblemSelectionRef.current = null;
+      }
+      setFiles((prev) => {
+        const idx = prev.findIndex((f) => f.id === id);
+        const remaining = prev.filter((f) => f.id !== id);
+        if (remaining.length > 0) {
+          const next = remaining[Math.min(Math.max(idx, 0), Math.max(0, remaining.length - 1))];
+          setActiveFileId(next?.id || "");
+        } else {
+          setActiveFileId("");
+        }
+        return remaining;
+      });
+    },
+  }), [getCode, files, applyAiFiles, applyAgentFileChanges, acceptAgentChangeByPath, rejectAgentChangeByPath, openFileByFsPath, handleGoToLine, handleGoToBracket, handleSetLanguage, handleIndentChange, handleLineEnding, setEncoding, getConsoleContext, executeBrowserAction, getProjectFiles, getFsBasePath, refreshGitStatus, onCloseBrowser]);
 
   const updateFile = useCallback((id: string, content: string) => {
     setDirtyFiles((prev) => { const next = new Set(prev); next.add(id); return next; });
@@ -1089,11 +1329,11 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   }, []);
 
   const addFile = useCallback((parentDir?: string) => {
-    setNameDialog({ title: "New File", defaultValue: "untitled.js", onOk: async (name) => {
-      if (fsBasePath || parentDir) {
-        // Create file on disk, refresh tree, open in editor
-        const sep = (parentDir || fsBasePath || "").includes("/") ? "/" : "\\";
-        const filePath = (parentDir || fsBasePath || "") + sep + name;
+    setNameDialog({ title: "New File", defaultValue: "untitled.js", defaultExtra: parentDir || fsBasePath || "", onOk: async (name, extra) => {
+      const targetDir = extra || parentDir || fsBasePath || "";
+      if (targetDir) {
+        const sep = targetDir.includes("/") ? "/" : "\\";
+        const filePath = targetDir + sep + name;
         try {
           await fetch("/api/fs/create-file", {
             method: "POST",
@@ -1115,6 +1355,23 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
           return [...prev, f];
         });
       }
+      setNameDialog(null);
+    }});
+  }, [fsBasePath, onRefreshFs]);
+
+  const addDir = useCallback((parentDir?: string) => {
+    setNameDialog({ title: "New Folder", defaultValue: "new-folder", defaultExtra: parentDir || fsBasePath || "", onOk: async (name, extra) => {
+      const targetDir = extra || parentDir || fsBasePath || "";
+      const sep = targetDir.includes("/") ? "/" : "\\";
+      const dirPath = targetDir + sep + name;
+      try {
+        await fetch("/api/fs/mkdir", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: dirPath }),
+        });
+        onRefreshFs();
+      } catch { /* ignore */ }
       setNameDialog(null);
     }});
   }, [fsBasePath, onRefreshFs]);
@@ -1167,16 +1424,17 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
 
   const handleFsDelete = useCallback(async (targetPath: string) => {
     try {
-      await fetch("/api/fs/delete", {
+      const res = await fetch("/api/fs/delete", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ path: targetPath }),
       });
-      onRefreshFs();
+      if (!res.ok) { console.error("Delete API failed:", res.status); return; }
+      await onRefreshFs();
       // Close any open tabs for files inside the deleted path
       setFiles((prev) => prev.filter((f) => !(f._fsPath && normPath(f._fsPath).startsWith(normPath(targetPath)))));
       if (selectedFolder === targetPath) setSelectedFolder(null);
-    } catch { /* ignore */ }
+    } catch (err) { console.error("handleFsDelete error:", err); }
   }, [onRefreshFs, selectedFolder]);
 
   const handleFsRename = useCallback((oldPath: string) => {
@@ -1237,19 +1495,19 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
           <div className="welcome-logo">Harness</div>
           <div className="welcome-subtitle">AI-Powered Browser Test IDE</div>
           <div className="welcome-actions">
-            <button className="welcome-btn" onClick={onOpenFolder}>
+            <button className="welcome-btn" onClick={() => handleWelcomeClick(onOpenFolder)}>
               <span className="welcome-btn-icon">📂</span>
               <span className="welcome-btn-text"><strong>Open Folder</strong><small>Open an existing project from your drive</small></span>
             </button>
-            <button className="welcome-btn" onClick={onOpenFile}>
+            <button className="welcome-btn" onClick={() => handleWelcomeClick(onOpenFile)}>
               <span className="welcome-btn-icon">📄</span>
               <span className="welcome-btn-text"><strong>Open File</strong><small>Open a single file from your drive</small></span>
             </button>
-            <button className="welcome-btn" onClick={onCreateProject}>
+            <button className="welcome-btn" onClick={() => handleWelcomeClick(onCreateProject)}>
               <span className="welcome-btn-icon">🆕</span>
               <span className="welcome-btn-text"><strong>New Project</strong><small>Create an empty folder for your project</small></span>
             </button>
-            <button className="welcome-btn" onClick={onCreateFile}>
+            <button className="welcome-btn" onClick={() => handleWelcomeClick(onCreateFile)}>
               <span className="welcome-btn-icon">📝</span>
               <span className="welcome-btn-text"><strong>New File</strong><small>Create a new file in the current folder</small></span>
             </button>
@@ -1265,7 +1523,9 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
         open={!!nameDialog}
         title={nameDialog?.title || ""}
         defaultValue={nameDialog?.defaultValue}
-        onOk={(value) => { nameDialog?.onOk(value); }}
+        extraLabel="Dir"
+        extraValue={nameDialog?.defaultExtra || ""}
+        onOk={(value, extra) => { nameDialog?.onOk(value, extra); }}
         onCancel={() => setNameDialog(null)}
       />
       </>
@@ -1304,6 +1564,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
             activeFileId={activeFileId}
             onSelect={setActiveFileId}
             onAdd={addFile}
+            onAddFolder={addDir}
             onDelete={(id) => closeTab(id)}
             onRename={renameFile}
             selectedFolder={selectedFolder}
@@ -1379,25 +1640,48 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
           )}
         </div>
         <div className="editor-main" style={{ flex: 1, overflow: "hidden" }}>
+          {/* ── Agent diff accept/reject banner ── */}
+          {agentDiffs[activeFileId] && (
+            <div className="agent-diff-banner">
+              <span className="agent-diff-banner-icon"><i className="codicon codicon-diff-modified" /></span>
+              <span className="agent-diff-banner-text">AI modified this file</span>
+              <div className="agent-diff-banner-actions">
+                <button className="agent-diff-banner-btn accept" onClick={() => {
+                  const fp = activeFile?._fsPath;
+                  acceptAgentChanges(activeFileId);
+                  if (fp) onBannerAcceptFile?.(fp);
+                }}>
+                  <i className="codicon codicon-check" /> Accept
+                </button>
+                <button className="agent-diff-banner-btn reject" onClick={() => {
+                  const fp = activeFile?._fsPath;
+                  rejectAgentChanges(activeFileId);
+                  if (fp) onBannerRejectFile?.(fp);
+                }}>
+                  <i className="codicon codicon-close" /> Reject
+                </button>
+              </div>
+            </div>
+          )}
           <div className="editor-container">
             {showWelcomeInEditor && (
               <div className="editor-welcome">
                 <div className="welcome-logo">Harness</div>
                 <div className="welcome-subtitle">AI-Powered Browser Test IDE</div>
                 <div className="welcome-actions">
-                  <button className="welcome-btn" onClick={onOpenFolder}>
+                  <button className="welcome-btn" onClick={() => handleWelcomeClick(onOpenFolder)}>
                     <span className="welcome-btn-icon">📂</span>
                     <span className="welcome-btn-text"><strong>Open Folder</strong><small>Open an existing project from your drive</small></span>
                   </button>
-                  <button className="welcome-btn" onClick={onOpenFile}>
+                  <button className="welcome-btn" onClick={() => handleWelcomeClick(onOpenFile)}>
                     <span className="welcome-btn-icon">📄</span>
                     <span className="welcome-btn-text"><strong>Open File</strong><small>Open a single file from your drive</small></span>
                   </button>
-                  <button className="welcome-btn" onClick={onCreateProject}>
+                  <button className="welcome-btn" onClick={() => handleWelcomeClick(onCreateProject)}>
                     <span className="welcome-btn-icon">🆕</span>
                     <span className="welcome-btn-text"><strong>New Project</strong><small>Create an empty folder for your project</small></span>
                   </button>
-                  <button className="welcome-btn" onClick={onCreateFile}>
+                  <button className="welcome-btn" onClick={() => handleWelcomeClick(onCreateFile)}>
                     <span className="welcome-btn-icon">📝</span>
                     <span className="welcome-btn-text"><strong>New File</strong><small>Create a new file in the current folder</small></span>
                   </button>
@@ -1486,6 +1770,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
 
                     // Apply decorations immediately with whatever is available
                     applyDecorations(ed, f.id, gitDiffs[f.id], markersByFileId[f.id]);
+                    applyAgentDiffDecorations(ed, f.id, agentDiffs[f.id]);
 
                     // Click a glyph (git change or error/warning) to open the inline popup.
                     (editor as any).onMouseDown?.((e: any) => {
@@ -1592,7 +1877,9 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
         open={!!nameDialog}
         title={nameDialog?.title || ""}
         defaultValue={nameDialog?.defaultValue}
-        onOk={(value) => { nameDialog?.onOk(value); }}
+        extraLabel="Dir"
+        extraValue={nameDialog?.defaultExtra || ""}
+        onOk={(value, extra) => { nameDialog?.onOk(value, extra); }}
         onCancel={() => setNameDialog(null)}
       />
     </div>

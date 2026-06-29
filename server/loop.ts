@@ -8,6 +8,7 @@ export interface LoopConfig {
   js: string;
   goal: string;
   maxSteps: number;
+  apiKey?: string;
 }
 
 export interface LoopEvent {
@@ -18,8 +19,9 @@ export interface LoopEvent {
 type EventEmitter = (event: LoopEvent) => void;
 
 export async function runLoop(config: LoopConfig, emit: EventEmitter): Promise<void> {
-  const { html, css, js, goal, maxSteps } = config;
+  const { html, css, js, goal, maxSteps, apiKey } = config;
   const actionLog: string[] = [];
+  const resolvedApiKey = apiKey || process.env.DEEPSEEK_API_KEY || "";
 
   try {
     // Step 1: Inject user code into browser
@@ -41,7 +43,7 @@ export async function runLoop(config: LoopConfig, emit: EventEmitter): Promise<v
 
       // Step 3: Ask DeepSeek
       emit({ type: "log", data: "Asking DeepSeek for next actions..." });
-      const aiResponse = await askDeepSeek(dom, goal, actionLog);
+      const aiResponse = await askDeepSeek(dom, goal, actionLog, resolvedApiKey);
       emit({ type: "log", data: `DeepSeek reasoning: ${aiResponse.reasoning}` });
 
       // Step 4: Execute actions

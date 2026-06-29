@@ -1,7 +1,8 @@
-import { useRef, useCallback, useState, useEffect } from "react";
+import { useRef, useCallback, useState, useEffect, useMemo } from "react";
 import EditorPane, { EditorPaneHandle, type StatusBarState } from "./panes/EditorPane";
-import TestConsole from "./panes/TestConsole";
+import AgentConsole from "./panes/AgentConsole";
 import MenuBar from "./panes/MenuBar";
+import type { MenuItem } from "./panes/MenuBar";
 import StatusBar from "./panes/StatusBar";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { useResizable, ResizeHandle } from "./hooks/useResizable";
@@ -58,6 +59,7 @@ function normalizeBrowserOpenUrl(rawUrl: string): string {
 
 export default function App() {
   const editorRef = useRef<EditorPaneHandle>(null);
+  const agentFileActionRef = useRef<((fcPath: string, accepted: boolean) => void) | null>(null);
   const { connected, events, runTest } = useWebSocket();
   const [debugEntries, setDebugEntries] = useState<DebugConsoleEntry[]>([]);
   const [outputEntries, setOutputEntries] = useState<OutputEntry[]>([]);
@@ -302,7 +304,7 @@ export default function App() {
   useEffect(() => { if (!termVisible) reopenTerminal.current = false; }, [termVisible]);
 
   // Resizable console pane (width from right edge)
-  const { size: consoleW, onMouseDown: onConsoleDrag } = useResizable(320, 200, 800, true);
+  const { size: consoleW, onMouseDown: onConsoleDrag } = useResizable(390, 390, 800, true);
 
   const ensureTerminalVisible = useCallback((restart: boolean) => {
     reopenTerminal.current = true;
@@ -376,6 +378,17 @@ export default function App() {
     // Also refresh git status so green "U" markers update.
     editorRef.current?.refreshGitStatus?.();
   }, [fsBasePath]);
+
+  // Refresh file tree when window regains focus (e.g. after external file changes).
+  useEffect(() => {
+    const onVisible = () => { if (document.visibilityState === "visible") refreshFs(); };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", refreshFs);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", refreshFs);
+    };
+  }, [refreshFs]);
 
   const createNewProject = useCallback(async (projectName: string) => {
     try {
@@ -489,7 +502,7 @@ export default function App() {
       const res = await fetch(`/api/fs/read?path=${encodeURIComponent(filePath)}`);
       const data = await res.json();
       if (data.error) throw new Error(data.error);
-      editorRef.current?.applyAiFiles([{ name: filePath.split(/[/\\]/).pop() || "untitled", content: data.content }]);
+      editorRef.current?.applyAiFiles([{ name: filePath.split(/[/\\]/).pop() || "untitled", content: data.content, fsPath: filePath }]);
       setShowConsole(true);
       if (dirPath && dirPath !== fsBasePath) {
         const listRes = await fetch(`/api/fs/list?path=${encodeURIComponent(dirPath)}`);
@@ -535,10 +548,10 @@ export default function App() {
     runTest({ html: code.html, css: code.css, js: code.js, goal, maxSteps: 10 });
   }, [runTest, goal]);
 
-  const menus = [
+  const menus = useMemo(() => [
     {
       label: "File",
-      items: [
+      items: ([] as (MenuItem | "---")[]).concat(
         { label: "Open Folder...", shortcut: "Ctrl+K Ctrl+O", action: () => { void openFolderImmediate(); } },
         { label: "Open File...", shortcut: "Ctrl+O", action: () => { void openFileImmediate(); } },
         "---" as const,
@@ -552,9 +565,14 @@ export default function App() {
         { label: "Save", shortcut: "Ctrl+S", action: () => {
           const files = editorRef.current?.getFiles(); if (files) for (const f of files) { if (f._fsPath) fetch("/api/fs/write", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: f._fsPath, content: f.content }) }).catch(() => {}); }
         }},
-        "---" as const,
-        { label: "Close Folder", shortcut: "Ctrl+K F", action: () => { setFsRoot(null); setFsBasePath(""); isBrowserFs.current = false; setProjectVenvDir(""); setProjectActivateScript(""); handleBrowserClose(); setTermVisible(false); setShowConsole(false); } },
-      ],
+        // Conditionals
+        ...(fsBasePath
+          ? [{ label: "Close Folder", shortcut: "Ctrl+K F", action: () => { setFsRoot(null); setFsBasePath(""); isBrowserFs.current = false; setProjectVenvDir(""); setProjectActivateScript(""); handleBrowserClose(); setTermVisible(false); setShowConsole(false); } } as MenuItem]
+          : []),
+        ...(statusBar.hasEditor
+          ? [{ label: "Close File", shortcut: "Ctrl+W", action: () => { editorRef.current?.closeActiveTab(); } } as MenuItem]
+          : []),
+      ),
     },
     {
       label: "Edit",
@@ -584,7 +602,7 @@ export default function App() {
       ],
     },
     { label: "Help", items: [{ label: "About Harness", action: () => alert("Harness - AI-powered browser test runner\nMonaco + Playwright + DeepSeek") }] },
-  ];
+  ], [fsBasePath, statusBar.hasEditor, openFolderImmediate, openFileImmediate, createNewProject, createNewFile, handleBrowserClose]);
 
   return (
     <div className="app">
@@ -630,6 +648,8 @@ export default function App() {
             onOpenDevtools={handleOpenDevtools}
             devtoolsForceKey={devtoolsForceKey}
             onStatusChange={setStatusBar}
+            onBannerAcceptFile={(fp) => agentFileActionRef.current?.(fp, true)}
+            onBannerRejectFile={(fp) => agentFileActionRef.current?.(fp, false)}
           />
         </div>
 
@@ -637,7 +657,7 @@ export default function App() {
 
         {showConsole && (
         <div className="pane pane-console" style={{ width: consoleW, minWidth: consoleW }}>
-          <TestConsole
+          <AgentConsole
             events={events}
             goal={goal}
             onGoalChange={setGoal}
@@ -648,7 +668,12 @@ export default function App() {
             getProjectFiles={() => editorRef.current?.getProjectFiles() ?? Promise.resolve([])}
             getFsBasePath={() => editorRef.current?.getFsBasePath() || ""}
             refreshEditor={(files) => editorRef.current?.applyAiFiles(files)}
+            applyAgentFileChanges={(changes) => editorRef.current?.applyAgentFileChanges(changes)}
             onRefreshFs={refreshFs}
+            setAgentFileActionRef={(fn) => { agentFileActionRef.current = fn; }}
+            openEditorFile={(path) => { editorRef.current?.openFileByFsPath(path); }}
+            acceptEditorChange={(path) => { editorRef.current?.acceptAgentChange(path); }}
+            rejectEditorChange={(path) => { editorRef.current?.rejectAgentChange(path); }}
           />
         </div>
         )}
