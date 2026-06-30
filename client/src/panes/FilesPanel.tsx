@@ -129,10 +129,18 @@ function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth, gitChanges, 
     if (containsActive && children === null) {
       setExpanded(true);
       setLoading(true);
-      // eager-fetch children so the file highlight is visible
       fetchChildren();
     }
   }, [containsActive, children]);
+
+  // Auto-expand when this folder is selected
+  useEffect(() => {
+    if (isSelected && entry.isDirectory && children === null) {
+      setExpanded(true);
+      setLoading(true);
+      fetchChildren();
+    }
+  }, [isSelected, children]);
 
   const fetchChildren = async () => {
     try {
@@ -157,21 +165,17 @@ function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth, gitChanges, 
 
   const isUntracked = !entry.isDirectory && (isNewFile || gitMarker === "?");
 
-  const handleToggle = useCallback(async () => {
+  const handleToggle = (e: React.MouseEvent) => {
+    e.stopPropagation();
     if (entry.isDirectory) {
-      // Select the folder (for adding files inside it)
-      onSelectFolder(isSelected ? null : entry.path);
-      if (children === null) {
-        setExpanded(true);
-        setLoading(true);
-        fetchChildren();
-      } else {
-        setExpanded(!expanded);
+      onSelectFolder(entry.path);
+      if (children !== null) {
+        setExpanded((prev) => !prev);
       }
     } else {
       onOpenFile(entry.path, entry._handle as FileSystemFileHandle | undefined);
     }
-  }, [entry, children, expanded, isSelected, onSelectFolder]);
+  };
 
   const handleContext = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -181,42 +185,58 @@ function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth, gitChanges, 
 
   const iconUrl = entry.isDirectory ? folderIconUrl(expanded) : fileIconUrl(entry.name);
 
+  const item = (
+    <div
+      className={`fs-tree-item${isSelected ? " selected" : ""}${isActiveFile ? " active-file" : ""}${containsActive ? " contains-active" : ""}`}
+      style={{ paddingLeft: 8 + depth * 14 }}
+      onClick={handleToggle}
+      onContextMenu={handleContext}
+    >
+      <span className="file-icon">
+        {loading ? "⏳" : <img className="file-icon-img" src={iconUrl} alt="" draggable={false} />}
+      </span>
+      <span className={`file-name${isUntracked ? " file-name-new" : ""}`}>{entry.name}</span>
+      {gitMarker && (
+        <span className="fs-git-marker" style={{ color: statusColor(gitMarker) }}>
+          {gitMarker === "?" ? "U" : gitMarker}
+        </span>
+      )}
+      {isNewFile && !gitMarker && (
+        <span className="fs-git-marker" style={{ color: "#4ec94e" }}>U</span>
+      )}
+    </div>
+  );
+
+  const childrenTree = expanded && children && (
+    <FsTree
+      entries={children}
+      basePath={basePath}
+      onOpenFile={onOpenFile}
+      onOpenFolder={onOpenFolder}
+      depth={depth + 1}
+      gitChanges={gitChanges}
+      selectedFolder={selectedFolder}
+      onSelectFolder={onSelectFolder}
+      onContextMenu={onContextMenu}
+      activeFilePath={activeFilePath}
+      newFilePaths={newFilePaths}
+    />
+  );
+
+  // Wrap selected folder + its children in a bordered container
+  if (isSelected && entry.isDirectory) {
+    return (
+      <div className="fs-folder-selected">
+        {item}
+        {childrenTree}
+      </div>
+    );
+  }
+
   return (
     <>
-      <div
-        className={`fs-tree-item${isSelected ? " selected" : ""}${isActiveFile ? " active-file" : ""}${containsActive ? " contains-active" : ""}`}
-        style={{ paddingLeft: 8 + depth * 14 }}
-        onClick={handleToggle}
-        onContextMenu={handleContext}
-      >
-        <span className="file-icon">
-          {loading ? "⏳" : <img className="file-icon-img" src={iconUrl} alt="" draggable={false} />}
-        </span>
-        <span className={`file-name${isUntracked ? " file-name-new" : ""}`}>{entry.name}</span>
-        {gitMarker && (
-          <span className="fs-git-marker" style={{ color: statusColor(gitMarker) }}>
-            {gitMarker === "?" ? "U" : gitMarker}
-          </span>
-        )}
-        {isNewFile && !gitMarker && (
-          <span className="fs-git-marker" style={{ color: "#4ec94e" }}>U</span>
-        )}
-      </div>
-      {expanded && children && (
-        <FsTree
-          entries={children}
-          basePath={basePath}
-          onOpenFile={onOpenFile}
-          onOpenFolder={onOpenFolder}
-          depth={depth + 1}
-          gitChanges={gitChanges}
-          selectedFolder={selectedFolder}
-          onSelectFolder={onSelectFolder}
-          onContextMenu={onContextMenu}
-          activeFilePath={activeFilePath}
-          newFilePaths={newFilePaths}
-        />
-      )}
+      {item}
+      {childrenTree}
     </>
   );
 }
@@ -261,7 +281,7 @@ export default function FilesPanel({
               <button className="files-action-btn" onClick={() => onAddFolder(selectedFolder || undefined)} title={selectedFolder ? `New folder in ${selectedFolder.split(/[/\\]/).pop()}` : "New folder"}>+D</button>
             </div>
           </div>
-          <div className="files-list">
+          <div className={`files-list${selectedFolder === null ? " files-list-selected" : ""}`} onClick={() => onSelectFolder(null)}>
             <FsTree
               entries={fsRoot}
               basePath={fsBasePath}

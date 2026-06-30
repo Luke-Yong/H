@@ -170,7 +170,9 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   const [nameDialog, setNameDialog] = useState<{
     title: string;
     defaultValue?: string;
-    defaultExtra?: string;
+    extraValue?: string;
+    type?: "file" | "folder";
+    existingNames?: string[];
     onOk: (value: string, extra?: string) => void;
   } | null>(null);
   const [cursorPos, setCursorPos] = useState<{ line: number; column: number }>({ line: 1, column: 1 });
@@ -1328,52 +1330,80 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     }
   }, []);
 
-  const addFile = useCallback((parentDir?: string) => {
-    setNameDialog({ title: "New File", defaultValue: "untitled.js", defaultExtra: parentDir || fsBasePath || "", onOk: async (name, extra) => {
-      const targetDir = extra || parentDir || fsBasePath || "";
-      if (targetDir) {
-        const sep = targetDir.includes("/") ? "/" : "\\";
-        const filePath = targetDir + sep + name;
-        try {
-          await fetch("/api/fs/create-file", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ path: filePath, content: "" }),
+  const addFile = useCallback(async (parentDir?: string) => {
+    const targetDir = parentDir || fsBasePath || "";
+    let existingNames: string[] = [];
+    if (targetDir) {
+      try {
+        const res = await fetch(`/api/fs/list?path=${encodeURIComponent(targetDir)}`);
+        const data = await res.json();
+        existingNames = (data.entries || []).map((e: { name: string }) => e.name);
+      } catch { /* ignore */ }
+    }
+    setNameDialog({
+      title: "New File",
+      type: "file",
+      extraValue: targetDir,
+      existingNames,
+      onOk: async (name) => {
+        if (targetDir) {
+          const sep = targetDir.includes("/") ? "/" : "\\";
+          const filePath = targetDir + sep + name;
+          try {
+            await fetch("/api/fs/create-file", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ path: filePath, content: "" }),
+            });
+          } catch { /* ignore */ }
+          await onRefreshFs();
+          setFiles((prev) => {
+            const f = createFile(name);
+            f._fsPath = filePath;
+            setActiveFileId(f.id);
+            return [...prev, f];
           });
-          onRefreshFs();
-        } catch { /* ignore - still create virtual tab */ }
-        setFiles((prev) => {
-          const f = createFile(name);
-          f._fsPath = filePath;
-          setActiveFileId(f.id);
-          return [...prev, f];
-        });
-      } else {
-        setFiles((prev) => {
-          const f = createFile(name);
-          setActiveFileId(f.id);
-          return [...prev, f];
-        });
+        } else {
+          setFiles((prev) => {
+            const f = createFile(name);
+            setActiveFileId(f.id);
+            return [...prev, f];
+          });
+        }
+        setNameDialog(null);
       }
-      setNameDialog(null);
-    }});
+    });
   }, [fsBasePath, onRefreshFs]);
 
-  const addDir = useCallback((parentDir?: string) => {
-    setNameDialog({ title: "New Folder", defaultValue: "new-folder", defaultExtra: parentDir || fsBasePath || "", onOk: async (name, extra) => {
-      const targetDir = extra || parentDir || fsBasePath || "";
-      const sep = targetDir.includes("/") ? "/" : "\\";
-      const dirPath = targetDir + sep + name;
+  const addDir = useCallback(async (parentDir?: string) => {
+    const targetDir = parentDir || fsBasePath || "";
+    let existingNames: string[] = [];
+    if (targetDir) {
       try {
-        await fetch("/api/fs/mkdir", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ path: dirPath }),
-        });
-        onRefreshFs();
+        const res = await fetch(`/api/fs/list?path=${encodeURIComponent(targetDir)}`);
+        const data = await res.json();
+        existingNames = (data.entries || []).map((e: { name: string }) => e.name);
       } catch { /* ignore */ }
-      setNameDialog(null);
-    }});
+    }
+    setNameDialog({
+      title: "New Folder",
+      type: "folder",
+      extraValue: targetDir,
+      existingNames,
+      onOk: async (name) => {
+        const sep = targetDir.includes("/") ? "/" : "\\";
+        const dirPath = targetDir + sep + name;
+        try {
+          await fetch("/api/fs/mkdir", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: dirPath }),
+          });
+        } catch { /* ignore */ }
+        await onRefreshFs();
+        setNameDialog(null);
+      }
+    });
   }, [fsBasePath, onRefreshFs]);
 
   const closeTab = useCallback((id: string) => {
@@ -1523,8 +1553,9 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
         open={!!nameDialog}
         title={nameDialog?.title || ""}
         defaultValue={nameDialog?.defaultValue}
-        extraLabel="Dir"
-        extraValue={nameDialog?.defaultExtra || ""}
+        extraValue={nameDialog?.extraValue || ""}
+        type={nameDialog?.type}
+        existingNames={nameDialog?.existingNames}
         onOk={(value, extra) => { nameDialog?.onOk(value, extra); }}
         onCancel={() => setNameDialog(null)}
       />
@@ -1877,8 +1908,9 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
         open={!!nameDialog}
         title={nameDialog?.title || ""}
         defaultValue={nameDialog?.defaultValue}
-        extraLabel="Dir"
-        extraValue={nameDialog?.defaultExtra || ""}
+        extraValue={nameDialog?.extraValue || ""}
+        type={nameDialog?.type}
+        existingNames={nameDialog?.existingNames}
         onOk={(value, extra) => { nameDialog?.onOk(value, extra); }}
         onCancel={() => setNameDialog(null)}
       />

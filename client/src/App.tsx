@@ -373,9 +373,12 @@ export default function App() {
 
   const refreshFs = useCallback(async () => {
     if (isBrowserFs.current || !fsBasePath) return;
-    try { const res = await fetch(`/api/fs/list?path=${encodeURIComponent(fsBasePath)}`); const data = await res.json(); setFsRoot(data.entries || []); }
-    catch { /* ignore */ }
-    // Also refresh git status so green "U" markers update.
+    try {
+      const res = await fetch(`/api/fs/list?path=${encodeURIComponent(fsBasePath)}`);
+      if (!res.ok) { console.error("refreshFs list failed:", res.status); return; }
+      const data = await res.json();
+      setFsRoot(data.entries || []);
+    } catch (err) { console.error("refreshFs error:", err); }
     editorRef.current?.refreshGitStatus?.();
   }, [fsBasePath]);
 
