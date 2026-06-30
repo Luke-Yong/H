@@ -170,6 +170,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   const [nameDialog, setNameDialog] = useState<{
     title: string;
     defaultValue?: string;
+    defaultExt?: string;
     extraValue?: string;
     type?: "file" | "folder";
     existingNames?: string[];
@@ -1442,7 +1443,10 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   const renameFile = useCallback((id: string) => {
     const f = files.find((x) => x.id === id);
     if (!f) return;
-    setNameDialog({ title: "Rename", defaultValue: f.name, onOk: (newName) => {
+    const dotIdx = f.name.lastIndexOf(".");
+    const baseName = dotIdx > 0 ? f.name.slice(0, dotIdx) : f.name;
+    const ext = dotIdx > 0 ? f.name.slice(dotIdx + 1) : "";
+    setNameDialog({ title: "Rename", defaultValue: baseName, defaultExt: ext, type: "file", onOk: (newName) => {
       if (newName !== f.name) {
         setFiles((prev) => prev.map((x) =>
           x.id === id ? { ...x, name: newName, language: detectLanguage(newName) } : x
@@ -1467,23 +1471,39 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     } catch (err) { console.error("handleFsDelete error:", err); }
   }, [onRefreshFs, selectedFolder]);
 
-  const handleFsRename = useCallback((oldPath: string) => {
+  const handleFsRename = useCallback((oldPath: string, isDirectory: boolean) => {
     const name = oldPath.split(/[/\\]/).pop() || "item";
-    setNameDialog({ title: "Rename", defaultValue: name, onOk: async (newName) => {
+    const doRename = async (newName: string) => {
       if (newName === name) { setNameDialog(null); return; }
       const parent = oldPath.replace(/[/\\][^/\\]*$/, "");
       const newPath = parent + (oldPath.includes("/") ? "/" : "\\") + newName;
       try {
-        await fetch("/api/fs/rename", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ oldPath, newPath }),
-        });
+        await fetch("/api/fs/rename", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ oldPath, newPath }) });
       } catch { /* ignore */ }
       onRefreshFs();
       if (selectedFolder === oldPath) setSelectedFolder(newPath);
+      // Update any open tabs that reference the old path
+      setFiles((prev) => {
+        let changed = false;
+        const updated = prev.map((f) => {
+          if (f._fsPath && normPath(f._fsPath) === normPath(oldPath)) {
+            changed = true;
+            return { ...f, name: newName, _fsPath: newPath, language: detectLanguage(newName) };
+          }
+          return f;
+        });
+        return changed ? updated : prev;
+      });
       setNameDialog(null);
-    }});
+    };
+    if (isDirectory) {
+      setNameDialog({ title: "Rename", defaultValue: name, onOk: doRename });
+    } else {
+      const dotIdx = name.lastIndexOf(".");
+      const baseName = dotIdx > 0 ? name.slice(0, dotIdx) : name;
+      const ext = dotIdx > 0 ? name.slice(dotIdx + 1) : "";
+      setNameDialog({ title: "Rename", defaultValue: baseName, defaultExt: ext, type: "file", onOk: doRename });
+    }
   }, [onRefreshFs, selectedFolder]);
 
   if (!hasContent && !terminalVisible) {
@@ -1553,6 +1573,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
         open={!!nameDialog}
         title={nameDialog?.title || ""}
         defaultValue={nameDialog?.defaultValue}
+        defaultExt={nameDialog?.defaultExt || ""}
         extraValue={nameDialog?.extraValue || ""}
         type={nameDialog?.type}
         existingNames={nameDialog?.existingNames}
@@ -1908,6 +1929,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
         open={!!nameDialog}
         title={nameDialog?.title || ""}
         defaultValue={nameDialog?.defaultValue}
+        defaultExt={nameDialog?.defaultExt || ""}
         extraValue={nameDialog?.extraValue || ""}
         type={nameDialog?.type}
         existingNames={nameDialog?.existingNames}

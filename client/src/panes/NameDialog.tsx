@@ -4,6 +4,7 @@ interface Props {
   open: boolean;
   title: string;
   defaultValue?: string;
+  defaultExt?: string;
   extraValue?: string;
   placeholder?: string;
   okLabel?: string;
@@ -14,7 +15,7 @@ interface Props {
 }
 
 export default function NameDialog({
-  open, title, defaultValue = "", extraValue = "", placeholder,
+  open, title, defaultValue = "", defaultExt = "", extraValue = "", placeholder,
   okLabel = "OK", type, existingNames,
   onOk, onCancel,
 }: Props) {
@@ -27,20 +28,17 @@ export default function NameDialog({
 
   useEffect(() => {
     if (open) {
-      setName("");
-      setExt("");
+      setName(defaultValue);
+      setExt(defaultExt);
       setValue(defaultValue);
       setError("");
-      // Focus the appropriate first input
       setTimeout(() => {
         if (type) {
           nameRef.current?.focus();
-        } else {
-          // inputRef is handled by separate logic below via ref trick
         }
       }, 50);
     }
-  }, [open, defaultValue, type]);
+  }, [open, defaultValue, defaultExt, type]);
 
   const checkDuplicate = useCallback((fullName: string): boolean => {
     if (!existingNames || existingNames.length === 0) return false;

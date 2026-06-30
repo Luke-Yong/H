@@ -31,7 +31,7 @@ interface Props {
   selectedFolder: string | null;
   onSelectFolder: (path: string | null) => void;
   onFsDelete: (path: string) => void;
-  onFsRename: (oldPath: string) => void;
+  onFsRename: (oldPath: string, isDirectory: boolean) => void;
   /** Path of the currently active editor file (for tree highlight). */
   activeFilePath: string | null;
   /** Set of file paths marked as "created by agent". */
@@ -46,7 +46,7 @@ function statusColor(s: string): string {
   return "#e2b714";
 }
 
-function FsTree({ entries, basePath, onOpenFile, onOpenFolder, depth, gitChanges, selectedFolder, onSelectFolder, onContextMenu, activeFilePath, newFilePaths }: {
+function FsTree({ entries, basePath, onOpenFile, onOpenFolder, depth, gitChanges, selectedFolder, onSelectFolder, onContextMenu, activeFilePath, newFilePaths, refreshKey }: {
   entries: FsEntry[];
   basePath: string;
   onOpenFile: (p: string, h?: FileSystemFileHandle) => void;
@@ -58,6 +58,7 @@ function FsTree({ entries, basePath, onOpenFile, onOpenFolder, depth, gitChanges
   onContextMenu: (e: React.MouseEvent, entry: FsEntry) => void;
   activeFilePath: string | null;
   newFilePaths?: Set<string>;
+  refreshKey: number;
 }) {
   return (
     <>
@@ -75,6 +76,7 @@ function FsTree({ entries, basePath, onOpenFile, onOpenFolder, depth, gitChanges
           onContextMenu={onContextMenu}
           activeFilePath={activeFilePath}
           newFilePaths={newFilePaths}
+          refreshKey={refreshKey}
         />
       ))}
     </>
@@ -100,7 +102,7 @@ function hasDescendantChanges(dirPath: string, changes: Map<string, string>): st
   return best;
 }
 
-function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth, gitChanges, selectedFolder, onSelectFolder, onContextMenu, activeFilePath, newFilePaths }: {
+function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth, gitChanges, selectedFolder, onSelectFolder, onContextMenu, activeFilePath, newFilePaths, refreshKey }: {
   entry: FsEntry;
   basePath: string;
   onOpenFile: (p: string, h?: FileSystemFileHandle) => void;
@@ -112,6 +114,7 @@ function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth, gitChanges, 
   onContextMenu: (e: React.MouseEvent, entry: FsEntry) => void;
   activeFilePath: string | null;
   newFilePaths?: Set<string>;
+  refreshKey: number;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [children, setChildren] = useState<FsEntry[] | null>(null);
@@ -141,6 +144,15 @@ function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth, gitChanges, 
       fetchChildren();
     }
   }, [isSelected, children]);
+
+  // Re-fetch children on refresh (after file/folder create/delete/rename)
+  useEffect(() => {
+    if (expanded && children !== null) {
+      setLoading(true);
+      fetchChildren();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshKey]);
 
   const fetchChildren = async () => {
     try {
@@ -220,6 +232,7 @@ function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth, gitChanges, 
       onContextMenu={onContextMenu}
       activeFilePath={activeFilePath}
       newFilePaths={newFilePaths}
+      refreshKey={refreshKey}
     />
   );
 
@@ -249,6 +262,12 @@ export default function FilesPanel({
   activeFilePath, newFilePaths,
 }: Props) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; entry: FsEntry } | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  // Increment refreshKey whenever fsRoot changes (after any fs operation)
+  useEffect(() => {
+    setRefreshKey((k) => k + 1);
+  }, [fsRoot]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent, entry: FsEntry) => {
     setContextMenu({ x: e.clientX, y: e.clientY, entry });
@@ -294,6 +313,7 @@ export default function FilesPanel({
               onContextMenu={handleContextMenu}
               activeFilePath={activeFilePath}
               newFilePaths={newFilePaths}
+              refreshKey={refreshKey}
             />
           </div>
         </>
@@ -342,7 +362,7 @@ export default function FilesPanel({
         >
           <button
             className="fs-context-item"
-            onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); onFsRename(contextMenu.entry.path); closeContextMenu(); }}
+            onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); onFsRename(contextMenu.entry.path, contextMenu.entry.isDirectory); closeContextMenu(); }}
           >Rename</button>
           <button
             className="fs-context-item fs-context-item-danger"
