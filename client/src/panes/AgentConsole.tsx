@@ -511,6 +511,7 @@ export default function AgentConsole({ events, goal, onGoalChange, onRun, connec
   // ── Streaming agent loop ──
   const streamToolRef = useRef<Map<string, { name: string; params: Record<string, unknown> }>>(new Map());
   const fileChangesRef = useRef<FileChange[]>([]);
+  const todosRef = useRef<TodoItem[]>([]);
 
   const applyEditorFiles = useCallback((changes: FileChange[]) => {
     if (!refreshEditor && !applyAgentFileChanges) return;
@@ -539,7 +540,7 @@ export default function AgentConsole({ events, goal, onGoalChange, onRun, connec
     const root = getFsBasePath?.() || "";
     streamToolRef.current = new Map();
     fileChangesRef.current = [];
-
+    todosRef.current = [];
     // SSE streaming helpers
     const consumeSSE = async (url: string, body: Record<string, unknown>, onEvent: (evt: any) => Promise<boolean>) => {
       const res = await fetch(url, {
@@ -635,6 +636,7 @@ export default function AgentConsole({ events, goal, onGoalChange, onRun, connec
             fileChangesRef.current.push({
               path: p, name, changeType: "delete",
               status: "done",
+              originalContent: (evt as any).originalContent ?? null,
             });
           } else if (tn === "create_directory" && evt.toolParams?.path) {
             const p = String(evt.toolParams.path);
@@ -643,6 +645,12 @@ export default function AgentConsole({ events, goal, onGoalChange, onRun, connec
               path: p, name, changeType: "create",
               status: "done",
             });
+          } else if (tn === "write_todos" && Array.isArray(evt.toolParams?.todos)) {
+            todosRef.current = (evt.toolParams.todos as any[]).map((t: any) => ({
+              id: String(t.id || ""),
+              text: String(t.text || ""),
+              status: String(t.status || "pending"),
+            }));
           }
           // End the assistant message's streaming state
           if (assistantMsgId) {
@@ -650,11 +658,14 @@ export default function AgentConsole({ events, goal, onGoalChange, onRun, connec
               setMessages((prev) => {
                 const next = [...prev];
                 const idx = next.findIndex((m) => m.id === assistantMsgId);
-                if (idx >= 0) next[idx] = { ...next[idx], state: undefined, thought: currentThought, fileChanges: [...fileChangesRef.current] };
+                if (idx >= 0) next[idx] = { ...next[idx], state: undefined, thought: currentThought, fileChanges: fileChangesRef.current.length > 0 ? [...fileChangesRef.current] : undefined, todos: todosRef.current.length > 0 ? [...todosRef.current] : undefined };
                 return next;
               });
             });
             assistantMsgId = null;
+            // Clear so the next assistant message doesn't re-attach old file changes
+            fileChangesRef.current = [];
+            todosRef.current = [];
           }
           currentThought = "";
           currentText = "";
@@ -670,6 +681,22 @@ export default function AgentConsole({ events, goal, onGoalChange, onRun, connec
           // User must manually Accept/Reject each change.
           const tn = evt.toolName;
           if (tn === "write_file") {
+            setMessages((prev) => {
+              let changed = false;
+              const next = prev.map((m) => {
+                if (!m.fileChanges) return m;
+                const updated = m.fileChanges.map((fc) => {
+                  if (fc.status === "streaming") {
+                    changed = true;
+                    return { ...fc, status: "done" as const, linesAdded: Math.max(1, Math.round((fc.tokenCount ?? 0) / 40)), linesRemoved: 0 };
+                  }
+                  return fc;
+                });
+                return changed ? { ...m, fileChanges: updated } : m;
+              });
+              return changed ? next : prev;
+            });
+            // Also mutate ref for any remaining streaming entries (belt-and-suspenders)
             for (const fc of fileChangesRef.current) {
               if (fc.status === "streaming") {
                 fc.status = "done";
@@ -700,7 +727,7 @@ export default function AgentConsole({ events, goal, onGoalChange, onRun, connec
             setMessages((prev) => {
               const next = [...prev];
               const idx = next.findIndex((m) => m.id === assistantMsgId);
-              if (idx >= 0) next[idx] = { ...next[idx], state: undefined, thought: currentThought, fileChanges: [...fileChangesRef.current] };
+              if (idx >= 0) next[idx] = { ...next[idx], state: undefined, thought: currentThought, fileChanges: fileChangesRef.current.length > 0 ? [...fileChangesRef.current] : undefined, todos: todosRef.current.length > 0 ? [...todosRef.current] : undefined };
               return next;
             });
             assistantMsgId = null;
@@ -724,7 +751,7 @@ export default function AgentConsole({ events, goal, onGoalChange, onRun, connec
             setMessages((prev) => {
               const next = [...prev];
               const idx = next.findIndex((m) => m.id === assistantMsgId);
-              if (idx >= 0) next[idx] = { ...next[idx], state: undefined, thought: currentThought, fileChanges: [...fileChangesRef.current] };
+              if (idx >= 0) next[idx] = { ...next[idx], state: undefined, thought: currentThought, fileChanges: fileChangesRef.current.length > 0 ? [...fileChangesRef.current] : undefined, todos: todosRef.current.length > 0 ? [...todosRef.current] : undefined };
               return next;
             });
             assistantMsgId = null;
@@ -741,14 +768,14 @@ export default function AgentConsole({ events, goal, onGoalChange, onRun, connec
             setMessages((prev) => {
               const next = [...prev];
               const idx = next.findIndex((m) => m.id === assistantMsgId);
-              if (idx >= 0) next[idx] = { ...next[idx], state: undefined, thought: currentThought, fileChanges: [...fileChangesRef.current] };
+              if (idx >= 0) next[idx] = { ...next[idx], state: undefined, thought: currentThought, fileChanges: fileChangesRef.current.length > 0 ? [...fileChangesRef.current] : undefined, todos: todosRef.current.length > 0 ? [...todosRef.current] : undefined };
               return next;
             });
           }
           currentThought = "";
           currentText = "";
           if (evt.reply && !assistantMsgId) {
-            push({ role: "assistant", content: evt.reply, thought: currentThought, fileChanges: fileChangesRef.current.length > 0 ? [...fileChangesRef.current] : undefined });
+            push({ role: "assistant", content: evt.reply, thought: currentThought, fileChanges: fileChangesRef.current.length > 0 ? [...fileChangesRef.current] : undefined, todos: todosRef.current.length > 0 ? [...todosRef.current] : undefined });
           }
           setAgentStatus("completed");
           if (evt.usage) setAgentUsage(evt.usage);

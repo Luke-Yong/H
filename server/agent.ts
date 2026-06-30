@@ -32,6 +32,8 @@ export interface AgentMessage {
   content: string;
   tool_call_id?: string;
   name?: string;
+  /** DeepSeek reasoning_content that must be passed back in subsequent requests. */
+  reasoning_content?: string;
 }
 
 export interface AgentState {
@@ -269,6 +271,32 @@ const TOOLS: ToolDef[] = [
       required: ["summary"],
     },
   },
+  {
+    name: "write_todos",
+    description:
+      "Create or update a structured task list to track your progress. "
+      + "Call this before starting work to break down complex requests into steps. "
+      + "Update as you complete items. The todos are displayed in the UI.",
+    parameters: {
+      type: "object",
+      properties: {
+        todos: {
+          type: "array",
+          description: "The full task list. Each item has id, text, and status (pending, in_progress, completed, or cancelled).",
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "string", description: "Unique identifier for the todo (e.g. '1', '2')." },
+              text: { type: "string", description: "The task description." },
+              status: { type: "string", enum: ["pending", "in_progress", "completed", "cancelled"], description: "Current status of the task." },
+            },
+            required: ["id", "text", "status"],
+          },
+        },
+      },
+      required: ["todos"],
+    },
+  },
 ];
 
 const TOOL_BY_NAME = new Map(TOOLS.map((t) => [t.name, t]));
@@ -421,6 +449,11 @@ export async function runFsTool(name: string, params: Record<string, unknown>, r
     }
     throw lastErr;
   }
+  if (name === "write_todos") {
+    const todos = params.todos;
+    if (!Array.isArray(todos)) return "Error: todos must be an array.";
+    return `Todos updated (${todos.length} items).`;
+  }
   return null; // not a filesystem tool
 }
 
@@ -432,8 +465,8 @@ const SYSTEM_PROMPT = `You are an expert software developer agent running inside
 You have access to tools that let you read/write files, run commands, interact with a browser preview, and inspect the current page.
 
 ### Rules
-1. Break the user's request into steps. Use tools one at a time.
-2. After each tool call, read the result before deciding the next step.
+1. Break the user's request into steps. Use \`write_todos\` to plan and track progress.
+2. Use tools one at a time. After each tool call, read the result before deciding the next step.
 3. When you are done, call \`task_complete\` with a summary.
 4. If you encounter an error, explain what happened and suggest how to fix it.
 5. Keep responses concise — one sentence of reasoning, one tool call.
@@ -484,7 +517,7 @@ export async function agentLoop(
     ? SYSTEM_PROMPT + `\n\n### Additional context from the IDE\n${context}`
     : SYSTEM_PROMPT;
 
-  const openaiMessages: Array<{ role: string; content: string | null; tool_call_id?: string; tool_calls?: any[] }> = [];
+  const openaiMessages: Array<{ role: string; content: string | null; tool_call_id?: string; tool_calls?: any[]; reasoning_content?: string }> = [];
   // Push a system message
   openaiMessages.push({ role: "system", content: systemMsg });
 
@@ -503,16 +536,17 @@ export async function agentLoop(
           role: "assistant",
           content: null,
           tool_calls: calls,
+          ...(m.reasoning_content ? { reasoning_content: m.reasoning_content } : {}),
         });
       } catch {
-        openaiMessages.push({ role: "assistant", content: m.content });
+        openaiMessages.push({ role: "assistant", content: m.content, ...(m.reasoning_content ? { reasoning_content: m.reasoning_content } : {}) });
       }
     } else {
       openaiMessages.push(m);
     }
   }
 
-  const { text, toolCalls } = await chatDeepSeekTool(openaiMessages, TOOLS, { model: modelOpts?.model, apiKey });
+  const { text, toolCalls, reasoningContent } = await chatDeepSeekTool(openaiMessages, TOOLS, { model: modelOpts?.model, apiKey });
 
   if (toolCalls && toolCalls.length > 0) {
     const executedTools: { name: string; result: string }[] = [];
@@ -525,7 +559,7 @@ export async function agentLoop(
       // Check if this is a filesystem tool the server can execute directly.
       const fsResult = await runFsTool(fnName, params, projectRoot);
       if (fsResult !== null) {
-        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName });
+        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...(reasoningContent ? { reasoning_content: reasoningContent } : {}) });
         state.messages.push({ role: "tool", content: fsResult, tool_call_id: tc.id });
         executedTools.push({ name: fnName, result: fsResult.slice(0, 1000) });
         continue;
@@ -534,14 +568,14 @@ export async function agentLoop(
       // task_complete ends the loop.
       if (fnName === "task_complete") {
         const summary = String(params.summary || "Task completed.");
-        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName });
+        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...(reasoningContent ? { reasoning_content: reasoningContent } : {}) });
         state.messages.push({ role: "tool", content: "OK", tool_call_id: tc.id });
         return { phase: "done", reply: summary, messages: state.messages, executedTools };
       }
 
       // Browser tool — needs the renderer to execute it.
       browserTool = { name: fnName, id: tc.id, params };
-      state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName });
+      state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...(reasoningContent ? { reasoning_content: reasoningContent } : {}) });
       break; // only one browser tool per round
     }
 
@@ -555,7 +589,7 @@ export async function agentLoop(
 
   // No tool calls — final text reply.
   if (text) {
-    state.messages.push({ role: "assistant", content: text });
+    state.messages.push({ role: "assistant", content: text, ...(reasoningContent ? { reasoning_content: reasoningContent } : {}) });
   }
   return { phase: "done", reply: text || "Task completed.", messages: state.messages };
 }
@@ -582,7 +616,7 @@ export async function* agentLoopStream(
     : SYSTEM_PROMPT;
 
   const buildMessages = () => {
-    const msgs: Array<{ role: string; content: string | null; tool_call_id?: string; tool_calls?: any[] }> = [];
+    const msgs: Array<{ role: string; content: string | null; tool_call_id?: string; tool_calls?: any[]; reasoning_content?: string }> = [];
     msgs.push({ role: "system", content: systemMsg });
     for (const m of state.messages) {
       if (m.role === "tool") {
@@ -590,9 +624,9 @@ export async function* agentLoopStream(
       } else if (m.role === "assistant" && m.name) {
         try {
           const calls = JSON.parse(m.content);
-          msgs.push({ role: "assistant", content: null, tool_calls: calls });
+          msgs.push({ role: "assistant", content: null, tool_calls: calls, ...(m.reasoning_content ? { reasoning_content: m.reasoning_content } : {}) });
         } catch {
-          msgs.push({ role: "assistant", content: m.content });
+          msgs.push({ role: "assistant", content: m.content, ...(m.reasoning_content ? { reasoning_content: m.reasoning_content } : {}) });
         }
       } else {
         msgs.push(m);
@@ -645,6 +679,7 @@ export async function* agentLoopStream(
     const stream = chatDeepSeekToolStream(openaiMessages, TOOLS, { model: modelOpts?.model, apiKey });
     let streamDone = false;
     let finalText: string | null = null;
+    let finalReasoning: string | null = null;
     let finalToolCalls: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }> | null = null;
 
     for await (const chunk of stream) {
@@ -654,6 +689,7 @@ export async function* agentLoopStream(
         yield { type: "text", text: chunk.text };
       } else if (chunk.type === "done") {
         finalText = chunk.finalText ?? null;
+        finalReasoning = chunk.reasoningContent ?? null;
         finalToolCalls = chunk.toolCalls ?? null;
         streamDone = true;
       }
@@ -667,7 +703,7 @@ export async function* agentLoopStream(
     // No tool calls — final reply.
     if (!finalToolCalls || finalToolCalls.length === 0) {
       const reply = finalText || "Task completed.";
-      state.messages.push({ role: "assistant", content: reply });
+      state.messages.push({ role: "assistant", content: reply, ...(finalReasoning ? { reasoning_content: finalReasoning } : {}) });
       yield { type: "done", reply, usage: makeUsage(iter + 1) };
       return;
     }
@@ -684,7 +720,7 @@ export async function* agentLoopStream(
       if (fnName === "run_command") {
         const cmd = String(params.command || "");
         // Add assistant tool_calls message to state before pausing
-        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName });
+        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...(finalReasoning ? { reasoning_content: finalReasoning } : {}) });
         // Store the pending command so /continue can execute it after user approval
         state.pendingPermission = { toolCallId: tc.id, command: cmd };
         yield {
@@ -701,15 +737,15 @@ export async function* agentLoopStream(
       }
 
       // Filesystem tool — execute directly
-      // For write_file, capture original content before the write
+      // For write_file and delete_file, capture original content before the operation
       let originalContent: string | null = null;
-      if (fnName === "write_file") {
+      if (fnName === "write_file" || fnName === "delete_file") {
         const targetPath = path.resolve(projectRoot, String(params.path || ""));
         try { originalContent = fs.readFileSync(targetPath, "utf-8"); } catch { originalContent = null; }
       }
       const fsResult = await runFsTool(fnName, params, projectRoot);
       if (fsResult !== null) {
-        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName });
+        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...(finalReasoning ? { reasoning_content: finalReasoning } : {}) });
         state.messages.push({ role: "tool", content: fsResult, tool_call_id: tc.id });
         const isCmd = fnName === "run_command";
         yield {
@@ -730,7 +766,7 @@ export async function* agentLoopStream(
       // task_complete
       if (fnName === "task_complete") {
         const summary = String(params.summary || "Task completed.");
-        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName });
+        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...(finalReasoning ? { reasoning_content: finalReasoning } : {}) });
         state.messages.push({ role: "tool", content: "OK", tool_call_id: tc.id });
         yield { type: "done", reply: summary, usage: makeUsage(iter + 1) };
         return;

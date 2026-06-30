@@ -115,6 +115,8 @@ Respond ONLY with valid JSON in this exact format:
 
 export interface ToolCallResult {
   text: string | null;
+  /** Accumulated reasoning_content from the assistant. DeepSeek requires this passed back. */
+  reasoningContent: string | null;
   toolCalls: Array<{
     id: string;
     type: "function";
@@ -144,6 +146,7 @@ export async function chatDeepSeekTool(
   const choice = response.choices[0]?.message;
   return {
     text: choice?.content || null,
+    reasoningContent: (choice as any)?.reasoning_content || null,
     toolCalls: choice?.tool_calls as any || null,
   };
 }
@@ -157,6 +160,8 @@ export interface StreamChunk {
   text?: string;
   /** Final accumulated text content (on done). */
   finalText?: string | null;
+  /** Final accumulated reasoning_content (on done). DeepSeek requires this passed back. */
+  reasoningContent?: string | null;
   /** Final tool calls (on done). */
   toolCalls?: Array<{
     id: string;
@@ -190,6 +195,7 @@ export async function* chatDeepSeekToolStream(
   });
 
   let fullText = "";
+  let fullReasoning = "";
   const toolCalls: Map<number, { id: string; name: string; args: string }> = new Map();
 
   for await (const chunk of stream) {
@@ -198,6 +204,7 @@ export async function* chatDeepSeekToolStream(
 
     // Reasoning / thinking content (DeepSeek-R1 style)
     if (delta.reasoning_content) {
+      fullReasoning += delta.reasoning_content;
       yield { type: "thinking", text: delta.reasoning_content };
     }
 
@@ -236,6 +243,7 @@ export async function* chatDeepSeekToolStream(
   yield {
     type: "done",
     finalText: fullText || null,
+    reasoningContent: fullReasoning || null,
     toolCalls: finalToolCalls,
   };
 }
