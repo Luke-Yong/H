@@ -4,6 +4,7 @@ import FilesPanel from "./FilesPanel";
 import BrowserView from "./BrowserView";
 import type { BrowserViewHandle } from "./BrowserView";
 import TerminalPane, { type DebugConsoleEntry, type OutputEntry, type ProblemEntry, type BrowserConsoleEntry } from "./TerminalPane";
+import type { AgentTerminalBridge } from "./AgentTerminalBridge";
 import { VFile, createFile, detectLanguage, fileIconUrl } from "./fileModel";
 import { readFileFromHandle, writeFileToHandle } from "./browserFs";
 import { useResizable, ResizeHandle } from "../hooks/useResizable";
@@ -90,6 +91,8 @@ interface Props {
   onBannerAcceptFile?: (filePath: string) => void;
   /** Called when user clicks Reject on the agent diff banner */
   onBannerRejectFile?: (filePath: string) => void;
+  /** Agent ↔ terminal bridge — when agent runs a command it spawns in a real terminal */
+  agentTerminalBridge?: AgentTerminalBridge;
 }
 
 interface MarkerSnapshot {
@@ -151,7 +154,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     onBrowserTabUpdateLabel, onBrowserTabUpdateUrl, onBrowserNewTabFromLink,
     onOpenFolder, onCreateProject, onCreateFile, onOpenFile, onRefreshFs,
     terminalVisible, onCloseTerminal, onDetectUrl, debugEntries, onClearDebugEntries, outputEntries, onClearOutputEntries,
-    onOpenDevtools, devtoolsForceKey, onStatusChange, onBannerAcceptFile, onBannerRejectFile }, ref
+    onOpenDevtools, devtoolsForceKey, onStatusChange, onBannerAcceptFile, onBannerRejectFile, agentTerminalBridge }, ref
 ) {
   const [files, setFiles] = useState<VFile[]>([]);
   const [markersByFileId, setMarkersByFileId] = useState<Record<string, MarkerSnapshot[]>>({});
@@ -1920,6 +1923,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
                 browserConsoleEntries={browserConsoleMap[activeBrowserTab?.id || ""] || []}
                 onClearBrowserConsole={handleClearBrowserConsole}
                 devtoolsForceKey={devtoolsForceKey}
+                agentTerminalBridge={agentTerminalBridge}
               />
             </div>
           </>

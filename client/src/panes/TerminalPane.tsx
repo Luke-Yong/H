@@ -3,6 +3,7 @@ import { Terminal, type IMarker } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { useResizable } from "../hooks/useResizable";
+import type { AgentTerminalBridge, AgentTerminalBridgeInternal } from "./AgentTerminalBridge";
 
 const WS_URL =
   window.location.port === "5173"
@@ -53,6 +54,7 @@ interface Props {
   browserConsoleEntries?: BrowserConsoleEntry[];
   onClearBrowserConsole?: () => void;
   devtoolsForceKey?: number;
+  agentTerminalBridge?: AgentTerminalBridge;
 }
 
 type Category = "problems" | "output" | "debugConsole" | "browserConsole" | "terminal";
@@ -173,6 +175,7 @@ export default function TerminalPane({
   browserConsoleEntries = [],
   onClearBrowserConsole,
   devtoolsForceKey,
+  agentTerminalBridge,
 }: Props) {
   const panelRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -197,6 +200,8 @@ export default function TerminalPane({
   const [activeGroupIndex, setActiveGroupIndex] = useState(0);
   const activeGroupIndexRef = useRef(0);
   const pendingCreateForGroupRef = useRef(-1); // -1 = new group, >=0 = append to group
+  const agentCmdRef = useRef<{ command: string; toolCallId: string } | null>(null); // pending agent command
+  const agentTermIdRef = useRef<string | null>(null); // terminal ID for active agent command
   const cwdRef = useRef<string>("");
   const venvRef = useRef<string>("");
   const activateRef = useRef<string>("");
@@ -945,6 +950,24 @@ export default function TerminalPane({
           setActiveGroupIndex(terminalGroupsRef.current.length);
         }
         setActiveId(id);
+        // If this terminal was created for an agent command, send the command now
+        if (agentCmdRef.current) {
+          const ac = agentCmdRef.current;
+          agentTermIdRef.current = id;
+          agentCmdRef.current = null;
+          // Small delay to let the shell initialise before sending the command
+          setTimeout(() => {
+            sendToServer(id, `${ac.command}\r\n`);
+            // Track command running for error detection
+            const inst = termsRef.current.get(id);
+            if (inst) {
+              inst.commandRunning = true;
+              inst.commandSawError = false;
+              const label = getCommandLabel(ac.command);
+              if (label) setLabelById((prev) => ({ ...prev, [id]: label }));
+            }
+          }, 150);
+        }
       } else if (data.startsWith("term:out:")) {
         const rest = data.slice(9);
         const idx = rest.indexOf(":");
@@ -954,6 +977,8 @@ export default function TerminalPane({
         const clean = output
           .replace(/\x7f/g, "\x08")
           .replace(/(?<!\x1b)\[(?=[0-9?;]+[A-Za-z@])/g, "\x1b[");
+        // Forward raw text to agent bridge if this is an agent terminal
+        (agentTerminalBridge as AgentTerminalBridgeInternal)?._pushOutput(output);
         const inst = termsRef.current.get(id);
         if (inst) {
           if (inst.commandRunning && /error|exception|failed|not recognized|cannot|categoryinfo|fullyqualifiederrorid|itemnotfoundexception/i.test(clean)) {
@@ -981,6 +1006,8 @@ export default function TerminalPane({
         if (idx === -1) return;
         const id = rest.slice(0, idx);
         const code = rest.slice(idx + 1);
+        // Forward exit to agent bridge
+        (agentTerminalBridge as AgentTerminalBridgeInternal)?._pushFinish(code ? parseInt(code, 10) || -1 : -1);
         const inst = termsRef.current.get(id);
         inst?.term.writeln(`\r\n[Process exited code=${code}]`);
         setTermIds((prev) => prev.filter((x) => x !== id));
@@ -1125,6 +1152,20 @@ export default function TerminalPane({
     if (!wsConnected) return;
     requestTerminal(-1);
   }, [visible, termIds.length, requestTerminal, wsConnected]);
+
+  // Listen for agent commands from the bridge
+  useEffect(() => {
+    if (!agentTerminalBridge) return;
+    const interval = setInterval(() => {
+      if (!wsConnected) return;
+      const cmd = (agentTerminalBridge as AgentTerminalBridgeInternal)._consumeCommand();
+      if (!cmd) return;
+      // Ensure terminal pane is visible — agent commands need real terminals
+      agentCmdRef.current = { command: cmd.command, toolCallId: cmd.id };
+      requestTerminal(-1);
+    }, 100);
+    return () => clearInterval(interval);
+  }, [agentTerminalBridge, wsConnected, requestTerminal]);
 
   useEffect(() => {
     if (!activeGroupMembers.length) return;

@@ -1,0 +1,31 @@
+[
+  {
+    "role": "system",
+    "content": "You are an expert software developer agent running inside a web IDE called Harness.\nYou have access to tools that let you read/write files, run commands, interact with a browser preview, and inspect t"
+  },
+  {
+    "role": "user",
+    "content": "run python app.py in non sandbox terminal"
+  },
+  {
+    "role": "assistant",
+    "tool_calls": [
+      {
+        "id": "call_00_hdIulcfTXAaWtXnhYXU45596",
+        "fn": "run_command",
+        "args": "{\"command\": \"python app.py\"}"
+      }
+    ],
+    "reasoning_content": "The user wants me to run `python app.py` in the terminal."
+  },
+  {
+    "role": "tool",
+    "content": "Unknown browser tool: run_command",
+    "tool_call_id": "call_00_hdIulcfTXAaWtXnhYXU45596"
+  },
+  {
+    "role": "_meta",
+    "assistantWithTools": 1,
+    "missingReasoning": 0
+  }
+]

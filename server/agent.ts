@@ -11,7 +11,7 @@
 import { chatDeepSeekTool, chatDeepSeekToolStream } from "./deepseek";
 import fs from "fs";
 import path from "path";
-import { execSync } from "child_process";
+import { execSync, spawn } from "child_process";
 
 // ── Types ──
 
@@ -40,7 +40,9 @@ export interface AgentState {
   messages: AgentMessage[];
   iteration: number;
   projectRoot: string;
-  pendingPermission?: { toolCallId: string; command: string };
+  pendingPermission?: { toolCallId: string; command: string; background?: boolean };
+  /** True once the API has returned reasoning_content in any response. */
+  isReasoningModel?: boolean;
 }
 
 export interface AgentResponse {
@@ -87,6 +89,8 @@ export interface AgentSseEvent {
   usage?: { estimatedTokens: number; contextLimit: number; turns: number };
   /** The shell command that needs permission (on permission_required). */
   permissionCommand?: string;
+  /** Whether background=true was set (on permission_required, for /continue). */
+  backgroundPerm?: boolean;
 }
 
 // ── Tool registry ──
@@ -95,7 +99,8 @@ const TOOLS: ToolDef[] = [
   {
     name: "read_file",
     description:
-      "Read the full contents of a project file. Returns the file text with line numbers.",
+      "Read a file or list a directory's contents. Returns the file text with line numbers, "
+      + "or a directory listing showing files and subdirectories.",
     parameters: {
       type: "object",
       properties: {
@@ -162,9 +167,27 @@ const TOOLS: ToolDef[] = [
   {
     name: "run_command",
     description:
-      "Run a shell command in the project directory and return stdout + stderr. "
-      + "Use for running tests, linting, git, installing packages, etc. "
-      + "The command runs with a 30-second timeout.",
+      "Run a shell command in a sandbox and return stdout + stderr. "
+      + "Fast, no terminal tab, no user permission needed. "
+      + "The working directory is already the project root — do NOT use cd/pushd. "
+      + "Use for: tests, lint, git, installing packages, building, grep, etc. "
+      + "For starting servers or long-running apps use run_in_terminal instead.",
+    parameters: {
+      type: "object",
+      properties: {
+        command: { type: "string", description: "Shell command to run." },
+      },
+      required: ["command"],
+    },
+  },
+  {
+    name: "run_in_terminal",
+    description:
+      "Run a long-running command in a real terminal tab. "
+      + "User must Allow each command. The command runs in the background — you can continue working immediately. "
+      + "Output streams to the terminal card and the terminal tab. "
+      + "Use for: starting servers (python app.py, npm start, flask run), watching builds, interactive shells. "
+      + "For short commands (tests, git, install, lint) use run_command instead.",
     parameters: {
       type: "object",
       properties: {
@@ -196,6 +219,20 @@ const TOOLS: ToolDef[] = [
         path: { type: "string", description: "Path to the file or directory relative to project root." },
       },
       required: ["path"],
+    },
+  },
+  {
+    name: "rename_file",
+    description:
+      "Rename or move a file or directory. Provide the current path and the new path. "
+      + "Returns confirmation or an error message.",
+    parameters: {
+      type: "object",
+      properties: {
+        oldPath: { type: "string", description: "Current path to the file or directory relative to project root." },
+        newPath: { type: "string", description: "New path (and name) for the file or directory." },
+      },
+      required: ["oldPath", "newPath"],
     },
   },
   {
@@ -310,12 +347,97 @@ export type ToolExecutor = (
 ) => Promise<{ result: string; skipRenderer?: boolean }>;
 
 // Filesystem tools that the server can execute directly.
+
+async function runCommand(command: string, cwd: string): Promise<string> {
+  return new Promise((resolve) => {
+    const MAX_KEEP = 4000;
+    const HARD_TIMEOUT_MS = 45000;
+    const IDLE_TIMEOUT_MS = 2000; // resolve early if output stops for this long
+    let buf = "";
+    let totalChars = 0;
+    let timedOut = false;
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const proc = spawn(command, [], {
+      cwd,
+      env: process.env,
+      shell: true,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+
+    const finish = (code: number | null) => {
+      if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+      const out = buf.trimEnd();
+      let prefix = "";
+      if (totalChars > MAX_KEEP) {
+        prefix = `... (showing last ${MAX_KEEP} of ${totalChars} chars)\n`;
+      }
+      if (timedOut) {
+        prefix += `[Command timed out after ${HARD_TIMEOUT_MS / 1000}s]\n`;
+      }
+      const result = prefix + (out || "(command completed with no output)");
+      if (code !== 0 && code !== null && !timedOut) {
+        resolve(`Exit code ${code}: ${result}`.slice(0, 4400));
+      } else {
+        resolve(result);
+      }
+    };
+
+    const hardTimer = setTimeout(() => {
+      timedOut = true;
+      const isWin = process.platform === "win32";
+      proc.kill(isWin ? undefined : "SIGKILL");
+    }, HARD_TIMEOUT_MS);
+
+    // Start idle timer immediately — if no output at all within IDLE_TIMEOUT_MS, resolve.
+    // Each output chunk resets this timer, so continuous output extends it indefinitely.
+    idleTimer = setTimeout(() => {
+      const isWin = process.platform === "win32";
+      proc.kill(isWin ? undefined : "SIGKILL");
+    }, IDLE_TIMEOUT_MS);
+
+    const collect = (chunk: Buffer) => {
+      const text = chunk.toString("utf-8");
+      totalChars += text.length;
+      buf = (buf + text).slice(-MAX_KEEP);
+      // Reset idle timer — if output stops for IDLE_TIMEOUT_MS, resolve early
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        const isWin = process.platform === "win32";
+        proc.kill(isWin ? undefined : "SIGKILL");
+      }, IDLE_TIMEOUT_MS);
+    };
+
+    proc.stdout?.on("data", collect);
+    proc.stderr?.on("data", collect);
+
+    proc.on("close", (code) => {
+      clearTimeout(hardTimer);
+      finish(code);
+    });
+
+    proc.on("error", (err) => {
+      clearTimeout(hardTimer);
+      if (idleTimer) clearTimeout(idleTimer);
+      resolve(`Failed to spawn: ${err.message}`);
+    });
+  });
+}
+
 export async function runFsTool(name: string, params: Record<string, unknown>, root: string): Promise<string | null> {
   const resolve = (p: string) => path.resolve(root, p);
   if (name === "read_file") {
     const filePath = resolve(String(params.path || ""));
     if (!fs.existsSync(filePath)) return `File not found: ${params.path}`;
-    if (fs.statSync(filePath).isDirectory()) return `'${params.path}' is a directory.`;
+    if (fs.statSync(filePath).isDirectory()) {
+      const entries = fs.readdirSync(filePath, { withFileTypes: true });
+      const listing = entries
+        .filter((e) => e.name !== "node_modules" && e.name !== ".git" && !e.name.startsWith("."))
+        .map((e) => `${e.isDirectory() ? "[DIR] " : "[FILE]"} ${e.name}`)
+        .join("\n");
+      return `Directory listing for ${params.path}:\n${listing || "(empty)"}`;
+    }
     const text = fs.readFileSync(filePath, "utf-8");
     const lines = text.split("\n");
     const numbered = lines.map((l, i) => `${String(i + 1).padStart(4, " ")}| ${l}`).join("\n");
@@ -408,15 +530,7 @@ export async function runFsTool(name: string, params: Record<string, unknown>, r
     return results.join("\n") + (results.length >= MAX_MATCHES ? `\n... (truncated at ${MAX_MATCHES} results)` : "");
   }
   if (name === "run_command") {
-    try {
-      const out = execSync(String(params.command || ""), { cwd: root, encoding: "utf-8", timeout: 30000, maxBuffer: 256 * 1024 });
-      return out.slice(0, 8000) || "(command completed with no output)";
-    } catch (err: any) {
-      const stderr = err.stderr || "";
-      const stdout = err.stdout || "";
-      const msg = err.message?.split("\n")[0] || "";
-      return `Exit code ${err.status}: ${msg}\n${stdout}${stderr}`.slice(0, 4000);
-    }
+    return await runCommand(String(params.command || ""), root);
   }
   if (name === "create_directory") {
     const dirPath = resolve(String(params.path || ""));
@@ -448,6 +562,14 @@ export async function runFsTool(name: string, params: Record<string, unknown>, r
       }
     }
     throw lastErr;
+  }
+  if (name === "rename_file") {
+    const from = resolve(String(params.oldPath || ""));
+    const to = resolve(String(params.newPath || ""));
+    if (!fs.existsSync(from)) return `Not found: ${params.oldPath}`;
+    fs.mkdirSync(path.dirname(to), { recursive: true });
+    fs.renameSync(from, to);
+    return `Renamed ${params.oldPath} to ${params.newPath}.`;
   }
   if (name === "write_todos") {
     const todos = params.todos;
@@ -487,7 +609,9 @@ You have access to tools that let you read/write files, run commands, interact w
 - Use \`browser_eval\` to inspect page state programmatically.
 
 ### Terminal
-- Use \`run_command\` for git, npm, pip, tests, linting, builds, etc.
+- Use \`run_command\` for sandboxed short commands: tests, lint, git, pip, npm, builds, etc. (no permission needed, fast inline output).
+- Use \`run_in_terminal\` for long-running commands: starting servers (python app.py, npm start), watch mode, interactive shells. User must Allow, command runs in background.
+- The working directory is already the project root — do NOT use cd/pushd.
 
 Current time: ${new Date().toISOString()}
 `;
@@ -513,6 +637,9 @@ export async function agentLoop(
     return { phase: "done", reply: summary, messages: state.messages };
   }
 
+  const rc2 = (reasoning: string | null | undefined) =>
+    (reasoning || state.isReasoningModel) ? { reasoning_content: reasoning || "" } : {};
+
   const systemMsg = context
     ? SYSTEM_PROMPT + `\n\n### Additional context from the IDE\n${context}`
     : SYSTEM_PROMPT;
@@ -520,9 +647,12 @@ export async function agentLoop(
   const openaiMessages: Array<{ role: string; content: string | null; tool_call_id?: string; tool_calls?: any[]; reasoning_content?: string }> = [];
   // Push a system message
   openaiMessages.push({ role: "system", content: systemMsg });
+  let hasToolCalls = false; // guard: ensure tool msgs only follow assistant with tool_calls
 
   for (const m of state.messages) {
     if (m.role === "tool") {
+      if (!hasToolCalls) continue; // skip orphaned tool message
+      hasToolCalls = false;
       openaiMessages.push({
         role: "tool",
         content: m.content,
@@ -536,17 +666,20 @@ export async function agentLoop(
           role: "assistant",
           content: null,
           tool_calls: calls,
-          ...(m.reasoning_content ? { reasoning_content: m.reasoning_content } : {}),
+          ...(m.reasoning_content || state.isReasoningModel ? { reasoning_content: m.reasoning_content || "" } : {}),
         });
+        hasToolCalls = true;
       } catch {
-        openaiMessages.push({ role: "assistant", content: m.content, ...(m.reasoning_content ? { reasoning_content: m.reasoning_content } : {}) });
+        openaiMessages.push({ role: "assistant", content: m.content, ...(m.reasoning_content || state.isReasoningModel ? { reasoning_content: m.reasoning_content || "" } : {}) });
       }
     } else {
+      hasToolCalls = false;
       openaiMessages.push(m);
     }
   }
 
   const { text, toolCalls, reasoningContent } = await chatDeepSeekTool(openaiMessages, TOOLS, { model: modelOpts?.model, apiKey });
+  if (reasoningContent != null) state.isReasoningModel = true;
 
   if (toolCalls && toolCalls.length > 0) {
     const executedTools: { name: string; result: string }[] = [];
@@ -556,10 +689,17 @@ export async function agentLoop(
       const fnName = tc.function.name;
       const params = (() => { try { return JSON.parse(tc.function.arguments); } catch { return {}; } })();
 
+      // Capture original content before write_file / delete_file for undo support
+      let originalContent: string | null = null;
+      if (fnName === "write_file" || fnName === "delete_file") {
+        const targetPath = path.resolve(projectRoot, String(params.path || ""));
+        try { originalContent = fs.readFileSync(targetPath, "utf-8"); } catch { originalContent = null; }
+      }
+
       // Check if this is a filesystem tool the server can execute directly.
       const fsResult = await runFsTool(fnName, params, projectRoot);
       if (fsResult !== null) {
-        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...(reasoningContent ? { reasoning_content: reasoningContent } : {}) });
+        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc2(reasoningContent) });
         state.messages.push({ role: "tool", content: fsResult, tool_call_id: tc.id });
         executedTools.push({ name: fnName, result: fsResult.slice(0, 1000) });
         continue;
@@ -568,14 +708,14 @@ export async function agentLoop(
       // task_complete ends the loop.
       if (fnName === "task_complete") {
         const summary = String(params.summary || "Task completed.");
-        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...(reasoningContent ? { reasoning_content: reasoningContent } : {}) });
+        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc2(reasoningContent) });
         state.messages.push({ role: "tool", content: "OK", tool_call_id: tc.id });
         return { phase: "done", reply: summary, messages: state.messages, executedTools };
       }
 
       // Browser tool — needs the renderer to execute it.
       browserTool = { name: fnName, id: tc.id, params };
-      state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...(reasoningContent ? { reasoning_content: reasoningContent } : {}) });
+      state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc2(reasoningContent) });
       break; // only one browser tool per round
     }
 
@@ -589,7 +729,7 @@ export async function agentLoop(
 
   // No tool calls — final text reply.
   if (text) {
-    state.messages.push({ role: "assistant", content: text, ...(reasoningContent ? { reasoning_content: reasoningContent } : {}) });
+    state.messages.push({ role: "assistant", content: text, ...rc2(reasoningContent) });
   }
   return { phase: "done", reply: text || "Task completed.", messages: state.messages };
 }
@@ -610,7 +750,7 @@ export async function* agentLoopStream(
     yield { type: "error", error: "No API key configured. Set an API key in the Harness UI." };
     return;
   }
-  const MAX_ITERS = 15;
+  const MAX_ITERS = 50;
   const systemMsg = context
     ? SYSTEM_PROMPT + `\n\n### Additional context from the IDE\n${context}`
     : SYSTEM_PROMPT;
@@ -618,17 +758,22 @@ export async function* agentLoopStream(
   const buildMessages = () => {
     const msgs: Array<{ role: string; content: string | null; tool_call_id?: string; tool_calls?: any[]; reasoning_content?: string }> = [];
     msgs.push({ role: "system", content: systemMsg });
+    let hasToolCalls = false; // guard: ensure tool msgs only follow assistant with tool_calls
     for (const m of state.messages) {
       if (m.role === "tool") {
+        if (!hasToolCalls) continue; // skip orphaned tool message — no preceding assistant with tool_calls
+        hasToolCalls = false;
         msgs.push({ role: "tool", content: m.content, tool_call_id: m.tool_call_id });
       } else if (m.role === "assistant" && m.name) {
         try {
           const calls = JSON.parse(m.content);
-          msgs.push({ role: "assistant", content: null, tool_calls: calls, ...(m.reasoning_content ? { reasoning_content: m.reasoning_content } : {}) });
+          msgs.push({ role: "assistant", content: null, tool_calls: calls, ...(m.reasoning_content || state.isReasoningModel ? { reasoning_content: m.reasoning_content || "" } : {}) });
+          hasToolCalls = true;
         } catch {
-          msgs.push({ role: "assistant", content: m.content, ...(m.reasoning_content ? { reasoning_content: m.reasoning_content } : {}) });
+          msgs.push({ role: "assistant", content: m.content, ...(m.reasoning_content || state.isReasoningModel ? { reasoning_content: m.reasoning_content || "" } : {}) });
         }
       } else {
+        hasToolCalls = false;
         msgs.push(m);
       }
     }
@@ -637,15 +782,18 @@ export async function* agentLoopStream(
 
   // Track whether we've already warned about history length
   // (only warn once per session to avoid spam).
-  let historyWarned = false;
   let turnsWarned = false;
   let finalEstTokens = 0;
 
   const makeUsage = (turns: number) => ({
     estimatedTokens: finalEstTokens,
-    contextLimit: 8192,
+    contextLimit: 1_000_000,
     turns,
   });
+
+  // ── Helper: attach reasoning_content if this is a reasoning model ──
+  const rc = (reasoning: string | null | undefined) =>
+    (reasoning || state.isReasoningModel) ? { reasoning_content: reasoning || "" } : {};
 
   for (let iter = 0; iter < MAX_ITERS; iter++) {
     state.iteration++;
@@ -657,17 +805,8 @@ export async function* agentLoopStream(
     const estTokens = Math.round(totalChars / 4);
     finalEstTokens = estTokens;
 
-    // Warn when approaching the DeepSeek context limit (~8K for deepseek-chat).
-    if (!historyWarned && estTokens > 4500) {
-      historyWarned = true;
-      yield {
-        type: "warning",
-        warning: `Conversation history is ~${estTokens} tokens. Consider starting a "New Task" if the agent seems to lose context or you're starting a different topic.`,
-      };
-    }
-
     // Warn when approaching the iteration limit.
-    if (!turnsWarned && iter >= 8) {
+    if (!turnsWarned && iter >= 20) {
       turnsWarned = true;
       yield {
         type: "warning",
@@ -690,6 +829,7 @@ export async function* agentLoopStream(
       } else if (chunk.type === "done") {
         finalText = chunk.finalText ?? null;
         finalReasoning = chunk.reasoningContent ?? null;
+        if (chunk.reasoningContent != null) state.isReasoningModel = true;
         finalToolCalls = chunk.toolCalls ?? null;
         streamDone = true;
       }
@@ -700,12 +840,14 @@ export async function* agentLoopStream(
       return;
     }
 
-    // No tool calls — final reply.
+    // No tool calls — assistant text reply. Push it and continue the loop
+    // so the agent can keep working if it has more to say.
     if (!finalToolCalls || finalToolCalls.length === 0) {
-      const reply = finalText || "Task completed.";
-      state.messages.push({ role: "assistant", content: reply, ...(finalReasoning ? { reasoning_content: finalReasoning } : {}) });
-      yield { type: "done", reply, usage: makeUsage(iter + 1) };
-      return;
+      const reply = finalText || "OK.";
+      state.messages.push({ role: "assistant", content: reply, ...rc(finalReasoning) });
+      yield { type: "text", text: reply };
+      // Don't end here — the agent may call tools next iteration
+      continue;
     }
 
     // Process tool calls
@@ -716,21 +858,51 @@ export async function* agentLoopStream(
       const fnName = tc.function.name;
       const params = (() => { try { return JSON.parse(tc.function.arguments); } catch { return {}; } })();
 
-      // Permission check for run_command
+      // run_command: sandboxed — execute directly, no permission needed
       if (fnName === "run_command") {
         const cmd = String(params.command || "");
-        // Add assistant tool_calls message to state before pausing
-        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...(finalReasoning ? { reasoning_content: finalReasoning } : {}) });
-        // Store the pending command so /continue can execute it after user approval
-        state.pendingPermission = { toolCallId: tc.id, command: cmd };
+        // Yield tool_start immediately so the client shows the spinner
+        yield { type: "tool_start", toolName: fnName, toolParams: params };
+        // Then run the command (client sees "Wait a moment..." while this runs)
+        const fsResult = await runFsTool(fnName, params, projectRoot);
+        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
+        state.messages.push({ role: "tool", content: fsResult || "", tool_call_id: tc.id });
         yield {
-          type: "tool_start", toolName: fnName, toolParams: params,
+          type: "tool_end",
+          toolName: fnName,
+          toolResult: "Command completed",
+          toolSandbox: fsResult || "",
+          executedTools: [{ name: fnName, result: (fsResult || "").slice(0, 500) }],
         };
+        executedTools.push({ name: fnName, result: (fsResult || "").slice(0, 1000) });
+        continue;
+      }
+
+      // run_in_terminal: requires user permission (opens real terminal tab)
+      if (fnName === "run_in_terminal") {
+        const cmd = String(params.command || "");
+        // Add assistant tool_calls message for ALL remaining tools in this round.
+        // DeepSeek requires a tool response for every tool_call_id — push null responses
+        // for tools that will be handled after /continue (or dropped).
+        const allToolCalls = finalToolCalls.map((t) => ({
+          id: t.id, type: "function", function: { name: t.function.name, arguments: t.function.arguments },
+        }));
+        state.messages.push({ role: "assistant", content: JSON.stringify(allToolCalls), name: fnName, ...rc(finalReasoning) });
+        // For tools that won't execute now (run_in_terminal pauses, others dropped),
+        // push dummy tool results so DeepSeek doesn't complain about missing responses.
+        // The actual terminal tool result will be pushed by /stream/continue.
+        for (const t of finalToolCalls.slice(1)) {
+          state.messages.push({ role: "tool", content: "Deferred.", tool_call_id: t.id });
+        }
+        // Store the pending command so /continue can execute it after user approval
+        state.pendingPermission = { toolCallId: tc.id, command: cmd, background: true };
+        yield { type: "tool_start", toolName: fnName, toolParams: params };
         yield {
           type: "permission_required",
           toolCallId: tc.id,
           toolName: fnName,
           permissionCommand: cmd,
+          backgroundPerm: true,
           executedTools,
         };
         return;
@@ -745,7 +917,7 @@ export async function* agentLoopStream(
       }
       const fsResult = await runFsTool(fnName, params, projectRoot);
       if (fsResult !== null) {
-        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...(finalReasoning ? { reasoning_content: finalReasoning } : {}) });
+        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
         state.messages.push({ role: "tool", content: fsResult, tool_call_id: tc.id });
         const isCmd = fnName === "run_command";
         yield {
@@ -766,7 +938,7 @@ export async function* agentLoopStream(
       // task_complete
       if (fnName === "task_complete") {
         const summary = String(params.summary || "Task completed.");
-        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...(finalReasoning ? { reasoning_content: finalReasoning } : {}) });
+        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
         state.messages.push({ role: "tool", content: "OK", tool_call_id: tc.id });
         yield { type: "done", reply: summary, usage: makeUsage(iter + 1) };
         return;
@@ -774,7 +946,7 @@ export async function* agentLoopStream(
 
       // Browser tool
       browserTool = { name: fnName, id: tc.id, params };
-      state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName });
+      state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
       break;
     }
 
@@ -807,6 +979,10 @@ export function addToolResultStream(sessionId: string, toolCallId: string, resul
   if (!session) return undefined;
   session.messages.push({ role: "tool", content: result, tool_call_id: toolCallId });
   return session;
+}
+
+export function deleteAgentSession(sessionId: string): boolean {
+  return agentSessions.delete(sessionId);
 }
 
 // ── Session management ──

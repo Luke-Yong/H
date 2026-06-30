@@ -1,6 +1,7 @@
 import { useRef, useEffect, useState, useCallback, useMemo } from "react";
 import { flushSync } from "react-dom";
 import type { LoopEvent } from "../../../server/loop";
+import type { AgentTerminalBridge } from "./AgentTerminalBridge";
 
 // ── Rich message types for the unified agent chat ──
 
@@ -48,8 +49,8 @@ interface FileChange {
   /** Whether this change has been accepted or rejected. */
   accepted?: boolean;
   rejected?: boolean;
-  /** Kind of change: "write" (default), "create" (new dir), "delete". */
-  changeType?: "write" | "create" | "delete";
+  /** Kind of change: "write" (default), "create" (new dir), "delete", "rename". */
+  changeType?: "write" | "create" | "delete" | "rename";
 }
 
 interface ChatThread {
@@ -83,7 +84,9 @@ function loadThreads(key: string): ChatThread[] {
   } catch { return []; }
 }
 function saveThreads(key: string, threads: ChatThread[]) {
-  localStorage.setItem(key, JSON.stringify(threads));
+  try {
+    localStorage.setItem(key, JSON.stringify(threads));
+  } catch { /* quota exceeded or serialization error — silently ignore */ }
 }
 
 function getStoredModel(): string {
@@ -127,11 +130,13 @@ interface Props {
   acceptEditorChange?: (fsPath: string) => void;
   /** Reject agent change on a file (restores original in Monaco). */
   rejectEditorChange?: (fsPath: string) => void;
+  /** Agent ↔ terminal bridge — when agent runs a command it spawns in a real terminal */
+  agentTerminalBridge?: AgentTerminalBridge;
 }
 
 // ── Component ──
 
-export default function AgentConsole({ events, goal, onGoalChange, onRun, connected, getConsoleContext, executeBrowserAction, getProjectFiles, getFsBasePath, refreshEditor, applyAgentFileChanges, onRefreshFs, setAgentFileActionRef, openEditorFile, acceptEditorChange, rejectEditorChange }: Props) {
+export default function AgentConsole({ events, goal, onGoalChange, onRun, connected, getConsoleContext, executeBrowserAction, getProjectFiles, getFsBasePath, refreshEditor, applyAgentFileChanges, onRefreshFs, setAgentFileActionRef, openEditorFile, acceptEditorChange, rejectEditorChange, agentTerminalBridge }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<ConsoleMessage[]>([]);
@@ -144,6 +149,43 @@ export default function AgentConsole({ events, goal, onGoalChange, onRun, connec
   // Agent completion footer state
   const [agentStatus, setAgentStatus] = useState<"idle" | "completed" | "stopped">("idle");
   const [agentUsage, setAgentUsage] = useState<{ estimatedTokens: number; contextLimit: number; turns: number } | null>(null);
+  // Track which terminal outputs are collapsed (keyed by message id)
+  const [collapsedOutputs, setCollapsedOutputs] = useState<Set<string>>(new Set());
+  // Track agent terminal output streaming from the bridge
+  const agentTermMsgIdRef = useRef<string | null>(null);
+  const agentTermOutputRef = useRef<string>("");
+
+  // Subscribe to terminal output from the bridge
+  useEffect(() => {
+    if (!agentTerminalBridge) return;
+    const unsubOut = agentTerminalBridge.onOutput((text) => {
+      agentTermOutputRef.current += text;
+      const msgId = agentTermMsgIdRef.current;
+      if (msgId) {
+        setMessages((prev) => {
+          const next = [...prev];
+          const idx = next.findIndex((m) => m.id === msgId);
+          if (idx >= 0) next[idx] = { ...next[idx], sandboxOutput: agentTermOutputRef.current };
+          return next;
+        });
+      }
+    });
+    const unsubFin = agentTerminalBridge.onFinish((exitCode) => {
+      agentTermOutputRef.current += `\n[Process exited code=${exitCode}]`;
+      const msgId = agentTermMsgIdRef.current;
+      if (msgId) {
+        setMessages((prev) => {
+          const next = [...prev];
+          const idx = next.findIndex((m) => m.id === msgId);
+          if (idx >= 0) next[idx] = { ...next[idx], sandboxOutput: agentTermOutputRef.current, state: undefined };
+          return next;
+        });
+        agentTermMsgIdRef.current = null;
+        agentTermOutputRef.current = "";
+      }
+    });
+    return () => { unsubOut(); unsubFin(); };
+  }, [agentTerminalBridge]);
 
   // ── Model selection ──
   interface ModelPreset {
@@ -370,12 +412,20 @@ export default function AgentConsole({ events, goal, onGoalChange, onRun, connec
   }, [threads]);
 
   const deleteThread = useCallback((id: string) => {
-    setThreads((prev) => prev.filter((t) => t.id !== id));
+    setThreads((prev) => {
+      const next = prev.filter((t) => t.id !== id);
+      // Immediately flush to localStorage to prevent stale-data races
+      saveThreads(threadKey, next);
+      return next;
+    });
     if (activeThreadId === id) {
       setActiveThreadId("");
       setMessages([]);
+      preRoundRef.current = [];
     }
-  }, [activeThreadId]);
+    // Clear server-side agent session for this thread
+    fetch(`/api/chat/agent/sessions/${encodeURIComponent(id)}`, { method: "DELETE" }).catch(() => {});
+  }, [activeThreadId, threadKey]);
 
   // Update thread title from first user message
   const updateThreadTitle = useCallback((content: string) => {
@@ -645,11 +695,21 @@ export default function AgentConsole({ events, goal, onGoalChange, onRun, connec
               path: p, name, changeType: "create",
               status: "done",
             });
+          } else if (tn === "rename_file" && evt.toolParams?.oldPath) {
+            const oldP = String(evt.toolParams.oldPath);
+            const newP = String(evt.toolParams.newPath || "");
+            const name = oldP.split(/[/\\]/).pop() || oldP;
+            fileChangesRef.current.push({
+              path: oldP, name, changeType: "rename",
+              status: "done",
+              content: newP, // stash new path in content for accept
+              originalContent: oldP, // stash old path in originalContent for reject
+            });
           } else if (tn === "write_todos" && Array.isArray(evt.toolParams?.todos)) {
-            todosRef.current = (evt.toolParams.todos as any[]).map((t: any) => ({
+            todosRef.current = (evt.toolParams.todos as any[]).map((t: any): TodoItem => ({
               id: String(t.id || ""),
               text: String(t.text || ""),
-              status: String(t.status || "pending"),
+              status: (["pending", "in_progress", "completed", "cancelled"].includes(String(t.status)) ? String(t.status) : "pending") as TodoItem["status"],
             }));
           }
           // End the assistant message's streaming state
@@ -669,13 +729,21 @@ export default function AgentConsole({ events, goal, onGoalChange, onRun, connec
           }
           currentThought = "";
           currentText = "";
-          const isCmd = evt.toolName === "run_command";
+          const isTerminal = evt.toolName === "run_in_terminal";
           const id = nextId();
           toolIds.push(id);
           streamToolRef.current.set(id, { name: evt.toolName, params: evt.toolParams || {} });
-          flushSync(() => {
-            pushRaw(id, { role: "tool", content: "", toolName: evt.toolName, toolParams: evt.toolParams, state: "waiting", sandboxOutput: isCmd ? "" : undefined });
-          });
+          // For run_in_terminal: defer card creation to permission_required event.
+          // The command will NOT run until user clicks Allow.
+          if (!isTerminal) {
+            flushSync(() => {
+              pushRaw(id, { role: "tool", content: "", toolName: evt.toolName, toolParams: evt.toolParams, state: "waiting", sandboxOutput: evt.toolName === "run_command" ? "" : undefined });
+            });
+          } else {
+            // Store the command so permission_required can use it (does not run yet)
+            agentTermMsgIdRef.current = id;
+            agentTermOutputRef.current = "";
+          }
         } else if (evt.type === "tool_end") {
           // Switch file changes from streaming to done — do NOT auto-apply.
           // User must manually Accept/Reject each change.
@@ -706,16 +774,21 @@ export default function AgentConsole({ events, goal, onGoalChange, onRun, connec
             }
             // Refresh file tree — write_file already wrote to disk in the agent loop.
             onRefreshFs?.();
-          } else if (tn === "delete_file" || tn === "create_directory") {
+          } else if (tn === "delete_file" || tn === "create_directory" || tn === "rename_file") {
             onRefreshFs?.();
           }
           const id = toolIds[toolIds.length - 1];
-          const isCmd = evt.toolName === "run_command";
+          const isTerminal = evt.toolName === "run_in_terminal";
           if (id) {
             setMessages((prev) => {
               const next = [...prev];
               const idx = next.findIndex((m) => m.id === id);
-              if (idx >= 0) next[idx] = { ...next[idx], content: isCmd ? "" : (evt.toolResult || ""), state: undefined, sandboxOutput: evt.toolSandbox || undefined };
+              if (idx >= 0) {
+                const patch: Partial<ConsoleMessage> = { content: isTerminal ? "" : (evt.toolResult || ""), state: undefined };
+                // Only override sandboxOutput if the server actually sent one
+                if (evt.toolSandbox != null) patch.sandboxOutput = evt.toolSandbox;
+                next[idx] = { ...next[idx], ...patch };
+              }
               return next;
             });
           }
@@ -734,11 +807,12 @@ export default function AgentConsole({ events, goal, onGoalChange, onRun, connec
           }
           currentThought = "";
           currentText = "";
-          const id = nextId();
+          // Reuse the ID already reserved by tool_start (stored in toolIds / agentTermMsgIdRef)
+          const id = agentTermMsgIdRef.current || toolIds[toolIds.length - 1];
           pushRaw(id, {
             role: "tool",
             content: "",
-            toolName: evt.toolName || "run_command",
+            toolName: evt.toolName || "run_in_terminal",
             toolParams: evt.toolParams,
             state: "waiting",
             permissionPrompt: `Allow: ${(evt as any).permissionCommand || "unknown command"}`,
@@ -807,14 +881,27 @@ export default function AgentConsole({ events, goal, onGoalChange, onRun, connec
         permissionResolveRef.current = resolve;
       });
       permissionResolveRef.current = null;
-      const lastToolId = toolIds[toolIds.length - 1];
-      if (lastToolId) {
-        setMessages((prev) => {
-          const next = [...prev];
-          const idx = next.findIndex((m) => m.id === lastToolId);
-          if (idx >= 0) next[idx] = { ...next[idx], state: undefined, permissionPrompt: undefined };
-          return next;
-        });
+      const permMsgId = agentTermMsgIdRef.current || toolIds[toolIds.length - 1];
+      if (permMsgId) {
+        if (granted) {
+          // Bridge the command to TerminalPane — opens a real terminal tab
+          const cmd = String(streamToolRef.current.get(permMsgId)?.params?.command || "");
+          if (cmd && agentTerminalBridge) {
+            agentTerminalBridge.setCommand({ id: permMsgId, command: cmd });
+            agentTermOutputRef.current = "";
+          }
+          setMessages((prev) => {
+            const next = [...prev];
+            const idx = next.findIndex((m) => m.id === permMsgId);
+            if (idx >= 0) next[idx] = { ...next[idx], permissionPrompt: undefined };
+            return next;
+          });
+        } else {
+          // Denied — remove the tool card
+          setMessages((prev) => prev.filter((m) => m.id !== permMsgId));
+          agentTermMsgIdRef.current = null;
+          agentTermOutputRef.current = "";
+        }
       }
       if (!signal.aborted) {
         isPermission = false;
@@ -866,6 +953,22 @@ export default function AgentConsole({ events, goal, onGoalChange, onRun, connec
               if (evt.usage) setAgentUsage(evt.usage);
               onRefreshFs?.();
               setLoading(false);
+            } else if (evt.type === "tool_end") {
+              // Update the tool_start message (skip the permission prompt, which is last in toolIds)
+              const toolId = toolIds.length >= 2 ? toolIds[toolIds.length - 2] : toolIds[toolIds.length - 1];
+              if (toolId) {
+                setMessages((prev) => {
+                  const next = [...prev];
+                  const idx = next.findIndex((m) => m.id === toolId);
+                  if (idx >= 0) {
+                    const patch: Partial<ConsoleMessage> = { content: "", state: undefined };
+                    // Only override sandboxOutput if the server actually sent one
+                    if (evt.toolSandbox != null) patch.sandboxOutput = evt.toolSandbox;
+                    next[idx] = { ...next[idx], ...patch };
+                  }
+                  return next;
+                });
+              }
             } else if (evt.type === "warning") {
               push({ role: "system", content: `\u26A0 ${evt.warning || ""}`, isWarning: true });
             } else if (evt.type === "error") {
@@ -970,7 +1073,16 @@ export default function AgentConsole({ events, goal, onGoalChange, onRun, connec
 
   // helper: push a message with explicit id
   const pushRaw = useCallback((id: string, msg: Omit<ConsoleMessage, "id" | "when">) => {
-    setMessages((prev) => [...prev, { ...msg, id, when: Date.now() }]);
+    setMessages((prev) => {
+      // Update if message with this ID already exists (prevents "same key" errors)
+      const idx = prev.findIndex((m) => m.id === id);
+      if (idx >= 0) {
+        const next = [...prev];
+        next[idx] = { ...msg, id, when: Date.now() };
+        return next;
+      }
+      return [...prev, { ...msg, id, when: Date.now() }];
+    });
   }, []);
 
   // ── Send / Stop ──
@@ -1199,9 +1311,15 @@ export default function AgentConsole({ events, goal, onGoalChange, onRun, connec
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ path: resolved }),
       }).then((r) => { if (r.ok) onRefreshFs?.(); }).catch(() => {});
+    } else if (fc.changeType === "rename" && fc.content) {
+      // Rename already happened on disk (server executes immediately).
+      // Just acknowledge and refresh.
+      onRefreshFs?.();
     }
     // For "create" — directory already exists, just acknowledge.
     if (fc.changeType !== "delete") onRefreshFs?.();
+    // Sync editor: clear diff decorations for this file
+    acceptEditorChange?.(fc.path);
     setMessages((prev) => {
       const next = [...prev];
       const idx = next.findIndex((m) => m.id === msgId);
@@ -1210,7 +1328,7 @@ export default function AgentConsole({ events, goal, onGoalChange, onRun, connec
       }
       return next;
     });
-  }, [applyEditorFiles, onRefreshFs]);
+  }, [acceptEditorChange, applyEditorFiles, onRefreshFs]);
 
   const rejectFile = useCallback((fc: FileChange, msgId: string) => {
     setMessages((prev) => {
@@ -1231,7 +1349,18 @@ export default function AgentConsole({ events, goal, onGoalChange, onRun, connec
       }
       const hasOriginal = fc.originalContent != null;
       try {
-        if (hasOriginal) {
+        if (fc.changeType === "rename" && fc.content) {
+          // Rename it back: newPath -> oldPath
+          let newResolved = fc.content;
+          if (root && !/^[a-zA-Z]:/.test(newResolved) && !newResolved.startsWith("/")) {
+            newResolved = root + "/" + newResolved.replace(/\\/g, "/");
+          }
+          const res = await fetch("/api/fs/rename", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ oldPath: newResolved, newPath: resolved }),
+          });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        } else if (hasOriginal) {
           const res = await fetch("/api/fs/write", {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ path: resolved, content: fc.originalContent }),
@@ -1269,9 +1398,11 @@ export default function AgentConsole({ events, goal, onGoalChange, onRun, connec
       : fc.rejected ? "close"
       : ct === "delete" ? "trash"
       : ct === "create" ? "folder-opened"
+      : ct === "rename" ? "arrow-right"
       : "diff";
     const actionLabel = ct === "delete" ? (fc.accepted ? "Deleted" : "Kept")
       : ct === "create" ? (fc.accepted ? "Created" : "Skipped")
+      : ct === "rename" ? (fc.accepted ? "Renamed" : "Kept")
       : fc.accepted ? "Applied" : "Dismissed";
     return (
       <div className={`agent-fc${isStreaming ? " streaming" : ""}${isResolved ? " resolved" : ""}${fc.accepted ? " accepted" : ""}${fc.rejected ? " rejected" : ""}`}>
@@ -1303,6 +1434,13 @@ export default function AgentConsole({ events, goal, onGoalChange, onRun, connec
                 <span className="agent-fc-added">New</span>
               </span>
             )}
+            {ct === "rename" && fc.content && (
+              <span className="agent-fc-delta">
+                <span className="agent-fc-removed">{fc.name}</span>
+                <span className="agent-fc-arrow">&rarr;</span>
+                <span className="agent-fc-added">{fc.content.split(/[/\\]/).pop()}</span>
+              </span>
+            )}
             {ct === "write" && (
               <button className="agent-fc-diff-btn" title="Open diff" onClick={(e) => { e.stopPropagation(); openEditorFile?.(fc.path); }}><i className="codicon codicon-diff" /></button>
             )}
@@ -1324,12 +1462,16 @@ export default function AgentConsole({ events, goal, onGoalChange, onRun, connec
 
   const TodoCard = ({ todos }: { todos: TodoItem[] }) => {
     if (!todos || todos.length === 0) return null;
+    const doneCount = todos.filter((t) => t.status === "completed" || t.status === "cancelled").length;
     return (
       <div className="agent-todo-card">
-        <div className="agent-todo-header"><i className="codicon codicon-checklist" /> Tasks</div>
+        <div className="agent-todo-header">
+          <i className="codicon codicon-checklist" />
+          <span>{doneCount}/{todos.length} done</span>
+        </div>
         {todos.map((t) => {
           let icon = "circle-outline";
-          if (t.status === "in_progress") icon = "loading";
+          if (t.status === "in_progress") icon = "loading~spin";
           else if (t.status === "completed") icon = "pass-filled";
           else if (t.status === "cancelled") icon = "circle-slash";
           return (
@@ -1425,15 +1567,17 @@ export default function AgentConsole({ events, goal, onGoalChange, onRun, connec
             )}
             {/* Sandbox only shown inside tool card for tool messages; standalone for non-tool */}
             {msg.role !== "tool" && msg.sandboxOutput && (
-              <div className="agent-sandbox">
-                <div className="agent-sandbox-header">
-                  <i className={`codicon codicon-${msg.permissionPrompt ? "shield" : "terminal"}`} />
-                  <span>{msg.permissionPrompt ? "Terminal (needs permission)" : "Sandbox"}</span>
+              <div className="agent-terminal">
+                <div className="agent-terminal-header">
+                  <i className="codicon codicon-terminal" />
+                  <span className="agent-terminal-cwd" title={projectPath}>{projectPath || "~"}</span>
+                  <span className="agent-terminal-label">terminal</span>
+                  <i className="codicon codicon-check agent-terminal-done" />
                 </div>
-                <pre className="agent-sandbox-out">{msg.sandboxOutput}</pre>
+                <pre className="agent-terminal-out">{msg.sandboxOutput}</pre>
               </div>
             )}
-            {msg.permissionPrompt && (
+            {msg.permissionPrompt && msg.role !== "tool" && (
               <div className="agent-perms">
                 <i className="codicon codicon-warning" />
                 <span>{msg.permissionPrompt}</span>
@@ -1477,9 +1621,9 @@ export default function AgentConsole({ events, goal, onGoalChange, onRun, connec
               <div className={`agent-tool-card${msg.state === "waiting" ? " streaming" : ""}`}>
                 <div className="agent-tool-card-header">
                   {msg.state === "waiting" ? <span className="agent-spinner" /> : <i className="codicon codicon-check" />}
-                  <i className={`codicon codicon-${msg.toolName.startsWith("browser_") ? "globe" : msg.toolName === "run_command" ? "terminal" : msg.toolName === "read_file" ? "file-code" : msg.toolName === "grep" ? "search" : msg.toolName === "list_files" || msg.toolName === "search_files" ? "folder-opened" : "tools"}`} />
+                  <i className={`codicon codicon-${msg.toolName.startsWith("browser_") ? "globe" : msg.toolName === "run_in_terminal" ? "terminal" : msg.toolName === "read_file" ? "file-code" : msg.toolName === "grep" ? "search" : msg.toolName === "list_files" || msg.toolName === "search_files" ? "folder-opened" : "tools"}`} />
                   <span className="agent-tool-card-name">{msg.toolName.replace("browser_", "").replace(/_/g, " ")}</span>
-                  {msg.toolParams && (
+                  {msg.toolParams && msg.toolName !== "run_in_terminal" && (
                     <span className="agent-tool-card-args">
                       {Object.entries(msg.toolParams).map(([k, v]) => (
                         <span key={k}>{k}: {String(v).slice(0, 60)}</span>
@@ -1487,16 +1631,73 @@ export default function AgentConsole({ events, goal, onGoalChange, onRun, connec
                     </span>
                   )}
                 </div>
-                {msg.sandboxOutput && (
-                  <div className="agent-sandbox">
-                    <div className="agent-sandbox-header">
-                      <i className={`codicon codicon-${msg.toolName === "run_command" ? "shield" : "terminal"}`} />
-                      <span>{msg.toolName === "run_command" ? "Terminal (non-sandbox)" : "Sandbox"}</span>
+                {/* ── Terminal block for run_in_terminal ── */}
+                {msg.toolName === "run_in_terminal" && (
+                  <div className="agent-terminal">
+                    <div className="agent-terminal-header">
+                      <i className="codicon codicon-terminal" />
+                      <span className="agent-terminal-cwd" title={projectPath}>{projectPath || "~"}</span>
+                      <span className="agent-terminal-label">terminal</span>
+                      {msg.permissionPrompt ? (
+                        <i className="codicon codicon-warning agent-terminal-warn" />
+                      ) : msg.state === "waiting" ? (
+                        <span className="agent-spinner agent-terminal-spinner" />
+                      ) : (
+                        <i className="codicon codicon-check agent-terminal-done" />
+                      )}
                     </div>
-                    <pre className="agent-sandbox-out">{msg.sandboxOutput}</pre>
+                    <div className="agent-terminal-cmdline">
+                      <span className="agent-terminal-prompt">$</span>
+                      <span className="agent-terminal-cmd">{String(msg.toolParams?.command || "")}</span>
+                    </div>
+                    {msg.sandboxOutput != null && (
+                      <>
+                        {!collapsedOutputs.has(msg.id) ? (
+                          <pre
+                            className="agent-terminal-out"
+                            onClick={() => {
+                              if (msg.state !== "waiting") {
+                                setCollapsedOutputs((prev) => { const next = new Set(prev); next.add(msg.id); return next; });
+                              }
+                            }}
+                          >{msg.sandboxOutput}</pre>
+                        ) : (
+                          <div
+                            className="agent-terminal-out-collapsed"
+                            onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.delete(msg.id); return next; })}
+                          >
+                            <i className="codicon codicon-chevron-right" />
+                            <span>Output ({msg.sandboxOutput.split("\n").length} lines)</span>
+                          </div>
+                        )}
+                      </>
+                    )}
+                    {/* Permission prompt at the bottom of the terminal body */}
+                    {msg.permissionPrompt && (
+                      <div className="agent-terminal-perms">
+                        <i className="codicon codicon-warning" />
+                        <span>{msg.permissionPrompt}</span>
+                        <div className="agent-perms-actions">
+                          <button className="agent-btn agent-btn-accept" onClick={() => permissionResolveRef.current?.(true)}>Allow</button>
+                          <button className="agent-btn agent-btn-reject" onClick={() => permissionResolveRef.current?.(false)}>Deny</button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
-                {msg.content && !msg.sandboxOutput && (
+                {/* ── Sandbox output for run_command and other tools ── */}
+                {msg.toolName !== "run_in_terminal" && msg.sandboxOutput && (
+                  <div className="agent-terminal">
+                    <div className="agent-terminal-header">
+                      <i className="codicon codicon-terminal" />
+                      <span className="agent-terminal-cwd" title={projectPath}>{projectPath || "~"}</span>
+                      <span className="agent-terminal-label">sandbox</span>
+                      <i className="codicon codicon-check agent-terminal-done" />
+                    </div>
+                    <pre className="agent-terminal-out">{msg.sandboxOutput}</pre>
+                  </div>
+                )}
+                {msg.content && !msg.sandboxOutput && msg.toolName !== "run_in_terminal" && (
                   <pre className="agent-code">{msg.content}</pre>
                 )}
               </div>
@@ -1530,7 +1731,7 @@ export default function AgentConsole({ events, goal, onGoalChange, onRun, connec
           </div>
         )}
         {/* ── Completion footer ── */}
-        {!loading && messages.length > 0 && (
+        {!loading && (agentStatus === "completed" || agentStatus === "stopped") && (
           <div className="agent-footer">
             <div className="agent-footer-status">
               {agentStatus === "completed" ? (

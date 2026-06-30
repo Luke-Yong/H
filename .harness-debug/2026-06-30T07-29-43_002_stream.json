@@ -1,0 +1,31 @@
+[
+  {
+    "role": "system",
+    "content": "You are an expert software developer agent running inside a web IDE called Harness.\nYou have access to tools that let you read/write files, run commands, interact with a browser preview, and inspect t"
+  },
+  {
+    "role": "user",
+    "content": "run app.py"
+  },
+  {
+    "role": "assistant",
+    "tool_calls": [
+      {
+        "id": "call_00_63f3KuNEl4tTsjcEkGZp8661",
+        "fn": "run_command",
+        "args": "{\"command\": \"python app.py\"}"
+      }
+    ],
+    "reasoning_content": "The user wants me to run app.py. Let me start the Flask application."
+  },
+  {
+    "role": "tool",
+    "content": "Unknown browser tool: run_command",
+    "tool_call_id": "call_00_63f3KuNEl4tTsjcEkGZp8661"
+  },
+  {
+    "role": "_meta",
+    "assistantWithTools": 1,
+    "missingReasoning": 0
+  }
+]

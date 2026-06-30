@@ -70,7 +70,7 @@ app.post("/api/chat", async (req, res) => {
 });
 
 // ── Agentic chat (tool-calling loop) ──
-import { createAgentSession, getAgentSession, addToolResult, addToolResultStream, agentLoop, agentLoopStream, runFsTool, type AgentState, type AgentResponse, type AgentSseEvent } from "./agent";
+import { createAgentSession, getAgentSession, addToolResult, addToolResultStream, deleteAgentSession, agentLoop, agentLoopStream, runFsTool, type AgentState, type AgentResponse, type AgentSseEvent } from "./agent";
 
 app.post("/api/chat/agent", async (req, res) => {
   const { message, context, projectRoot, apiKey, model } = req.body || {};
@@ -144,7 +144,8 @@ app.post("/api/chat/agent/continue", async (req, res) => {
 // and may need to call /continue/stream when a browser tool is needed.
 
 app.post("/api/chat/agent/stream", async (req, res) => {
-  const { message, context, projectRoot, model, apiKey } = req.body || {};
+  const { message, context, projectRoot, model, apiKey, thinking } = req.body || {};
+  const effectiveModel = model || (thinking ? "deepseek-reasoner" : "deepseek-chat");
   if (!message) return res.status(400).json({ error: "Missing message" });
 
   try {
@@ -166,7 +167,7 @@ app.post("/api/chat/agent/stream", async (req, res) => {
       res.write(`data: ${data}\n\n`);
     };
 
-    const modelOpts = (model || apiKey) ? { model, apiKey } : undefined;
+    const modelOpts = (effectiveModel || apiKey) ? { model: effectiveModel, apiKey } : undefined;
     for await (const event of agentLoopStream(root, state, context || "", sessionId, modelOpts)) {
       sendEvent(event);
       if (event.type === "browser_tool" || event.type === "permission_required" || event.type === "done" || event.type === "error") break;
@@ -184,7 +185,8 @@ app.post("/api/chat/agent/stream", async (req, res) => {
 });
 
 app.post("/api/chat/agent/stream/continue", async (req, res) => {
-  const { sessionId, toolCallId, toolResult, permissionGranted, apiKey, model } = req.body || {};
+  const { sessionId, toolCallId, toolResult, permissionGranted, apiKey, model, thinking } = req.body || {};
+  const effectiveModel = model || (thinking ? "deepseek-reasoner" : "deepseek-chat");
   if (!sessionId || !toolCallId) {
     return res.status(400).json({ error: "Missing sessionId or toolCallId" });
   }
@@ -194,13 +196,14 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
     if (!state) return res.status(404).json({ error: "Session not found" });
 
     // Handle permission response
+    let cmdResult: string | null = null;
     if (state.pendingPermission && state.pendingPermission.toolCallId === toolCallId) {
       const pp = state.pendingPermission;
       state.pendingPermission = undefined;
-      let cmdResult: string;
       if (permissionGranted) {
-        const fsResult = await runFsTool("run_command", { command: pp.command }, state.projectRoot);
-        cmdResult = fsResult || "(command completed with no output)";
+        // run_in_terminal always runs via the terminal bridge — server doesn't execute.
+        // Push a result immediately so the agent can continue.
+        cmdResult = `Running in terminal tab: ${pp.command}`;
       } else {
         cmdResult = "Permission denied by user.";
       }
@@ -208,7 +211,7 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
     } else {
       addToolResultStream(sessionId, toolCallId, String(toolResult || ""));
     }
-    broadcast({ type: "agent_tool_result", data: { sessionId, toolCallId, toolResult: String(toolResult || "").slice(0, 500) } });
+    broadcast({ type: "agent_tool_result", data: { sessionId, toolCallId, toolResult: String(toolResult || cmdResult || "").slice(0, 500) } });
 
     // SSE headers
     res.writeHead(200, {
@@ -222,7 +225,16 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
       res.write(`data: ${JSON.stringify({ ...event, sessionId })}\n\n`);
     };
 
-    for await (const event of agentLoopStream(state.projectRoot, state, "", sessionId, { model, apiKey })) {
+    // Yield tool_end for the command — run_in_terminal has no sandbox output (terminal bridge handles it)
+    if (cmdResult !== null) {
+      sendEvent({
+        type: "tool_end",
+        toolName: "run_in_terminal",
+        toolResult: `Command completed`,
+      } as AgentSseEvent);
+    }
+
+    for await (const event of agentLoopStream(state.projectRoot, state, "", sessionId, { model: effectiveModel, apiKey })) {
       sendEvent(event);
       if (event.type === "browser_tool" || event.type === "done" || event.type === "error") break;
     }
@@ -237,6 +249,17 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
     }
   }
 });
+
+// ── Clear agent session by thread ID ──
+app.delete("/api/chat/agent/sessions/:threadId", (req, res) => {
+  try {
+    deleteAgentSession(req.params.threadId);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+app.options("/api/chat/agent/sessions/:threadId", (_req, res) => { res.sendStatus(204); });
 
 // ── File system API ──
 function safePath(userPath: string): string {

@@ -145,14 +145,15 @@ Harness includes a file explorer tree (`FilesPanel`) with full create, delete, a
 - Deleting a folder removes it recursively.
 
 **AI Agent file access**
-The AI agent has five filesystem tools:
+The AI agent has six filesystem tools:
 
 | Tool | Description |
 |------|-------------|
-| `read_file` | Reads a file with line numbers |
+| `read_file` | Reads a file with line numbers (or lists a directory) |
 | `write_file` | Creates or overwrites a file |
 | `list_files` | Lists directory contents (skips `.git` / `node_modules`) |
 | `create_directory` | Creates a new directory (and any parent dirs) |
+| `rename_file` | Renames or moves a file or directory |
 | `delete_file` | Deletes a file or directory (recursively) |
 
 All tools operate relative to the project root. The agent can browse, create, edit, and clean up files on its own — no manual intervention needed.
@@ -186,6 +187,7 @@ The AI agent has access to these tools when working on your project:
 | `search_files` | Recursively find files/folders by name pattern (case-insensitive) |
 | `grep` | Search file contents for a regex pattern — find definitions, usages |
 | `create_directory` | Create a directory (and parents) |
+| `rename_file` | Rename or move a file or directory |
 | `delete_file` | Delete a file or directory recursively |
 
 ### Terminal

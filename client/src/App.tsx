@@ -10,6 +10,7 @@ import type { FsEntry } from "./panes/FilesPanel";
 import type { DebugConsoleEntry, OutputEntry } from "./panes/TerminalPane";
 import { pickAndEnumerateFolder, pickAndReadFile, enumerateHandle } from "./panes/browserFs";
 import NameDialog from "./panes/NameDialog";
+import { createAgentTerminalBridge, type AgentTerminalBridge, type AgentTerminalBridgeInternal } from "./panes/AgentTerminalBridge";
 
 interface BrowserTab {
   id: string;
@@ -60,6 +61,8 @@ function normalizeBrowserOpenUrl(rawUrl: string): string {
 export default function App() {
   const editorRef = useRef<EditorPaneHandle>(null);
   const agentFileActionRef = useRef<((fcPath: string, accepted: boolean) => void) | null>(null);
+  // Agent ↔ terminal bridge – agent commands run in real terminal instances
+  const agentTerminalBridge = useMemo(() => createAgentTerminalBridge(), []);
   const { connected, events, runTest } = useWebSocket();
   const [debugEntries, setDebugEntries] = useState<DebugConsoleEntry[]>([]);
   const [outputEntries, setOutputEntries] = useState<OutputEntry[]>([]);
@@ -653,6 +656,7 @@ export default function App() {
             onStatusChange={setStatusBar}
             onBannerAcceptFile={(fp) => agentFileActionRef.current?.(fp, true)}
             onBannerRejectFile={(fp) => agentFileActionRef.current?.(fp, false)}
+            agentTerminalBridge={agentTerminalBridge}
           />
         </div>
 
@@ -677,6 +681,7 @@ export default function App() {
             openEditorFile={(path) => { editorRef.current?.openFileByFsPath(path); }}
             acceptEditorChange={(path) => { editorRef.current?.acceptAgentChange(path); }}
             rejectEditorChange={(path) => { editorRef.current?.rejectAgentChange(path); }}
+            agentTerminalBridge={agentTerminalBridge}
           />
         </div>
         )}

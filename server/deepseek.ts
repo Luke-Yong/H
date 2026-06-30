@@ -1,7 +1,36 @@
 import OpenAI from "openai";
+import fs from "fs";
+import path from "path";
 
 function createClient(apiKey: string) {
   return new OpenAI({ apiKey, baseURL: "https://api.deepseek.com/v1" });
+}
+
+// ── Debug: log outgoing messages to file ──
+let logSeq = 0;
+function logOutgoing(label: string, messages: Array<any>) {
+  try {
+    const dir = path.resolve(process.cwd(), ".harness-debug");
+    fs.mkdirSync(dir, { recursive: true });
+    const seq = String(++logSeq).padStart(3, "0");
+    const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const file = path.join(dir, `${ts}_${seq}_${label}.json`);
+    // Only include role, content, tool_calls, reasoning_content — strip noise
+    const compact = messages.map((m: any) => {
+      const out: any = { role: m.role };
+      if (m.content != null) out.content = typeof m.content === "string" ? m.content.slice(0, 200) : m.content;
+      if (m.tool_calls) out.tool_calls = m.tool_calls.map((tc: any) => ({ id: tc.id, fn: tc.function?.name, args: tc.function?.arguments?.slice(0, 200) }));
+      if (m.reasoning_content != null) out.reasoning_content = m.reasoning_content.slice(0, 200);
+      if (m.tool_call_id) out.tool_call_id = m.tool_call_id;
+      if (m.name) out.name = m.name;
+      return out;
+    });
+    // Also count which assistant messages have/miss reasoning_content
+    const ac = compact.filter((m: any) => m.role === "assistant" && m.tool_calls);
+    const missing = ac.filter((m: any) => m.reasoning_content == null);
+    compact.push({ role: "_meta", assistantWithTools: ac.length, missingReasoning: missing.length });
+    fs.writeFileSync(file, JSON.stringify(compact, null, 2), "utf-8");
+  } catch { /* ignore logging errors */ }
 }
 
 interface AIAction {
@@ -48,7 +77,7 @@ ${context}`,
       { role: "user", content: userMessage },
     ],
     temperature: 0.3,
-    max_tokens: 4000,
+    max_tokens: 8192,
   });
   return response.choices[0]?.message?.content || "";
 }
@@ -130,6 +159,7 @@ export async function chatDeepSeekTool(
   opts?: { model?: string; apiKey: string },
 ): Promise<ToolCallResult> {
   const client = createClient(opts?.apiKey || "");
+  logOutgoing("tool", messages as any[]);
   const response = await client.chat.completions.create({
     model: opts?.model || "deepseek-chat",
     messages: messages as any,
@@ -140,12 +170,13 @@ export async function chatDeepSeekTool(
     })),
     tool_choice: "auto",
     temperature: 0.1,
-    max_tokens: 4000,
+    max_tokens: 8192,
   });
 
   const choice = response.choices[0]?.message;
   return {
     text: choice?.content || null,
+    // Preserve empty string — DeepSeek requires the field back even if empty
     reasoningContent: (choice as any)?.reasoning_content || null,
     toolCalls: choice?.tool_calls as any || null,
   };
@@ -180,6 +211,8 @@ export async function* chatDeepSeekToolStream(
   opts: { model?: string; apiKey: string },
 ): AsyncGenerator<StreamChunk> {
   const client = createClient(opts.apiKey);
+  const msgs = messages as any[];
+  logOutgoing("stream", msgs);
   const stream = await client.chat.completions.create({
     model: opts.model || "deepseek-chat",
     messages: messages as any,
@@ -190,12 +223,13 @@ export async function* chatDeepSeekToolStream(
     })),
     tool_choice: "auto",
     temperature: 0.1,
-    max_tokens: 4000,
+    max_tokens: 8192,
     stream: true,
   });
 
   let fullText = "";
   let fullReasoning = "";
+  let hasReasoning = false;
   const toolCalls: Map<number, { id: string; name: string; args: string }> = new Map();
 
   for await (const chunk of stream) {
@@ -203,8 +237,10 @@ export async function* chatDeepSeekToolStream(
     if (!delta) continue;
 
     // Reasoning / thinking content (DeepSeek-R1 style)
-    if (delta.reasoning_content) {
-      fullReasoning += delta.reasoning_content;
+    // Use != null to preserve empty strings — DeepSeek requires the field back even if empty.
+    if (delta.reasoning_content != null) {
+      hasReasoning = true;
+      fullReasoning += String(delta.reasoning_content);
       yield { type: "thinking", text: delta.reasoning_content };
     }
 
@@ -243,7 +279,8 @@ export async function* chatDeepSeekToolStream(
   yield {
     type: "done",
     finalText: fullText || null,
-    reasoningContent: fullReasoning || null,
+    // Only set reasoningContent if the model actually returned reasoning chunks
+    reasoningContent: hasReasoning && fullReasoning ? fullReasoning : null,
     toolCalls: finalToolCalls,
   };
 }

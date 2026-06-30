@@ -1,0 +1,15 @@
+[
+  {
+    "role": "system",
+    "content": "You are an expert software developer agent running inside a web IDE called Harness.\nYou have access to tools that let you read/write files, run commands, interact with a browser preview, and inspect t"
+  },
+  {
+    "role": "user",
+    "content": "run python app.py in non sandbox terminal"
+  },
+  {
+    "role": "_meta",
+    "assistantWithTools": 0,
+    "missingReasoning": 0
+  }
+]

@@ -1372,7 +1372,7 @@ body.resizing iframe { pointer-events: none; }
 .agent-history-delete {
   padding: 6px 8px; background: none; border: none;
   color: var(--text-dim); cursor: pointer; opacity: 0;
-  transition: opacity 0.1s;
+  transition: opacity 0.1s; flex-shrink: 0;
 }
 .agent-history-item:hover .agent-history-delete { opacity: 1; }
 .agent-history-delete:hover { color: #f85149; }
@@ -1436,7 +1436,7 @@ body.resizing iframe { pointer-events: none; }
   background: rgba(255,255,255,0.05); padding: 1px 5px; border-radius: 3px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px;
 }
-.agent-tool-card .agent-sandbox { margin: 0; border: none; border-top: 1px solid rgba(255,255,255,0.06); border-radius: 0; }
+.agent-tool-card .agent-terminal { margin: 0; border: none; border-top: 1px solid rgba(255,255,255,0.06); border-radius: 0; }
 .agent-tool-card .agent-code {
   margin: 0; border: none; border-top: 1px solid rgba(255,255,255,0.06); border-radius: 0;
   max-height: 160px;
@@ -1465,6 +1465,7 @@ body.resizing iframe { pointer-events: none; }
 .agent-fc-delta { display: flex; gap: 2px; white-space: nowrap; }
 .agent-fc-added { color: #4ec94e; font-weight: 600; }
 .agent-fc-removed { color: #f85149; font-weight: 600; }
+.agent-fc-arrow { color: var(--text-dim); margin: 0 2px; }
 .agent-fc-diff-btn {
   background: none; border: none; color: var(--text-dim);
   cursor: pointer; padding: 1px 4px; border-radius: 3px;
@@ -1486,24 +1487,24 @@ body.resizing iframe { pointer-events: none; }
   overflow: hidden;
 }
 .agent-todo-header {
-  display: flex; align-items: center; gap: 6px;
-  padding: 5px 10px; font-size: 11px; color: var(--text-dim);
+  display: flex; align-items: center; gap: 7px;
+  padding: 6px 10px; font-size: 12px; font-weight: 600; color: var(--text);
   background: rgba(255, 255, 255, 0.03); border-bottom: 1px solid rgba(255,255,255,0.05);
 }
+.agent-todo-header .codicon { font-size: 13px; color: var(--accent); }
 .agent-todo-item {
-  display: flex; align-items: center; gap: 6px;
-  padding: 4px 10px; font-size: 11px;
-  color: var(--text-dim);
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 10px; font-size: 12px;
 }
-.agent-todo-item .codicon { font-size: 10px; flex-shrink: 0; margin-top: 1px; }
-.agent-todo-item.pending { color: rgba(255,255,255,0.35); }
-.agent-todo-item.pending .codicon { color: rgba(255,255,255,0.2); }
+.agent-todo-item .codicon { font-size: 12px; flex-shrink: 0; margin-top: 1px; }
+.agent-todo-item.pending { color: rgba(255,255,255,0.5); }
+.agent-todo-item.pending .codicon { color: rgba(255,255,255,0.25); }
 .agent-todo-item.in_progress { color: #9cdcfe; }
-.agent-todo-item.in_progress .codicon { color: var(--accent); animation: agent-spin 1.6s linear infinite; }
+.agent-todo-item.in_progress .codicon { color: var(--accent); }
 .agent-todo-item.completed { color: #4ec94e; }
 .agent-todo-item.completed .codicon { color: #4ec94e; }
-.agent-todo-item.cancelled { color: rgba(255,255,255,0.25); text-decoration: line-through; }
-.agent-todo-item.cancelled .codicon { color: rgba(255,255,255,0.15); }
+.agent-todo-item.cancelled { color: rgba(255,255,255,0.3); text-decoration: line-through; }
+.agent-todo-item.cancelled .codicon { color: rgba(255,255,255,0.2); }
 .agent-todo-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ── Completion footer ── */
@@ -1672,22 +1673,61 @@ body.resizing iframe { pointer-events: none; }
 }
 .agent-diff-banner-btn.reject:hover { background: #505050; color: var(--text); }
 
-/* ── Sandbox terminal block ── */
-.agent-sandbox {
+/* ── Terminal block (sandbox / non-sandbox) ── */
+.agent-terminal {
   margin: 4px 0; border: 1px solid #454545; border-radius: 4px; overflow: hidden;
 }
-.agent-sandbox-header {
-  display: flex; align-items: center; gap: 5px;
-  padding: 3px 10px; font-size: 11px; color: var(--text-dim);
-  background: #333; border-bottom: 1px solid #454545;
+.agent-terminal-header {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 10px; font-size: 11px; color: var(--text-dim);
+  background: #2d2d2d; border-bottom: 1px solid #454545;
+  user-select: none;
 }
-.agent-sandbox-out {
+.agent-terminal-header .codicon-terminal { font-size: 12px; color: var(--accent); flex-shrink: 0; }
+.agent-terminal-cwd {
+  font-family: var(--mono-font, monospace); font-size: 10px;
+  color: #888; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  flex: 1; min-width: 0;
+}
+.agent-terminal-label {
+  font-size: 10px; padding: 1px 6px; border-radius: 3px;
+  background: rgba(255,255,255,0.08); color: #888;
+  text-transform: lowercase; flex-shrink: 0;
+}
+.agent-terminal-done { font-size: 10px; color: #4ec94e; flex-shrink: 0; }
+.agent-terminal-spinner { width: 10px; height: 10px; border-width: 1.5px; flex-shrink: 0; }
+.agent-terminal-cmdline {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 10px; font-size: 12px;
+  background: #1e1e1e; border-bottom: 1px solid rgba(255,255,255,0.04);
+  font-family: var(--mono-font, monospace);
+}
+.agent-terminal-prompt { color: #4ec94e; flex-shrink: 0; font-weight: 600; }
+.agent-terminal-cmd { color: #ccc; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-terminal-out {
   padding: 8px 10px; margin: 0;
   font-size: 11px; line-height: 1.45; color: #ccc;
   background: #1a1a1a; white-space: pre-wrap; overflow-x: auto;
-  max-height: 200px; overflow-y: auto;
+  max-height: 300px; overflow-y: auto;
   font-family: var(--mono-font, monospace);
+  cursor: pointer;
 }
+.agent-terminal-out-collapsed {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 10px; font-size: 11px; color: var(--text-dim);
+  background: #1a1a1a; cursor: pointer;
+  user-select: none;
+}
+.agent-terminal-out-collapsed:hover { color: var(--text); }
+.agent-terminal-out-collapsed .codicon { font-size: 10px; }
+.agent-terminal-warn { font-size: 10px; color: #d29922; flex-shrink: 0; }
+.agent-terminal-perms {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 6px 10px; border-top: 1px solid rgba(255,255,255,0.06);
+  background: rgba(210, 153, 34, 0.08); font-size: 11px; color: #d29922;
+}
+.agent-terminal-perms .agent-perms-actions { display: flex; gap: 4px; }
+.agent-terminal-perms .agent-btn { padding: 1px 8px; font-size: 11px; border-radius: 3px; }
 
 /* ── Permissions prompt ── */
 .agent-perms {
