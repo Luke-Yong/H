@@ -4,7 +4,7 @@ import { createServer } from "http";
 import http from "http";
 import https from "https";
 import { WebSocketServer, WebSocket } from "ws";
-import { launchBrowser, closeBrowser } from "./browser";
+import { launchBrowser, closeBrowser, navigateTo, takeScreenshot } from "./browser";
 import { runLoop, LoopConfig, LoopEvent } from "./loop";
 import { chatDeepSeek } from "./deepseek";
 import {
@@ -1002,6 +1002,22 @@ app.post("/api/lsp/diagnostics", (req, res) => {
 // ── Health check ──
 app.get("/api/health", (_req, res) => {
   res.json({ status: "ok" });
+});
+
+// ── Playwright screenshot (agent uses this for pixel-perfect screenshots) ──
+app.post("/api/browser/playwright-screenshot", async (req, res) => {
+  try {
+    const { url } = req.body;
+    if (!url || typeof url !== "string") {
+      res.status(400).json({ error: "url is required" });
+      return;
+    }
+    await navigateTo(url);
+    const dataUrl = await takeScreenshot();
+    res.json({ dataUrl });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "Screenshot failed" });
+  }
 });
 
 // ── Serve client (desktop / production) ──

@@ -182,7 +182,7 @@ The AI agent has access to these tools when working on your project:
 | Tool | Description |
 |------|-------------|
 | `read_file` | Read a file with line numbers — always read before editing |
-| `write_file` | Create or overwrite a file (accept/reject before applying) |
+| `write_file` | Create or overwrite a file (requires user accept/reject) |
 | `list_files` | List files and directories in a given path |
 | `search_files` | Recursively find files/folders by name pattern (case-insensitive) |
 | `grep` | Search file contents for a regex pattern — find definitions, usages |
@@ -192,9 +192,10 @@ The AI agent has access to these tools when working on your project:
 
 ### Terminal
 
-| Tool | Description |
-|------|-------------|
-| `run_command` | Run a shell command in the project root (30s timeout, stdout+stderr returned) |
+| Tool | Type | Description |
+|------|------|-------------|
+| `run_command` | **Sandbox** | Run a shell command with inline output. Fast, no permission needed. Use for: tests, lint, git, pip, npm, builds, grep. Output appears directly in the tool card. |
+| `run_in_terminal` | **Real terminal** | Run a long-running command in a dedicated terminal tab. User must Allow each command. Use for: `python app.py`, `npm start`, flask, watch mode, interactive shells. Command runs in background — agent continues immediately. Output streams to both the terminal tab and the agent tool card via a bridge. |
 
 ### Browser
 
@@ -211,4 +212,5 @@ The AI agent has access to these tools when working on your project:
 
 | Tool | Description |
 |------|-------------|
+| `write_todos` | Create or update a structured task list to track progress |
 | `task_complete` | Signal completion with a summary of what was done |

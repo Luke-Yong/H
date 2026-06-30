@@ -18,6 +18,13 @@ export async function getPage(): Promise<Page> {
   return page;
 }
 
+/** Navigate the headless Playwright browser to a URL. */
+export async function navigateTo(url: string): Promise<Page> {
+  const pg = await getPage();
+  await pg.goto(url, { waitUntil: "networkidle", timeout: 15000 });
+  return pg;
+}
+
 export async function injectCode(html: string, css: string, js: string): Promise<void> {
   const pg = await getPage();
   const fullPage = `
@@ -102,9 +109,11 @@ export async function getPageContent(): Promise<string> {
   return pg.content();
 }
 
-export async function takeScreenshot(): Promise<Buffer> {
+/** Take a PNG screenshot and return a base64 data URL (DeepSeek-compatible). */
+export async function takeScreenshot(): Promise<string> {
   const pg = await getPage();
-  return pg.screenshot({ type: "jpeg", quality: 70 });
+  const buf = await pg.screenshot({ type: "png" });
+  return `data:image/png;base64,${buf.toString("base64")}`;
 }
 
 export async function closeBrowser(): Promise<void> {

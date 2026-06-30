@@ -1370,6 +1370,35 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   }, [evalInPage]);
 
   const getScreenshot = useCallback(async (): Promise<string> => {
+    // Desktop (Electron): use native webview capturePage for pixel-perfect Chromium screenshot
+    if (isDesktop) {
+      const wv = webviewRef.current as any;
+      if (wv && typeof wv.capturePage === "function") {
+        try {
+          const image = await wv.capturePage();
+          if (image && typeof image.toDataURL === "function") {
+            return image.toDataURL();
+          }
+        } catch { /* fall through to html2canvas */ }
+      }
+    }
+
+    // Web (iframe): use server-side Playwright for an accurate headless screenshot
+    if (!isDesktop && currentUrl) {
+      try {
+        const resp = await fetch("/api/browser/playwright-screenshot", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: currentUrl }),
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data.dataUrl) return data.dataUrl;
+        }
+      } catch { /* fall through to html2canvas */ }
+    }
+
+    // Fallback: html2canvas (loaded in page via the iframe injection)
     return evalInPage(`
       new Promise((resolve) => {
         if (typeof html2canvas !== 'undefined') {
@@ -1379,7 +1408,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
         }
       })
     `);
-  }, [evalInPage]);
+  }, [isDesktop, currentUrl, evalInPage]);
 
   const navigateTo = useCallback(async (url: string): Promise<void> => {
     if (activeTab) {

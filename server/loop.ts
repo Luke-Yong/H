@@ -31,7 +31,7 @@ export async function runLoop(config: LoopConfig, emit: EventEmitter): Promise<v
 
     // Send initial screenshot
     const initialShot = await takeScreenshot();
-    emit({ type: "screenshot", data: initialShot.toString("base64") });
+    emit({ type: "screenshot", data: initialShot });
 
     for (let step = 0; step < maxSteps; step++) {
       emit({ type: "log", data: `--- Step ${step + 1}/${maxSteps} ---` });
@@ -64,7 +64,7 @@ export async function runLoop(config: LoopConfig, emit: EventEmitter): Promise<v
 
       // Take screenshot after actions
       const shot = await takeScreenshot();
-      emit({ type: "screenshot", data: shot.toString("base64") });
+      emit({ type: "screenshot", data: shot });
 
       // Step 5: Check result
       if (aiResponse.conclusion === "pass") {
