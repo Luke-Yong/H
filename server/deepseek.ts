@@ -1,9 +1,26 @@
-import OpenAI from "openai";
 import fs from "fs";
 import path from "path";
 
-function createClient(apiKey: string) {
-  return new OpenAI({ apiKey, baseURL: "https://api.deepseek.com/v1" });
+const BASE_URL = "https://api.deepseek.com/v1";
+
+// ── Shared fetch helper for DeepSeek API ──
+async function deepseekFetch(
+  apiKey: string,
+  body: Record<string, unknown>,
+): Promise<Response> {
+  const res = await fetch(`${BASE_URL}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`DeepSeek API error ${res.status}: ${text.slice(0, 500)}`);
+  }
+  return res;
 }
 
 // ── Debug: log outgoing messages to file ──
@@ -33,27 +50,13 @@ function logOutgoing(label: string, messages: Array<any>) {
   } catch { /* ignore logging errors */ }
 }
 
-interface AIAction {
-  action: "click" | "type";
-  index: number;
-  text?: string;
-}
-
-interface AIResponse {
-  reasoning: string;
-  actions: AIAction[];
-  conclusion: "pass" | "fail" | "continue";
-  message: string;
-}
-
 export async function chatDeepSeek(
   userMessage: string,
   context: string,
   history: { role: "user" | "assistant"; content: string }[],
   apiKey: string,
 ): Promise<string> {
-  const client = createClient(apiKey);
-  const response = await client.chat.completions.create({
+  const res = await deepseekFetch(apiKey, {
     model: "deepseek-chat",
     messages: [
       {
@@ -79,63 +82,8 @@ ${context}`,
     temperature: 0.3,
     max_tokens: 8192,
   });
-  return response.choices[0]?.message?.content || "";
-}
-
-export async function askDeepSeek(
-  domStructure: string,
-  userGoal: string,
-  previousActions: string[],
-  apiKey: string,
-): Promise<AIResponse> {
-  const client = createClient(apiKey);
-  const systemPrompt = `You are a test automation agent. Given a DOM structure with indexed elements and a user's test goal, determine what actions to take.
-
-DOM elements are formatted as: [index] <tag attributes> "visible text"
-
-Available actions:
-- {"action":"click","index":N}  — click element at index N
-- {"action":"type","index":N,"text":"value"} — type text into element at index N
-
-Rules:
-1. Return actions in the order they should be executed.
-2. If the goal is achieved, set conclusion to "pass" with a success message.
-3. If more actions are needed, set conclusion to "continue".
-4. If the goal cannot be achieved, set conclusion to "fail" with an explanation.
-5. Only interact with visible, actionable elements (buttons, inputs, links, selects).
-6. Each response can have at most 3 actions.
-
-Respond ONLY with valid JSON in this exact format:
-{
-  "reasoning": "why you chose these actions",
-  "actions": [{"action":"click","index":0},{"action":"type","index":1,"text":"hello"}],
-  "conclusion": "continue",
-  "message": "description of what was done or why pass/fail"
-}`;
-
-  const previousContext = previousActions.length
-    ? `\nPrevious actions taken:\n${previousActions.join("\n")}`
-    : "";
-
-  const response = await client.chat.completions.create({
-    model: "deepseek-chat",
-    messages: [
-      { role: "system", content: systemPrompt },
-      {
-        role: "user",
-        content: `Goal: ${userGoal}\n\nCurrent DOM:\n${domStructure}${previousContext}\n\nWhat should I do next?`,
-      },
-    ],
-    temperature: 0.1,
-    max_tokens: 2000,
-  });
-
-  const content = response.choices[0]?.message?.content || "{}";
-  // Extract JSON from the response (handle markdown code blocks)
-  const jsonMatch = content.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) throw new Error(`DeepSeek did not return valid JSON:\n${content}`);
-
-  return JSON.parse(jsonMatch[0]) as AIResponse;
+  const data: any = await res.json();
+  return data.choices?.[0]?.message?.content || "";
 }
 
 // ── Tool-calling variant (for the agent) ──
@@ -158,12 +106,11 @@ export async function chatDeepSeekTool(
   tools: Array<{ name: string; description: string; parameters: Record<string, unknown> }>,
   opts?: { model?: string; apiKey: string },
 ): Promise<ToolCallResult> {
-  const client = createClient(opts?.apiKey || "");
   logOutgoing("tool", messages as any[]);
-  const response = await client.chat.completions.create({
+
+  const res = await deepseekFetch(opts?.apiKey || "", {
     model: opts?.model || "deepseek-chat",
-    messages: messages as any,
-    // @ts-ignore DeepSeek supports tools in OpenAI shape
+    messages: messages,
     tools: tools.map((t) => ({
       type: "function",
       function: { name: t.name, description: t.description, parameters: t.parameters },
@@ -173,12 +120,12 @@ export async function chatDeepSeekTool(
     max_tokens: 8192,
   });
 
-  const choice = response.choices[0]?.message;
+  const data: any = await res.json();
+  const choice = data.choices?.[0]?.message;
   return {
     text: choice?.content || null,
-    // Preserve empty string — DeepSeek requires the field back even if empty
-    reasoningContent: (choice as any)?.reasoning_content || null,
-    toolCalls: choice?.tool_calls as any || null,
+    reasoningContent: choice?.reasoning_content || null,
+    toolCalls: choice?.tool_calls || null,
   };
 }
 
@@ -205,18 +152,61 @@ export interface StreamChunk {
   toolName?: string;
 }
 
+/**
+ * Parse an SSE (Server-Sent Events) stream from a fetch Response body.
+ * Yields each parsed JSON data chunk. Skips [DONE] markers and empty lines.
+ */
+async function* parseSSE(response: Response): AsyncGenerator<any> {
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("No response body");
+
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done && !buffer) break;
+
+      if (value) buffer += decoder.decode(value, { stream: !done });
+
+      // Split on double newlines (SSE frame boundary)
+      const parts = buffer.split("\n\n");
+      // Keep the last (potentially incomplete) part in the buffer
+      buffer = parts.pop() || "";
+
+      for (const part of parts) {
+        const lines = part.split("\n");
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith("data:")) continue;
+          const data = trimmed.slice(5).trim();
+          if (data === "[DONE]") return;
+          try {
+            yield JSON.parse(data);
+          } catch {
+            // Skip unparseable lines (e.g. comments)
+          }
+        }
+      }
+
+      if (done) break;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 export async function* chatDeepSeekToolStream(
   messages: Array<{ role: string; content: string | null; tool_calls?: any[]; tool_call_id?: string; name?: string }>,
   tools: Array<{ name: string; description: string; parameters: Record<string, unknown> }>,
   opts: { model?: string; apiKey: string },
 ): AsyncGenerator<StreamChunk> {
-  const client = createClient(opts.apiKey);
-  const msgs = messages as any[];
-  logOutgoing("stream", msgs);
-  const stream = await client.chat.completions.create({
+  logOutgoing("stream", messages as any[]);
+
+  const res = await deepseekFetch(opts.apiKey, {
     model: opts.model || "deepseek-chat",
-    messages: messages as any,
-    // @ts-ignore
+    messages,
     tools: tools.map((t) => ({
       type: "function",
       function: { name: t.name, description: t.description, parameters: t.parameters },
@@ -232,8 +222,8 @@ export async function* chatDeepSeekToolStream(
   let hasReasoning = false;
   const toolCalls: Map<number, { id: string; name: string; args: string }> = new Map();
 
-  for await (const chunk of stream) {
-    const delta = (chunk as any).choices?.[0]?.delta;
+  for await (const chunk of parseSSE(res)) {
+    const delta: any = chunk.choices?.[0]?.delta;
     if (!delta) continue;
 
     // Reasoning / thinking content (DeepSeek-R1 style)
@@ -253,7 +243,7 @@ export async function* chatDeepSeekToolStream(
     // Tool call deltas
     if (delta.tool_calls) {
       for (const tc of delta.tool_calls) {
-        const idx = tc.index ?? 0;
+        const idx: number = tc.index ?? 0;
         let entry = toolCalls.get(idx);
         if (!entry) {
           entry = { id: tc.id || "", name: tc.function?.name || "", args: "" };

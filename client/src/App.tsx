@@ -4,7 +4,6 @@ import AgentConsole from "./panes/AgentConsole";
 import MenuBar from "./panes/MenuBar";
 import type { MenuItem } from "./panes/MenuBar";
 import StatusBar from "./panes/StatusBar";
-import { useWebSocket } from "./hooks/useWebSocket";
 import { useResizable, ResizeHandle } from "./hooks/useResizable";
 import type { FsEntry } from "./panes/FilesPanel";
 import type { DebugConsoleEntry, OutputEntry } from "./panes/TerminalPane";
@@ -63,12 +62,10 @@ export default function App() {
   const agentFileActionRef = useRef<((fcPath: string, accepted: boolean) => void) | null>(null);
   // Agent ↔ terminal bridge – agent commands run in real terminal instances
   const agentTerminalBridge = useMemo(() => createAgentTerminalBridge(), []);
-  const { connected, events, runTest } = useWebSocket();
   const [debugEntries, setDebugEntries] = useState<DebugConsoleEntry[]>([]);
   const [outputEntries, setOutputEntries] = useState<OutputEntry[]>([]);
   const debugIdRef = useRef(0);
   const outputIdRef = useRef(0);
-  const wsEventCountRef = useRef(0);
 
   const [fsRoot, setFsRoot] = useState<FsEntry[] | null>(null);
   const [fsBasePath, setFsBasePath] = useState("");
@@ -201,42 +198,6 @@ export default function App() {
   const clearOutputEntries = useCallback(() => {
     setOutputEntries([]);
   }, []);
-
-  useEffect(() => {
-    if (events.length <= wsEventCountRef.current) return;
-    for (const event of events.slice(wsEventCountRef.current)) {
-      const level: DebugConsoleEntry["level"] =
-        event.type === "error" ? "error" :
-        event.type === "log" ? "log" :
-        event.type === "assistant" ? "info" :
-        "info";
-      let text = "";
-      if (typeof event.data === "string") {
-        text = event.data;
-      } else {
-        try {
-          text = JSON.stringify(event.data);
-        } catch {
-          text = String(event.data);
-        }
-      }
-      appendDebugEntry({ level, source: "server", text: `${event.type}: ${text}` });
-
-      const outputText =
-        event.type === "action"
-          ? `${(event.data as { action: string; index: number; text?: string }).action} [${(event.data as { index: number }).index}]${(event.data as { text?: string }).text ? ` "${(event.data as { text: string }).text}"` : ""}`
-          : event.type === "result"
-            ? `${(event.data as { verdict: string }).verdict.toUpperCase()}: ${(event.data as { message: string }).message}`
-            : event.type === "dom"
-              ? String(event.data).slice(0, 2000)
-              : event.type === "assistant"
-                ? `AI: ${String(event.data).slice(0, 500)}`
-                : String(event.data);
-
-      appendOutputEntry({ kind: event.type, text: outputText });
-    }
-    wsEventCountRef.current = events.length;
-  }, [appendDebugEntry, appendOutputEntry, events]);
 
   useEffect(() => {
     const stringifyArgs = (args: unknown[]) => args.map((arg) => {
@@ -548,12 +509,6 @@ export default function App() {
     ensureTerminalVisible(false);
   }, [ensureTerminalVisible, openFileByPath]);
 
-  const handleRun = useCallback(() => {
-    const code = editorRef.current?.getCode();
-    if (!code) return;
-    runTest({ html: code.html, css: code.css, js: code.js, goal, maxSteps: 10 });
-  }, [runTest, goal]);
-
   const menus = useMemo(() => [
     {
       label: "File",
@@ -607,7 +562,7 @@ export default function App() {
         { label: "Kill Terminal", action: () => setTermVisible(false) },
       ],
     },
-    { label: "Help", items: [{ label: "About Harness", action: () => alert("Harness - AI-powered browser test runner\nMonaco + Playwright + DeepSeek") }] },
+    { label: "Help", items: [{ label: "About Harness", action: () => alert("Harness - AI-powered coding agent\nMonaco + DeepSeek") }] },
   ], [fsBasePath, statusBar.hasEditor, openFolderImmediate, openFileImmediate, createNewProject, createNewFile, handleBrowserClose]);
 
   return (
@@ -665,11 +620,8 @@ export default function App() {
         {showConsole && (
         <div className="pane pane-console" style={{ width: consoleW, minWidth: consoleW }}>
           <AgentConsole
-            events={events}
             goal={goal}
             onGoalChange={setGoal}
-            onRun={handleRun}
-            connected={connected}
             getConsoleContext={() => editorRef.current?.getConsoleContext() || ""}
             executeBrowserAction={(name, params) => editorRef.current?.executeBrowserAction(name, params) ?? Promise.resolve("Browser not available")}
             getProjectFiles={() => editorRef.current?.getProjectFiles() ?? Promise.resolve([])}

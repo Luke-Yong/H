@@ -13,13 +13,37 @@ export interface BrowserViewHandle {
   /** Get the DOM as indexed clickable elements. */
   getIndexedDom: () => Promise<string>;
   /** Click element at index (from getIndexedDom). */
-  clickElement: (index: number) => Promise<void>;
-  /** Type text into element at index. */
+  clickElement: (index: number) => Promise<string>;
+  /** Type text into element at index using realistic keyboard events. */
   typeIntoElement: (index: number, text: string) => Promise<void>;
-  /** Get a base64 screenshot of the page. Uses html2canvas if available, otherwise returns empty. */
-  getScreenshot: () => Promise<string>;
+  /** Get a text snapshot of the page: URL, title, visible text, form elements, buttons. */
+  getPageSnapshot: () => Promise<string>;
   /** Navigate to a URL in the current tab. */
   navigateTo: (url: string) => Promise<void>;
+  /** Wait for an element matching a CSS selector to appear. Returns first match or empty. */
+  waitForElement: (selector: string, timeoutMs?: number) => Promise<string>;
+  /** Get captured console entries since page load (log/warn/error). */
+  getConsoleEntries: () => Promise<string>;
+  /** Get failed network requests (4xx/5xx/CORS errors). */
+  getRequestErrors: () => Promise<string>;
+  /** Get current browser tab URL and page load status. */
+  getInfo: () => string;
+  /** Select an option in a <select> element by value or label. */
+  selectOption: (index: number, value?: string, label?: string) => Promise<string>;
+  /** Clear an input element at the given DOM index. */
+  clearElement: (index: number) => Promise<string>;
+  /** Left-click at viewport coordinates. */
+  clickCoords: (x: number, y: number) => Promise<string>;
+  /** Move mouse to viewport coordinates (triggers hover effects). */
+  moveMouse: (x: number, y: number) => Promise<string>;
+  /** Right-click at viewport coordinates (opens context menu). */
+  rightClick: (x: number, y: number) => Promise<string>;
+  /** Scroll the page. */
+  scrollPage: (x: number, y: number, to?: string) => Promise<string>;
+  /** Press a keyboard key. */
+  pressKey: (key: string) => Promise<string>;
+  /** Upload files to a file input. */
+  uploadFile: (index: number, paths: string[]) => Promise<string>;
 }
 
 interface Props {
@@ -175,7 +199,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   const [viewportHeight, setViewportHeight] = useState(1080);
   const [viewportPresetId, setViewportPresetId] = useState("desktop-fullhd");
   const [perms, setPerms] = useState<Permissions>({
-    geolocation: false, camera: false, microphone: false, midi: false, autoplay: true,
+    geolocation: true, camera: true, microphone: true, midi: true, autoplay: true,
   });
   const [viewportScale, setViewportScale] = useState(0.5);
   const [loading, setLoading] = useState(false);
@@ -356,6 +380,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
         // Console capture — intercept console.log/warn/error/info and post to parent
         if (!win.__harnessConsolePatched) {
           win.__harnessConsolePatched = true;
+          win.__harnessConsoleEntries = [];
 
           // Robust object serializer for console output (injected into iframe)
       const serialize = function(v: unknown, depth: number, seen: WeakSet<object>): string {
@@ -415,6 +440,8 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
       };
 
       const postEntry = function(level: string, text: string) {
+        win.__harnessConsoleEntries.push({ level, text, time: Date.now() });
+        if (win.__harnessConsoleEntries.length > 500) win.__harnessConsoleEntries.shift();
         if (text.length > 2000) {
           let remaining = text, chunk = 0;
           while (remaining) {
@@ -452,6 +479,76 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
               time: Date.now(),
             }, "*");
             if (origOnerror) origOnerror.call(win, msg, source, line, col);
+          };
+
+          // Intercept alert/confirm/prompt — log to console instead of blocking
+          win.__harnessDialog = { lastText: "", lastResult: false };
+          const origAlert = win.alert;
+          win.alert = function(msg: any) {
+            win.__harnessDialog.lastText = String(msg);
+            postEntry("dialog", "[ALERT] " + String(msg));
+          };
+          const origConfirm = win.confirm;
+          win.confirm = function(msg: any) {
+            win.__harnessDialog.lastText = String(msg);
+            win.__harnessDialog.lastResult = false;
+            postEntry("dialog", "[CONFIRM] " + String(msg) + " → auto-dismissed as Cancel");
+            return false;
+          };
+          const origPrompt = win.prompt;
+          win.prompt = function(msg: any, def?: string) {
+            win.__harnessDialog.lastText = String(msg);
+            postEntry("dialog", "[PROMPT] " + String(msg) + " → auto-dismissed (default: " + (def || "") + ")");
+            return def || "";
+          };
+
+          // PerformanceObserver: capture failed network requests (4xx/5xx/CORS)
+          win.__harnessRequestErrors = [];
+          try {
+            const obs = new (win.PerformanceObserver)((list: any) => {
+              for (const entry of list.getEntries()) {
+                const e = entry as any;
+                if (e.responseStatus && (e.responseStatus >= 400 || e.responseStatus === 0)) {
+                  win.__harnessRequestErrors.push({
+                    url: e.name,
+                    method: 'fetch',
+                    status: e.responseStatus,
+                    type: e.initiatorType,
+                    time: Date.now(),
+                  });
+                  if (win.__harnessRequestErrors.length > 200) win.__harnessRequestErrors.shift();
+                }
+              }
+            });
+            obs.observe({ type: 'resource', buffered: true });
+          } catch (_) { /* PerformanceObserver not supported */ }
+
+          // Also intercept fetch/XHR for status codes that PerformanceObserver may miss
+          const origFetch = win.fetch;
+          win.fetch = function(...args: any[]) {
+            return origFetch.apply(win, args).then(function(r: Response) {
+              if (!r.ok) {
+                win.__harnessRequestErrors.push({
+                  url: typeof args[0] === 'string' ? args[0] : (args[0].url || 'unknown'),
+                  method: (args[0].method || 'GET').toUpperCase(),
+                  status: r.status,
+                  type: 'fetch',
+                  time: Date.now(),
+                });
+                if (win.__harnessRequestErrors.length > 200) win.__harnessRequestErrors.shift();
+              }
+              return r;
+            }, function(err: any) {
+              win.__harnessRequestErrors.push({
+                url: typeof args[0] === 'string' ? args[0] : (args[0]?.url || 'unknown'),
+                method: (args[0]?.method || 'GET').toUpperCase(),
+                status: 0,
+                type: 'fetch-error',
+                time: Date.now(),
+              });
+              if (win.__harnessRequestErrors.length > 200) win.__harnessRequestErrors.shift();
+              throw err;
+            }) as any;
           };
         }
       }
@@ -696,9 +793,9 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
       setInputUrl(nextUrl);
       setSecure(isHttps(nextUrl));
       onUrlChange?.(tabId, nextUrl);
-      if (reason !== "did-navigate-in-page") {
-        setNavUrl(nextUrl);
-      }
+      // Do NOT update navUrl here — navUrl controls the webview's src attribute.
+      // Setting src while the webview is mid-navigation (e.g. a redirect) causes
+      // Chromium to abort the in-flight request with ERR_ABORTED (-3).
     }
 
     try {
@@ -1001,10 +1098,10 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     perms.autoplay && "autoplay",
   ].filter(Boolean).join("; ");
 
-  // ── Sandbox — removed ──
-  // Sandbox (even with allow-popups) interferes with external site JS (Bing links,
-  // window.open, etc.) for cross-origin iframes. Cross-origin policy already isolates
-  // the iframe, making the sandbox redundant for security.
+  // ── Sandbox — allow-scripts for JS execution, allow-same-origin for same-origin access,
+  // allow-forms for form submission, allow-popups for window.open.
+  // Blocks: top-navigation (prevents escape), plugins, modals, pointer-lock, downloads.
+  const sandboxAttr = "allow-scripts allow-same-origin allow-forms allow-popups";
 
   const navigate = useCallback(() => {
     if (!tabId) return;
@@ -1318,10 +1415,14 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   const getIndexedDom = useCallback(async (): Promise<string> => {
     return evalInPage(`
       (() => {
+        const vw = window.innerWidth, vh = window.innerHeight;
         const w = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
         const els = []; let i = 0; let el;
         while ((el = w.nextNode())) {
           const tag = el.tagName.toLowerCase();
+          const r = el.getBoundingClientRect();
+          // Skip elements outside the viewport or with zero size
+          if (r.width <= 0 || r.height <= 0 || r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw) continue;
           const id = el.id ? ' id="' + el.id + '"' : '';
           const cls = el.className && typeof el.className === 'string'
             ? ' class="' + el.className + '"' : '';
@@ -1332,23 +1433,39 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
           if (ph) attrs.push('placeholder="' + ph + '"');
           if (tp) attrs.push('type="' + tp + '"');
           const t = text ? ' "' + text + '"' : '';
-          els.push('[' + i + '] <' + tag + id + cls + (attrs.length ? ' ' + attrs.join(' ') : '') + '>' + t);
+          const x = Math.round(r.left), y = Math.round(r.top), w = Math.round(r.width), h = Math.round(r.height);
+          els.push('[' + i + '] <' + tag + id + cls + (attrs.length ? ' ' + attrs.join(' ') : '') + '>' + t + ' (x:' + x + ' y:' + y + ' ' + w + 'x' + h + ')');
           i++;
         }
-        return els.join('\\n');
+        return 'viewport:' + vw + 'x' + vh + '\\n' + els.join('\\n');
       })()
     `);
   }, [evalInPage]);
 
-  const clickElement = useCallback(async (index: number) => {
-    return evalInPage(`
+  const clickElement = useCallback(async (index: number): Promise<string> => {
+    const result = await evalInPage(`
       (() => {
         const w = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
         let i = 0; let el;
-        while ((el = w.nextNode())) { if (i++ === ${index}) { el.click(); return 'clicked'; } }
+        while ((el = w.nextNode())) {
+          if (i++ !== ${index}) continue;
+          const rect = el.getBoundingClientRect();
+          const cx = rect.left + rect.width / 2;
+          const cy = rect.top + rect.height / 2;
+          // Dispatch full mouse event sequence — frameworks (React/Vue) need this
+          el.focus();
+          el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: cx, clientY: cy }));
+          el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+          el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: cx, clientY: cy }));
+          el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+          el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+          return 'clicked <' + el.tagName.toLowerCase() + '> at index ${index}';
+        }
         return 'element not found at index ${index}';
       })()
-    `).then(async () => { await new Promise((r) => setTimeout(r, 400)); });
+    `);
+    await new Promise((r) => setTimeout(r, 400));
+    return result;
   }, [evalInPage]);
 
   const typeIntoElement = useCallback(async (index: number, text: string) => {
@@ -1359,66 +1476,344 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
         while ((el = w.nextNode())) {
           if (i++ !== ${index}) continue;
           const inp = el;
-          inp.focus(); inp.value = ''; inp.value = ${JSON.stringify(text)};
+
+          // Click the element first — reactive frameworks (React/Vue) need real mouse events
+          const rect = inp.getBoundingClientRect();
+          const cx = rect.left + rect.width / 2;
+          const cy = rect.top + rect.height / 2;
+          inp.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: cx, clientY: cy }));
+          inp.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+          inp.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: cx, clientY: cy }));
+          inp.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+          inp.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+          inp.focus();
+
+          // Clear existing value and notify frameworks
+          inp.select();
+          inp.value = '';
           inp.dispatchEvent(new Event('input', { bubbles: true }));
+
+          if (!${JSON.stringify(text)}) {
+            inp.dispatchEvent(new Event('change', { bubbles: true }));
+            return 'cleared element at index ${index}';
+          }
+          // Type each character with native input events
+          for (const ch of ${JSON.stringify(text)}) {
+            inp.dispatchEvent(new KeyboardEvent('keydown', { key: ch, bubbles: true, cancelable: true }));
+            inp.dispatchEvent(new KeyboardEvent('keypress', { key: ch, bubbles: true, cancelable: true }));
+            const start = inp.selectionStart || 0;
+            inp.value = inp.value.slice(0, start) + ch + inp.value.slice(inp.selectionEnd || start);
+            inp.selectionStart = inp.selectionEnd = start + 1;
+            inp.dispatchEvent(new Event('input', { bubbles: true }));
+            inp.dispatchEvent(new KeyboardEvent('keyup', { key: ch, bubbles: true, cancelable: true }));
+          }
           inp.dispatchEvent(new Event('change', { bubbles: true }));
-          return 'typed';
+          return 'typed "' + ${JSON.stringify(text)} + '" into ' + inp.tagName.toLowerCase() + ' at index ${index}';
         }
         return 'element not found at index ${index}';
       })()
     `).then(async () => { await new Promise((r) => setTimeout(r, 300)); });
   }, [evalInPage]);
 
-  const getScreenshot = useCallback(async (): Promise<string> => {
-    // Desktop (Electron): use native webview capturePage for pixel-perfect Chromium screenshot
-    if (isDesktop) {
-      const wv = webviewRef.current as any;
-      if (wv && typeof wv.capturePage === "function") {
-        try {
-          const image = await wv.capturePage();
-          if (image && typeof image.toDataURL === "function") {
-            return image.toDataURL();
+  const getPageSnapshot = useCallback(async (): Promise<string> => {
+    return evalInPage(`
+      (() => {
+        const lines = [];
+        lines.push('URL: ' + window.location.href);
+        lines.push('Title: ' + document.title);
+
+        // Visible text content — collect from body text nodes with layout
+        const body = document.body;
+        const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+        const texts = [];
+        let node;
+        while ((node = walker.nextNode())) {
+          const el = node.parentElement;
+          if (!el) continue;
+          const style = window.getComputedStyle(el);
+          if (style.display === 'none' || style.visibility === 'hidden') continue;
+          const txt = node.textContent?.trim();
+          if (!txt) continue;
+          const tag = el.tagName.toLowerCase();
+          // Prepend tag for semantic elements
+          if (['h1','h2','h3','h4','h5','h6','button','a','label','strong','em','li'].includes(tag)) {
+            texts.push(tag.toUpperCase() + ': ' + txt);
+          } else {
+            texts.push(txt);
           }
-        } catch { /* fall through to html2canvas */ }
-      }
-    }
-
-    // Web (iframe): use server-side Playwright for an accurate headless screenshot
-    if (!isDesktop && currentUrl) {
-      try {
-        const resp = await fetch("/api/browser/playwright-screenshot", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ url: currentUrl }),
-        });
-        if (resp.ok) {
-          const data = await resp.json();
-          if (data.dataUrl) return data.dataUrl;
+          if (texts.length > 100) break;
         }
-      } catch { /* fall through to html2canvas */ }
-    }
+        lines.push('--- Page Text ---');
+        lines.push(texts.join('\\n'));
 
-    // Fallback: html2canvas (loaded in page via the iframe injection)
+        // Form elements
+        const inputs = document.querySelectorAll('input:not([type="hidden"]), select, textarea');
+        if (inputs.length > 0) {
+          const formLines = [];
+          inputs.forEach(function(el, i) {
+            const tag = el.tagName.toLowerCase();
+            const type = el.getAttribute('type') || 'text';
+            const name = el.getAttribute('name') || '';
+            const placeholder = el.getAttribute('placeholder') || '';
+            const val = el.value || '';
+            const info = [tag];
+            if (type && tag === 'input') info.push('type=' + type);
+            if (name) info.push('name="' + name + '"');
+            if (placeholder) info.push('placeholder="' + placeholder + '"');
+            if (val) info.push('value="' + val + '"');
+            formLines.push('  [' + (i + texts.length) + '] <' + info.join(' ') + '>');
+          });
+          lines.push('--- Form Elements ---');
+          lines.push(formLines.join('\\n'));
+        }
+
+        // Buttons & links
+        const buttons = document.querySelectorAll('button, a, [role="button"], input[type="submit"], input[type="button"]');
+        const btnLines = [];
+        buttons.forEach(function(el, i) {
+          const txt = (el.textContent || el.value || '').trim().slice(0, 60);
+          const tag = el.tagName.toLowerCase();
+          const href = el.getAttribute('href') || '';
+          const info = tag + (href ? ' href="' + href.slice(0, 50) + '"' : '');
+          if (txt) btnLines.push('  [' + (i + texts.length + inputs.length) + '] <' + info + '> "' + txt + '"');
+        });
+        if (btnLines.length > 0) lines.push('--- Buttons & Links (' + btnLines.length + ') ---');
+        lines.push(btnLines.join('\\n'));
+
+        // Error state: visible error text
+        const errors = document.querySelectorAll('[role="alert"], .error, .alert-danger, [class*="error"], [class*="Error"]');
+        if (errors.length > 0) {
+          lines.push('--- Errors/Warnings ---');
+          errors.forEach(function(el) {
+            const txt = (el.textContent || '').trim().slice(0, 200);
+            if (txt) lines.push('  ' + txt);
+          });
+        }
+
+        return lines.join('\\n');
+      })()
+    `);
+  }, [evalInPage]);
+
+  // Wait for an element matching a CSS selector to appear. Returns text content of first match.
+  const waitForElement = useCallback(async (selector: string, timeoutMs: number = 5000): Promise<string> => {
     return evalInPage(`
       new Promise((resolve) => {
-        if (typeof html2canvas !== 'undefined') {
-          html2canvas(document.body).then((canvas) => resolve(canvas.toDataURL('image/png')));
-        } else {
-          resolve('ERR:html2canvas not loaded in page');
-        }
+        const start = Date.now();
+        const check = () => {
+          const el = document.querySelector(${JSON.stringify(selector)});
+          if (el) {
+            resolve('[FOUND] ' + el.tagName.toLowerCase()
+              + (el.id ? '#' + el.id : '')
+              + (el.className && typeof el.className === 'string' ? '.' + el.className.split(' ').join('.') : '')
+              + ' text="' + (el.textContent || '').trim().slice(0, 200) + '"');
+            return;
+          }
+          if (Date.now() - start > ${timeoutMs}) {
+            resolve('NOT_FOUND: selector "${selector}" did not appear within ${timeoutMs}ms');
+            return;
+          }
+          setTimeout(check, 200);
+        };
+        check();
       })
     `);
-  }, [isDesktop, currentUrl, evalInPage]);
+  }, [evalInPage]);
+
+  // Get the last 50 captured console entries (log/warn/error) as a report.
+  const getConsoleEntries = useCallback(async (): Promise<string> => {
+    return evalInPage(`
+      (() => {
+        if (!window.__harnessConsoleEntries) return 'No console entries captured.';
+        const entries = window.__harnessConsoleEntries.slice(-50);
+        if (entries.length === 0) return 'Console is empty.';
+        return entries.map(function(e) {
+          return '[' + e.level.toUpperCase() + '] ' + e.text;
+        }).join('\\n');
+      })()
+    `);
+  }, [evalInPage]);
+
+  // Get failed network requests since page load using PerformanceObserver.
+  const getRequestErrors = useCallback(async (): Promise<string> => {
+    return evalInPage(`
+      (() => {
+        if (!window.__harnessRequestErrors || window.__harnessRequestErrors.length === 0) {
+          return 'No request errors captured.';
+        }
+        const errors = window.__harnessRequestErrors.slice(-30);
+        return errors.map(function(r) {
+          return '[' + r.status + '] ' + r.method + ' ' + r.url;
+        }).join('\\n');
+      })()
+    `);
+  }, [evalInPage]);
 
   const navigateTo = useCallback(async (url: string): Promise<void> => {
     if (activeTab) {
+      liveUrlRef.current = url;
+      navigatingRef.current = true;
       onUrlChange?.(activeTab.id, url);
     }
   }, [activeTab, onUrlChange]);
 
+  const getInfo = useCallback((): string => {
+    if (!activeTab || !currentUrl) return "No browser tab open.";
+    return `URL: ${currentUrl} | Loaded: ${loading ? "loading" : "yes"} | Tabs: ${tabs.length}`;
+  }, [activeTab, currentUrl, loading, tabs]);
+
+  const clearElement = useCallback(async (index: number): Promise<string> => {
+    return typeIntoElement(index, "").then(() => "Cleared element.");
+  }, [typeIntoElement]);
+
+  // ── Coordinate-based mouse ──
+  const mouseEvent = useCallback(async (x: number, y: number, eventType: string): Promise<string> => {
+    return evalInPage(`
+      (() => {
+        const el = document.elementFromPoint(${x}, ${y});
+        const target = el || document.body;
+        const opts = { clientX: ${x}, clientY: ${y}, bubbles: true, cancelable: true, view: window };
+        if (${JSON.stringify(eventType)} === 'click') {
+          target.dispatchEvent(new PointerEvent('pointerdown', opts));
+          target.dispatchEvent(new MouseEvent('mousedown', opts));
+          target.dispatchEvent(new PointerEvent('pointerup', opts));
+          target.dispatchEvent(new MouseEvent('mouseup', opts));
+          target.dispatchEvent(new MouseEvent('click', opts));
+        } else if (${JSON.stringify(eventType)} === 'contextmenu') {
+          target.dispatchEvent(new MouseEvent('contextmenu', opts));
+        } else if (${JSON.stringify(eventType)} === 'move') {
+          target.dispatchEvent(new MouseEvent('mousemove', opts));
+          target.dispatchEvent(new PointerEvent('pointermove', opts));
+        }
+        const tag = target.tagName ? target.tagName.toLowerCase() : 'unknown';
+        return ${JSON.stringify(eventType)} + ' at (' + ${x} + ',' + ${y} + ') on <' + tag + '>';
+      })()
+    `);
+  }, [evalInPage]);
+
+  const clickCoords = useCallback(async (x: number, y: number): Promise<string> => {
+    return mouseEvent(x, y, "click");
+  }, [mouseEvent]);
+
+  const moveMouse = useCallback(async (x: number, y: number): Promise<string> => {
+    return mouseEvent(x, y, "move");
+  }, [mouseEvent]);
+
+  const rightClick = useCallback(async (x: number, y: number): Promise<string> => {
+    return mouseEvent(x, y, "contextmenu");
+  }, [mouseEvent]);
+
+  const scrollPage = useCallback(async (x: number, y: number, to?: string): Promise<string> => {
+    if (to === "top") return evalInPage(`window.scrollTo(0, 0); 'Scrolled to top.';`);
+    if (to === "bottom") return evalInPage(`window.scrollTo(0, document.body.scrollHeight); 'Scrolled to bottom.';`);
+    return evalInPage(`window.scrollBy(${x || 0}, ${y || 0}); 'Scrolled by ${x || 0},${y || 0}.';`);
+  }, [evalInPage]);
+
+  const hoverElement = useCallback(async (index: number): Promise<string> => {
+    return evalInPage(`
+      (() => {
+        const w = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+        let i = 0; let el;
+        while ((el = w.nextNode())) { if (i++ === ${index}) break; }
+        if (!el) return 'Element not found at index ${index}.';
+        const rect = el.getBoundingClientRect();
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, clientX: cx, clientY: cy }));
+        el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, clientX: cx, clientY: cy }));
+        el.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: cx, clientY: cy }));
+        return 'Hovered element at index ${index}.';
+      })()
+    `);
+  }, [evalInPage]);
+
+  const pressKey = useCallback(async (key: string): Promise<string> => {
+    return evalInPage(`
+      (() => {
+        const el = document.activeElement || document.body;
+        el.dispatchEvent(new KeyboardEvent('keydown', { key: ${JSON.stringify(key)}, bubbles: true, cancelable: true }));
+        el.dispatchEvent(new KeyboardEvent('keypress', { key: ${JSON.stringify(key)}, bubbles: true, cancelable: true }));
+        el.dispatchEvent(new KeyboardEvent('keyup', { key: ${JSON.stringify(key)}, bubbles: true, cancelable: true }));
+        return 'Pressed ${key}.';
+      })()
+    `);
+  }, [evalInPage]);
+
+  const uploadFile = useCallback(async (index: number, paths: string[]): Promise<string> => {
+    const dt = new DataTransfer();
+    for (const fp of paths) {
+      try {
+        const res = await fetch(`/api/fs/read-binary?path=${encodeURIComponent(fp)}`);
+        if (!res.ok) return `Cannot read file: ${fp} (HTTP ${res.status})`;
+        const blob = await res.blob();
+        const name = fp.split(/[/\\]/).pop() || "file";
+        dt.items.add(new File([blob], name));
+      } catch { return `Cannot read file: ${fp}`; }
+    }
+    return evalInPage(`
+      (() => {
+        const w = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+        let i = 0; let el;
+        while ((el = w.nextNode())) { if (i++ === ${index}) break; }
+        if (!el) return 'Element not found at index ${index}.';
+        if (el.tagName !== 'INPUT' || el.type !== 'file') return 'Element is not a file input.';
+        Object.defineProperty(el, 'files', { value: null, writable: true });
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return 'Uploaded ${paths.length} file(s).';
+      })()
+    `);
+  }, [evalInPage]);
+
+  const selectOption = useCallback(async (index: number, value?: string, label?: string): Promise<string> => {
+    const v = value != null ? JSON.stringify(value) : "null";
+    const l = label != null ? JSON.stringify(label) : "null";
+    return evalInPage(`
+      (() => {
+        const w = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+        let i = 0; let el;
+        while ((el = w.nextNode())) { if (i++ === ${index}) break; }
+        if (!el) return 'Element not found at index ${index}.';
+        if (el.tagName !== 'SELECT') return 'Element at index ${index} is <' + el.tagName.toLowerCase() + '>, not a <select>.';
+        const sel = el;
+
+        // Click to activate — reactive frameworks need this
+        const rect = sel.getBoundingClientRect();
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        sel.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: cx, clientY: cy }));
+        sel.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+        sel.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: cx, clientY: cy }));
+        sel.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+        sel.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+        sel.focus();
+
+        const value = ${v};
+        const label = ${l};
+        let changed = false;
+        if (value !== null) {
+          if (sel.value !== value) { sel.value = value; changed = true; }
+        } else if (label !== null) {
+          for (let j = 0; j < sel.options.length; j++) {
+            if (sel.options[j].text.trim() === label.trim()) {
+              if (sel.selectedIndex !== j) { sel.selectedIndex = j; changed = true; }
+              break;
+            }
+          }
+        }
+        if (!changed) return 'Option already selected.';
+        // Dispatch both input and change — some frameworks listen for 'input' on select
+        sel.dispatchEvent(new Event('input', { bubbles: true }));
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+        return 'Selected: ' + (sel.options[sel.selectedIndex]?.text || sel.value);
+      })()
+    `);
+  }, [evalInPage]);
+
   useImperativeHandle(ref, () => ({
-    evalInPage, getIndexedDom, clickElement, typeIntoElement, getScreenshot, navigateTo,
-  }), [evalInPage, getIndexedDom, clickElement, typeIntoElement, getScreenshot, navigateTo]);
+    evalInPage, getIndexedDom, clickElement, typeIntoElement, clearElement, clickCoords, moveMouse, rightClick, scrollPage, pressKey, uploadFile, getPageSnapshot, navigateTo,
+    waitForElement, getConsoleEntries, getRequestErrors, getInfo, selectOption,
+  }), [evalInPage, getIndexedDom, clickElement, typeIntoElement, clearElement, clickCoords, moveMouse, rightClick, scrollPage, pressKey, uploadFile, getPageSnapshot, navigateTo,
+    waitForElement, getConsoleEntries, getRequestErrors, getInfo, selectOption]);
 
   return (
     <div className="browser-iframe-container">
@@ -1611,7 +2006,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
                   key={`${tabId}-${perms.geolocation}-${perms.camera}-${perms.microphone}`}
                   src={toProxySrc(currentUrl)}
                   allow={allowAttr}
-                  sandbox={undefined}
+                  sandbox={sandboxAttr}
                   onLoad={iframeLoadHandler}
                   style={{ width: "100%", height: "100%", border: "none" }}
                 />

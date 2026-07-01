@@ -874,6 +874,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
 
   const applyAiFiles = useCallback((aiFiles: { name: string; content: string; fsPath?: string; isNew?: boolean }[]) => {
     let newFileId = "";
+    let modifiedFileId = "";
     setFiles((prev) => {
       const updated = [...prev];
       for (const af of aiFiles) {
@@ -900,6 +901,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
               body: JSON.stringify({ path: match._fsPath, content: af.content }),
             }).catch(() => {});
           }
+          modifiedFileId = modifiedFileId || match.id;
         } else {
           const f = createFile(af.name, af.content);
           if (af.fsPath) {
@@ -917,6 +919,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
       return updated;
     });
     if (newFileId) setActiveFileId(newFileId);
+    else if (modifiedFileId) setActiveFileId(modifiedFileId);
   }, [fsBasePath]);
 
   const agentDiffsPendingRef = useRef<Record<string, { originalContent: string; newContent: string }>>({});
@@ -1133,6 +1136,16 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     } else {
       lines.push("Browser Console: empty");
     }
+    // ── Current browser tab(s) ──
+    if (browserTabs.length > 0) {
+      lines.push("Browser tabs:");
+      for (const t of browserTabs) {
+        const isActive = t.id === activeBrowserTabId ? " [ACTIVE]" : "";
+        lines.push(`  ${t.url || "(new tab)"}${isActive}`);
+      }
+    } else {
+      lines.push("Browser: no tabs open");
+    }
 
     // ── Files ──
     lines.push(`Open files: ${files.length} (active: ${activeFile?.name || "none"})`);
@@ -1174,22 +1187,63 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     }
 
     return lines.join("\n");
-  }, [problemEntries, debugEntries, outputEntries, browserConsoleMap, activeBrowserTabId, files, activeFileId, activeFile, dirtyFiles, gitChanges, fsRoot, fsBasePath]);
+  }, [problemEntries, debugEntries, outputEntries, browserConsoleMap, activeBrowserTabId, browserTabs, files, activeFileId, activeFile, dirtyFiles, gitChanges, fsRoot, fsBasePath]);
 
   // Execute a browser tool on behalf of the agent.
   const executeBrowserAction = useCallback(async (toolName: string, params: Record<string, unknown>): Promise<string> => {
+    // browser_navigate doesn't need an existing loaded page — it creates/opens a tab
+    if (toolName === "browser_navigate") {
+      const url = String(params.url || "");
+      let parsed: URL;
+      try { parsed = new URL(url); } catch { return `Blocked: invalid URL "${url}".`; }
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        return `Blocked: only http/https URLs are allowed (got "${parsed.protocol}").`;
+      }
+      if (browserTabs.length === 0) {
+        onBrowserNewTabFromLink?.(url);
+      } else {
+        const tabId = activeBrowserTabId || browserTabs[0]?.id;
+        if (tabId) onBrowserTabUpdateUrl?.(tabId, url);
+      }
+      setActiveFileId(BROWSER_EDITOR_TAB_ID);
+      return `Navigating to ${url}...`;
+    }
+
     const bv = browserViewRef.current;
     if (!bv) return "Browser not available (no page loaded).";
     switch (toolName) {
-      case "browser_screenshot": return bv.getScreenshot();
+      case "browser_screenshot": return bv.getPageSnapshot();
       case "browser_get_dom": return bv.getIndexedDom();
-      case "browser_click": await bv.clickElement(Number(params.index || 0)); return "Clicked element.";
-      case "browser_type": await bv.typeIntoElement(Number(params.index || 0), String(params.text || "")); return "Typed text.";
-      case "browser_eval": return bv.evalInPage(String(params.code || ""));
-      case "browser_navigate": bv.navigateTo(String(params.url || "")); return `Navigating to ${params.url}...`;
+      case "browser_type": await bv.typeIntoElement(Number(params.index || 0), String(params.text || "")); return `Typed "${params.text}" into element.`;
+      case "browser_clear": return bv.clearElement(Number(params.index || 0));
+      case "browser_eval": {
+        const code = String(params.code || "");
+        // Block dangerous operations that could exfiltrate data or compromise the page
+        const blocked = /\b(?:document\.cookie|fetch\s*\(|XMLHttpRequest|window\.open|window\.location\s*=|WebSocket|import\s*\(|navigator\.sendBeacon)\b/;
+        if (blocked.test(code)) return "Blocked: code contains potentially dangerous operations (fetch/XHR/cookie access/window.open).";
+        return bv.evalInPage(code);
+      }
+      case "browser_wait": {
+        const selector = String(params.selector || "");
+        if (!selector) return "Error: selector is required.";
+        const timeout = Number(params.timeoutMs) || 5000;
+        return bv.waitForElement(selector, timeout);
+      }
+      case "browser_click":
+        if (params.index != null) return bv.clickElement(Number(params.index));
+        return bv.clickCoords(Number(params.x || 0), Number(params.y || 0));
+      case "browser_move_mouse": return bv.moveMouse(Number(params.x || 0), Number(params.y || 0));
+      case "browser_right_click": return bv.rightClick(Number(params.x || 0), Number(params.y || 0));
+      case "browser_press_key": return bv.pressKey(String(params.key || ""));
+      case "browser_upload_file": return bv.uploadFile(Number(params.index || 0), (params.paths as string[]) || []);
+      case "browser_console": return bv.getConsoleEntries();
+      case "browser_request_errors": return bv.getRequestErrors();
+      case "browser_info": return bv.getInfo();
+      case "browser_select": return bv.selectOption(Number(params.index || 0), params.value as string | undefined, params.label as string | undefined);
+      case "read_problems": return getConsoleContext();
       default: return `Unknown browser tool: ${toolName}`;
     }
-  }, []);
+  }, [browserTabs, activeBrowserTabId, onBrowserNewTabFromLink, onBrowserTabUpdateUrl]);
 
   // Flat list of project-file paths for the agent's file-mention autocomplete.
   const getProjectFiles = useCallback(async (): Promise<string[]> => {

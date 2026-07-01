@@ -4,8 +4,6 @@ import { createServer } from "http";
 import http from "http";
 import https from "https";
 import { WebSocketServer, WebSocket } from "ws";
-import { launchBrowser, closeBrowser, navigateTo, takeScreenshot } from "./browser";
-import { runLoop, LoopConfig, LoopEvent } from "./loop";
 import { chatDeepSeek } from "./deepseek";
 import {
   createSession, writeToSession, resizeSession,
@@ -25,7 +23,7 @@ const PORT = 3001;
 app.use(express.json({ limit: "10mb" }));
 
 // ── Broadcast helper ──
-const broadcast = (event: LoopEvent | { type: string; data: unknown }) => {
+const broadcast = (event: { type: string; data: unknown }) => {
   const payload = JSON.stringify(event);
   wss.clients.forEach((client) => {
     if (client.readyState === WebSocket.OPEN) {
@@ -33,23 +31,6 @@ const broadcast = (event: LoopEvent | { type: string; data: unknown }) => {
     }
   });
 };
-
-// ── Test run ──
-app.post("/api/run", async (req, res) => {
-  const config: LoopConfig = req.body;
-  if (!config.html && !config.goal) {
-    return res.status(400).json({ error: "Missing html, css, js or goal" });
-  }
-
-  res.json({ status: "started" });
-
-  try {
-    await launchBrowser();
-    await runLoop(config, broadcast);
-  } catch (err) {
-    broadcast({ type: "error", data: String(err) });
-  }
-});
 
 // ── Agentic coding chat (simple, single-turn) ──
 app.post("/api/chat", async (req, res) => {
@@ -201,13 +182,19 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
       const pp = state.pendingPermission;
       state.pendingPermission = undefined;
       if (permissionGranted) {
-        // run_in_terminal always runs via the terminal bridge — server doesn't execute.
-        // Push a result immediately so the agent can continue.
-        cmdResult = `Running in terminal tab: ${pp.command}`;
+        if (pp.toolName === "browser_eval") {
+          // Browser eval: client will execute and return result via /continue
+          cmdResult = null; // don't push a result yet — client will provide it
+        } else {
+          // run_in_terminal: runs via terminal bridge — push placeholder result
+          cmdResult = `${pp.command} is starting in a terminal tab. The terminal may auto-detect a URL and open a browser tab shortly. Call browser_info to check if a tab opened — do NOT guess the port.`;
+        }
       } else {
         cmdResult = "Permission denied by user.";
       }
-      state.messages.push({ role: "tool", content: cmdResult, tool_call_id: pp.toolCallId });
+      if (cmdResult !== null) {
+        state.messages.push({ role: "tool", content: cmdResult, tool_call_id: pp.toolCallId });
+      }
     } else {
       addToolResultStream(sessionId, toolCallId, String(toolResult || ""));
     }
@@ -297,7 +284,7 @@ app.get("/api/fs/list", (req, res) => {
     const dirPath = safePath((req.query.path as string) || process.cwd());
     const entries = fs.readdirSync(dirPath, { withFileTypes: true });
     const result = entries
-      .filter((e) => !e.name.startsWith(".") && e.name !== "node_modules")
+      .filter((e) => e.name !== "node_modules")
       .map((e) => ({
         name: e.name,
         path: path.join(dirPath, e.name),
@@ -320,7 +307,7 @@ app.get("/api/fs/list-recursive", (req, res) => {
     const result: string[] = [];
     const walk = (d: string) => {
       for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
-        if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
+        if (entry.name === "node_modules") continue;
         const full = path.join(d, entry.name);
         if (entry.isDirectory()) {
           walk(full);
@@ -441,6 +428,19 @@ app.post("/api/fs/mkdir", (req, res) => {
     const dirPath = safePath(req.body.path);
     fs.mkdirSync(dirPath, { recursive: true });
     res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+// Read a file as binary (needed for browser file upload)
+app.get("/api/fs/read-binary", async (req, res) => {
+  try {
+    const filePath = req.query.path as string;
+    if (!filePath) return res.status(400).json({ error: "Missing path" });
+    const resolved = safePath(filePath);
+    if (!fs.existsSync(resolved)) return res.status(404).json({ error: "File not found" });
+    res.sendFile(resolved);
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -1004,22 +1004,6 @@ app.get("/api/health", (_req, res) => {
   res.json({ status: "ok" });
 });
 
-// ── Playwright screenshot (agent uses this for pixel-perfect screenshots) ──
-app.post("/api/browser/playwright-screenshot", async (req, res) => {
-  try {
-    const { url } = req.body;
-    if (!url || typeof url !== "string") {
-      res.status(400).json({ error: "url is required" });
-      return;
-    }
-    await navigateTo(url);
-    const dataUrl = await takeScreenshot();
-    res.json({ dataUrl });
-  } catch (err: any) {
-    res.status(500).json({ error: err?.message || "Screenshot failed" });
-  }
-});
-
 // ── Serve client (desktop / production) ──
 const clientDist = path.resolve(process.cwd(), "client", "dist");
 if (process.env.HARNESS_SERVE_CLIENT === "1" && fs.existsSync(path.join(clientDist, "index.html"))) {
@@ -1077,6 +1061,9 @@ app.use("/_browser", (req, res, next) => {
       delete headers["x-frame-options"];
       delete headers["content-security-policy"];
       delete headers["content-security-policy-report-only"];
+      // Inject CSP to prevent proxied pages from accessing Harness APIs
+      headers["content-security-policy"] =
+        "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:; frame-ancestors 'self'; form-action *";
 
       // Inject <base> tag for HTML responses so relative URLs resolve correctly
       const contentType = String(headers["content-type"] || "");
@@ -1189,10 +1176,8 @@ server.listen(PORT, () => {
 });
 
 process.on("SIGINT", async () => {
-  await closeBrowser();
   process.exit();
 });
 process.on("SIGTERM", async () => {
-  await closeBrowser();
   process.exit();
 });
