@@ -922,8 +922,18 @@ Close with: \`browser_press_key key="Escape"\` or click close button.
 
 **If submits, navigations, or dialog triggers don't work** — use \`browser_eval\` to inspect the page state or trigger the action programmatically.
 
+### Build & fix loop
+CRITICAL: After making ANY code changes, you MUST verify the project still compiles without errors.
+1. Run the project's build command (e.g. \`npm run build\`, \`tsc --noEmit\`, \`python -m py_compile\`, \`go build\`).
+2. If the build FAILS: read the error output carefully, identify the file and line causing the error, fix it, and build again.
+3. Repeat the edit → build → fix loop until the build passes with zero errors.
+4. After the build passes, call \`read_problems\` to confirm no IDE diagnostics remain.
+5. Only then proceed to the next task step.
+If you are unsure which build command to use, check \`package.json\` scripts, \`tsconfig.json\`, or common build files first.
+
 ### Diagnostics
 - Use \`read_problems\` to check the current IDE diagnostics — linter errors, TypeScript errors, warnings, hints. Call this after making file changes to verify no new errors were introduced.
+- **IMPORTANT:** \`read_problems\` is a browser-side tool. Call it BY ITSELF — do NOT batch it in the same response with other browser_* tools (browser_click, browser_type, browser_navigate, browser_screenshot, browser_get_dom, browser_select, etc.). If you batch it, it will return NOT_EXECUTED and you must re-call it alone.
 - Use \`browser_console\` to inspect browser console output for runtime errors.
 - Use \`browser_request_errors\` to check for failed network requests in the browser.
 - Use \`run_command\` to run tests, linters, or build commands and read their output directly.
@@ -982,7 +992,7 @@ export async function agentLoop(
       // Flush any pending tool_call_ids before pushing a new assistant with tool_calls.
       // This maintains valid API ordering: assistant(tool_calls) → tool(response).
       for (const id of pendingIds) {
-        openaiMessages.push({ role: "tool", content: "Deferred.", tool_call_id: id });
+        openaiMessages.push({ role: "tool", content: "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_get_dom, browser_select, or any other browser_* tool) on your next turn to get the actual result.", tool_call_id: id });
       }
       pendingIds.clear();
 
@@ -1007,7 +1017,7 @@ export async function agentLoop(
   // Auto-complete any tool_call_ids still waiting for a response.
   // This ensures the message sequence is always valid for the API.
   for (const id of pendingIds) {
-    openaiMessages.push({ role: "tool", content: "Deferred.", tool_call_id: id });
+    openaiMessages.push({ role: "tool", content: "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_get_dom, browser_select, or any other browser_* tool) on your next turn to get the actual result.", tool_call_id: id });
   }
 
   const { text, toolCalls, reasoningContent } = await chatDeepSeekTool(openaiMessages, TOOLS, { model: modelOpts?.model, apiKey });
@@ -1055,12 +1065,12 @@ export async function agentLoop(
     }
 
     if (browserTool) {
-      // Push any remaining tool calls with "Deferred." responses so they aren't lost.
+      // Push any remaining tool calls with "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_get_dom, browser_select, or any other browser_* tool) on your next turn to get the actual result." responses so they aren't lost.
       // The actual result for the browser tool will be pushed by /continue.
       for (let i = browserBreakIdx + 1; i < toolCalls.length; i++) {
         const tc = toolCalls[i];
         state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: tc.function.name, arguments: tc.function.arguments } }]), name: tc.function.name, ...rc2(reasoningContent) });
-        state.messages.push({ role: "tool", content: "Deferred.", tool_call_id: tc.id });
+        state.messages.push({ role: "tool", content: "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_get_dom, browser_select, or any other browser_* tool) on your next turn to get the actual result.", tool_call_id: tc.id });
       }
       return { phase: "tool_needed", tool: browserTool, executedTools, messages: state.messages };
     }
@@ -1113,7 +1123,7 @@ export async function* agentLoopStream(
         // Flush any pending tool_call_ids before pushing a new assistant with tool_calls.
         // This maintains valid API ordering: assistant(tool_calls) → tool(response).
         for (const id of pendingIds) {
-          msgs.push({ role: "tool", content: "Deferred.", tool_call_id: id });
+          msgs.push({ role: "tool", content: "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_get_dom, browser_select, or any other browser_* tool) on your next turn to get the actual result.", tool_call_id: id });
         }
         pendingIds.clear();
 
@@ -1132,7 +1142,7 @@ export async function* agentLoopStream(
     // Auto-complete any tool_call_ids still waiting for a response.
     // This ensures the message sequence is always valid for the API.
     for (const id of pendingIds) {
-      msgs.push({ role: "tool", content: "Deferred.", tool_call_id: id });
+      msgs.push({ role: "tool", content: "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_get_dom, browser_select, or any other browser_* tool) on your next turn to get the actual result.", tool_call_id: id });
     }
     return msgs;
   };
@@ -1242,14 +1252,14 @@ export async function* agentLoopStream(
       if (fnName === "run_in_terminal") {
         const cmd = String(params.command || "");
         // Push individual assistant+tool messages for each tool call.
-        // run_in_terminal pauses for permission — push "Deferred." for all
+        // run_in_terminal pauses for permission — push "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_get_dom, browser_select, or any other browser_* tool) on your next turn to get the actual result." for all
         // other tools so they don't block. The actual run_in_terminal result
         // will be pushed by /stream/continue.
         for (let i = 0; i < finalToolCalls.length; i++) {
           const t = finalToolCalls[i];
           state.messages.push({ role: "assistant", content: JSON.stringify([{ id: t.id, type: "function", function: { name: t.function.name, arguments: t.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
           if (i > 0) {
-            state.messages.push({ role: "tool", content: "Deferred.", tool_call_id: t.id });
+            state.messages.push({ role: "tool", content: "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_get_dom, browser_select, or any other browser_* tool) on your next turn to get the actual result.", tool_call_id: t.id });
           }
         }
         // Store the pending command so /continue can execute it after user approval
@@ -1270,14 +1280,14 @@ export async function* agentLoopStream(
       if (fnName === "browser_eval") {
         const code = String(params.code || "");
         // Push individual assistant+tool messages for each tool call.
-        // browser_eval pauses for permission — push "Deferred." for all
+        // browser_eval pauses for permission — push "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_get_dom, browser_select, or any other browser_* tool) on your next turn to get the actual result." for all
         // other tools so they don't block. The actual eval result will be
         // pushed by /stream/continue.
         for (let i = 0; i < finalToolCalls.length; i++) {
           const t = finalToolCalls[i];
           state.messages.push({ role: "assistant", content: JSON.stringify([{ id: t.id, type: "function", function: { name: t.function.name, arguments: t.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
           if (i > 0) {
-            state.messages.push({ role: "tool", content: "Deferred.", tool_call_id: t.id });
+            state.messages.push({ role: "tool", content: "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_get_dom, browser_select, or any other browser_* tool) on your next turn to get the actual result.", tool_call_id: t.id });
           }
         }
         state.pendingPermission = { toolCallId: tc.id, command: code, background: false, toolName: "browser_eval" };
@@ -1338,12 +1348,12 @@ export async function* agentLoopStream(
     }
 
     if (browserTool) {
-      // Push any remaining tool calls with "Deferred." responses so they aren't lost.
+      // Push any remaining tool calls with "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_get_dom, browser_select, or any other browser_* tool) on your next turn to get the actual result." responses so they aren't lost.
       // The actual result for the browser tool will be pushed by /stream/continue.
       for (let i = browserBreakIdx + 1; i < finalToolCalls.length; i++) {
         const tc = finalToolCalls[i];
         state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: tc.function.name, arguments: tc.function.arguments } }]), name: tc.function.name, ...rc(finalReasoning) });
-        state.messages.push({ role: "tool", content: "Deferred.", tool_call_id: tc.id });
+        state.messages.push({ role: "tool", content: "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_get_dom, browser_select, or any other browser_* tool) on your next turn to get the actual result.", tool_call_id: tc.id });
       }
       // Yield browser_tool and stop — caller resumes via /continue/stream
       yield {

@@ -769,6 +769,29 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     });
   }, [files, markersByFileId]);
 
+  // Diagnostic error/warning maps for file tree rendering
+  const diagnosticErrors = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const p of problemEntries) {
+      if (p.severity === "error" && p.filePath) {
+        const k = normPath(p.filePath);
+        map.set(k, (map.get(k) || 0) + 1);
+      }
+    }
+    return map;
+  }, [problemEntries]);
+
+  const diagnosticWarnings = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const p of problemEntries) {
+      if (p.severity === "warning" && p.filePath) {
+        const k = normPath(p.filePath);
+        map.set(k, (map.get(k) || 0) + 1);
+      }
+    }
+    return map;
+  }, [problemEntries]);
+
   useEffect(() => { activeFileIdRef.current = activeFileId; }, [activeFileId]);
 
   useEffect(() => {
@@ -1689,6 +1712,8 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
             width={filePanelW}
             gitChanges={gitChanges}
             newFilePaths={newFilePaths}
+            diagnosticErrors={diagnosticErrors}
+            diagnosticWarnings={diagnosticWarnings}
           />
           <ResizeHandle onMouseDown={onFilePanelDrag} />
         </>

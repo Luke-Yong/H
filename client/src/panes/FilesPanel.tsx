@@ -36,6 +36,10 @@ interface Props {
   activeFilePath: string | null;
   /** Set of file paths marked as "created by agent". */
   newFilePaths?: Set<string>;
+  /** Map of file path → error count (from IDE diagnostics). */
+  diagnosticErrors?: Map<string, number>;
+  /** Map of file path → warning count (from IDE diagnostics). */
+  diagnosticWarnings?: Map<string, number>;
 }
 
 function statusColor(s: string): string {
@@ -46,7 +50,7 @@ function statusColor(s: string): string {
   return "#e2b714";
 }
 
-function FsTree({ entries, basePath, onOpenFile, onOpenFolder, depth, gitChanges, selectedFolder, onSelectFolder, onContextMenu, activeFilePath, newFilePaths, refreshKey }: {
+function FsTree({ entries, basePath, onOpenFile, onOpenFolder, depth, gitChanges, selectedFolder, onSelectFolder, onContextMenu, activeFilePath, newFilePaths, diagnosticErrors, diagnosticWarnings, refreshKey }: {
   entries: FsEntry[];
   basePath: string;
   onOpenFile: (p: string, h?: FileSystemFileHandle) => void;
@@ -58,6 +62,8 @@ function FsTree({ entries, basePath, onOpenFile, onOpenFolder, depth, gitChanges
   onContextMenu: (e: React.MouseEvent, entry: FsEntry) => void;
   activeFilePath: string | null;
   newFilePaths?: Set<string>;
+  diagnosticErrors?: Map<string, number>;
+  diagnosticWarnings?: Map<string, number>;
   refreshKey: number;
 }) {
   return (
@@ -76,6 +82,8 @@ function FsTree({ entries, basePath, onOpenFile, onOpenFolder, depth, gitChanges
           onContextMenu={onContextMenu}
           activeFilePath={activeFilePath}
           newFilePaths={newFilePaths}
+          diagnosticErrors={diagnosticErrors}
+          diagnosticWarnings={diagnosticWarnings}
           refreshKey={refreshKey}
         />
       ))}
@@ -102,7 +110,29 @@ function hasDescendantChanges(dirPath: string, changes: Map<string, string>): st
   return best;
 }
 
-function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth, gitChanges, selectedFolder, onSelectFolder, onContextMenu, activeFilePath, newFilePaths, refreshKey }: {
+// Check if a directory path has any descendant files with diagnostic errors or warnings.
+// Returns 'error' if any descendant has errors, 'warning' if only warnings.
+function hasDescendantDiagnostics(
+  dirPath: string,
+  errors: Map<string, number> | undefined,
+  warnings: Map<string, number> | undefined
+): "error" | "warning" | null {
+  const norm = normPath(dirPath);
+  const prefix = norm.endsWith("/") ? norm : norm + "/";
+  if (errors) {
+    for (const filePath of errors.keys()) {
+      if (normPath(filePath).startsWith(prefix)) return "error";
+    }
+  }
+  if (warnings) {
+    for (const filePath of warnings.keys()) {
+      if (normPath(filePath).startsWith(prefix)) return "warning";
+    }
+  }
+  return null;
+}
+
+function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth, gitChanges, selectedFolder, onSelectFolder, onContextMenu, activeFilePath, newFilePaths, diagnosticErrors, diagnosticWarnings, refreshKey }: {
   entry: FsEntry;
   basePath: string;
   onOpenFile: (p: string, h?: FileSystemFileHandle) => void;
@@ -114,6 +144,8 @@ function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth, gitChanges, 
   onContextMenu: (e: React.MouseEvent, entry: FsEntry) => void;
   activeFilePath: string | null;
   newFilePaths?: Set<string>;
+  diagnosticErrors?: Map<string, number>;
+  diagnosticWarnings?: Map<string, number>;
   refreshKey: number;
 }) {
   const [expanded, setExpanded] = useState(false);
@@ -175,6 +207,30 @@ function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth, gitChanges, 
     return gitChanges.get(normPath(entry.path)) || null;
   }, [entry, gitChanges]);
 
+  // Diagnostic markers — error/warning per file, cascaded to directories
+  const diagErrorCount = useMemo(() => {
+    if (!diagnosticErrors || diagnosticErrors.size === 0) return 0;
+    if (entry.isDirectory) return 0; // directories handled by hasDescendantDiagnostics below
+    return diagnosticErrors.get(normPath(entry.path)) || 0;
+  }, [entry, diagnosticErrors]);
+
+  const diagWarningCount = useMemo(() => {
+    if (!diagnosticWarnings || diagnosticWarnings.size === 0) return 0;
+    if (entry.isDirectory) return 0;
+    return diagnosticWarnings.get(normPath(entry.path)) || 0;
+  }, [entry, diagnosticWarnings]);
+
+  const dirDiagLevel = useMemo(() => {
+    if (!entry.isDirectory) return null;
+    return hasDescendantDiagnostics(entry.path, diagnosticErrors, diagnosticWarnings);
+  }, [entry, diagnosticErrors, diagnosticWarnings]);
+
+  const diagCount = diagErrorCount > 0
+    ? `${diagErrorCount} error${diagErrorCount > 1 ? 's' : ''}`
+    : diagWarningCount > 0
+      ? `${diagWarningCount} warning${diagWarningCount > 1 ? 's' : ''}`
+      : null;
+
   const isUntracked = !entry.isDirectory && (isNewFile || gitMarker === "?");
 
   const handleToggle = (e: React.MouseEvent) => {
@@ -197,6 +253,13 @@ function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth, gitChanges, 
 
   const iconUrl = entry.isDirectory ? folderIconUrl(expanded) : fileIconUrl(entry.name);
 
+  // Determine text color class for diagnostics
+  const diagClass = diagErrorCount > 0 || dirDiagLevel === "error"
+    ? " file-name-error"
+    : diagWarningCount > 0 || dirDiagLevel === "warning"
+      ? " file-name-warning"
+      : "";
+
   const item = (
     <div
       className={`fs-tree-item${isSelected ? " selected" : ""}${isActiveFile ? " active-file" : ""}${containsActive ? " contains-active" : ""}`}
@@ -207,7 +270,14 @@ function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth, gitChanges, 
       <span className="file-icon">
         {loading ? "⏳" : <img className="file-icon-img" src={iconUrl} alt="" draggable={false} />}
       </span>
-      <span className={`file-name${isUntracked ? " file-name-new" : ""}`}>{entry.name}</span>
+      <span className={`file-name${isUntracked ? " file-name-new" : ""}${diagClass}`}>
+        {entry.name}
+        {diagCount && (
+          <span className="fs-diag-count" style={{ color: diagErrorCount > 0 ? '#f44747' : '#e2b714' }}>
+            {' '}({diagCount})
+          </span>
+        )}
+      </span>
       {gitMarker && (
         <span className="fs-git-marker" style={{ color: statusColor(gitMarker) }}>
           {gitMarker === "?" ? "U" : gitMarker}
@@ -232,6 +302,8 @@ function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth, gitChanges, 
       onContextMenu={onContextMenu}
       activeFilePath={activeFilePath}
       newFilePaths={newFilePaths}
+      diagnosticErrors={diagnosticErrors}
+      diagnosticWarnings={diagnosticWarnings}
       refreshKey={refreshKey}
     />
   );
@@ -260,6 +332,7 @@ export default function FilesPanel({
   width, gitChanges,
   selectedFolder, onSelectFolder, onFsDelete, onFsRename,
   activeFilePath, newFilePaths,
+  diagnosticErrors, diagnosticWarnings,
 }: Props) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; entry: FsEntry } | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -313,6 +386,8 @@ export default function FilesPanel({
               onContextMenu={handleContextMenu}
               activeFilePath={activeFilePath}
               newFilePaths={newFilePaths}
+              diagnosticErrors={diagnosticErrors}
+              diagnosticWarnings={diagnosticWarnings}
               refreshKey={refreshKey}
             />
           </div>

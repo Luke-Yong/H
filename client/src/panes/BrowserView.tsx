@@ -1423,18 +1423,83 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
           const r = el.getBoundingClientRect();
           // Skip elements outside the viewport or with zero size
           if (r.width <= 0 || r.height <= 0 || r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw) continue;
-          const id = el.id ? ' id="' + el.id + '"' : '';
-          const cls = el.className && typeof el.className === 'string'
-            ? ' class="' + el.className + '"' : '';
-          const text = (el.textContent || '').trim().slice(0, 80);
-          const ph = el.getAttribute('placeholder');
-          const tp = el.getAttribute('type');
-          const attrs = [];
-          if (ph) attrs.push('placeholder="' + ph + '"');
-          if (tp) attrs.push('type="' + tp + '"');
-          const t = text ? ' "' + text + '"' : '';
-          const x = Math.round(r.left), y = Math.round(r.top), w = Math.round(r.width), h = Math.round(r.height);
-          els.push('[' + i + '] <' + tag + id + cls + (attrs.length ? ' ' + attrs.join(' ') : '') + '>' + t + ' (x:' + x + ' y:' + y + ' ' + w + 'x' + h + ')');
+          const elDesc = [];
+          // Tag with id and class
+          const id = el.id ? '#' + el.id : '';
+          const cls = el.className && typeof el.className === 'string' && el.className.trim()
+            ? '.' + el.className.trim().split(/\\s+/).slice(0, 2).join('.') : '';
+          elDesc.push('<' + tag + id + cls + '>');
+
+          // Visible text (truncated)
+          const text = (el.firstChild && el.firstChild.nodeType === 3 
+            ? el.firstChild.textContent : el.textContent || '').trim().slice(0, 60);
+          if (text) elDesc.push('"' + text + '"');
+
+          // Coordinates
+          const x = Math.round(r.left), y = Math.round(r.top);
+          const rw = Math.round(r.width), rh = Math.round(r.height);
+          elDesc.push('(x:' + x + ' y:' + y + ' ' + rw + 'x' + rh + ')');
+
+          // Interaction hints
+          if (tag === 'a' && el.href) elDesc.push('href="' + el.href.slice(0, 60) + '"');
+          if (tag === 'button') elDesc.push(el.disabled ? 'disabled' : 'clickable');
+          if (tag === 'input') {
+            const itype = el.type || 'text';
+            const inpInfo = ['type=' + itype];
+            if (el.name) inpInfo.push('name="' + el.name + '"');
+            if (el.placeholder) inpInfo.push('placeholder="' + el.placeholder + '"');
+            if (el.value) inpInfo.push('value="' + String(el.value).slice(0, 30) + '"');
+            if (el.disabled) inpInfo.push('disabled');
+            if (el.readOnly) inpInfo.push('readonly');
+            if (itype === 'checkbox' || itype === 'radio') inpInfo.push(el.checked ? 'checked' : 'unchecked');
+            elDesc.push(inpInfo.join(' '));
+          }
+          if (tag === 'select') {
+            const selVal = el.options && el.options[el.selectedIndex] ? el.options[el.selectedIndex].text : '';
+            elDesc.push('value="' + (selVal || el.value || '').slice(0, 30) + '"');
+            if (el.disabled) elDesc.push('disabled');
+          }
+          if (tag === 'textarea') {
+            if (el.name) elDesc.push('name="' + el.name + '"');
+            if (el.placeholder) elDesc.push('placeholder="' + el.placeholder + '"');
+            if (el.value) elDesc.push('value="' + String(el.value).slice(0, 30) + '"');
+            if (el.disabled) elDesc.push('disabled');
+          }
+          if (tag === 'img') {
+            if (el.alt) elDesc.push('alt="' + el.alt.slice(0, 40) + '"');
+            if (el.src) elDesc.push('src="' + el.src.slice(0, 50) + '"');
+          }
+
+          // ARIA attributes
+          const role = el.getAttribute('role');
+          if (role) elDesc.push('role=' + role);
+          const ariaLabel = el.getAttribute('aria-label');
+          if (ariaLabel) elDesc.push('aria-label="' + ariaLabel.slice(0, 40) + '"');
+          const ariaExpanded = el.getAttribute('aria-expanded');
+          if (ariaExpanded) elDesc.push('aria-expanded=' + ariaExpanded);
+          const ariaSelected = el.getAttribute('aria-selected');
+          if (ariaSelected) elDesc.push('aria-selected=' + ariaSelected);
+
+          // tabindex
+          const tabIdx = el.getAttribute('tabindex');
+          if (tabIdx !== null) elDesc.push('tabindex=' + tabIdx);
+
+          // data-* attributes (common ones)
+          for (let a = 0; a < el.attributes.length; a++) {
+            const attr = el.attributes[a];
+            if (attr.name.startsWith('data-')) {
+              elDesc.push(attr.name + '="' + String(attr.value).slice(0, 30) + '"');
+              if (elDesc.length > 12) break;
+            }
+          }
+
+          // Computed cursor hint (heuristic for clickable)
+          try {
+            const cs = window.getComputedStyle(el);
+            if (cs.cursor === 'pointer') elDesc.push('cursor=pointer');
+          } catch(_) {}
+
+          els.push('[' + i + '] ' + elDesc.join(' '));
           i++;
         }
         return 'viewport:' + vw + 'x' + vh + '\\n' + els.join('\\n');
@@ -1452,13 +1517,21 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
           const rect = el.getBoundingClientRect();
           const cx = rect.left + rect.width / 2;
           const cy = rect.top + rect.height / 2;
-          // Dispatch full mouse event sequence — frameworks (React/Vue) need this
-          el.focus();
-          el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: cx, clientY: cy }));
-          el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
-          el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: cx, clientY: cy }));
-          el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
-          el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+          // Constrain coords to viewport (avoid dispatching outside visible area)
+          const vx = Math.max(0, Math.min(cx, window.innerWidth - 1));
+          const vy = Math.max(0, Math.min(cy, window.innerHeight - 1));
+          const mouseOpts = { clientX: vx, clientY: vy, screenX: vx, screenY: vy, bubbles: true, cancelable: true, button: 0, buttons: 1, view: window };
+          const ptrOpts = { clientX: vx, clientY: vy, screenX: vx, screenY: vy, bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', button: 0, buttons: 1, view: window };
+          // Try focusing — works for native focusable elements
+          try { if (typeof el.focus === 'function') el.focus(); } catch(_) {}
+          // Dispatch full mouse event sequence with enhanced properties
+          el.dispatchEvent(new PointerEvent('pointerdown', ptrOpts));
+          el.dispatchEvent(new MouseEvent('mousedown', mouseOpts));
+          el.dispatchEvent(new PointerEvent('pointerup', ptrOpts));
+          el.dispatchEvent(new MouseEvent('mouseup', mouseOpts));
+          el.dispatchEvent(new MouseEvent('click', mouseOpts));
+          // Fallback: native click() for handlers that require isTrusted:true
+          try { el.click(); } catch(_) {}
           return 'clicked <' + el.tagName.toLowerCase() + '> at index ${index}';
         }
         return 'element not found at index ${index}';
@@ -1481,31 +1554,45 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
           const rect = inp.getBoundingClientRect();
           const cx = rect.left + rect.width / 2;
           const cy = rect.top + rect.height / 2;
-          inp.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: cx, clientY: cy }));
-          inp.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
-          inp.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: cx, clientY: cy }));
-          inp.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
-          inp.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
-          inp.focus();
+          const vx = Math.max(0, Math.min(cx, window.innerWidth - 1));
+          const vy = Math.max(0, Math.min(cy, window.innerHeight - 1));
+          const mouseOpts = { clientX: vx, clientY: vy, screenX: vx, screenY: vy, bubbles: true, cancelable: true, button: 0, buttons: 1, view: window };
+          const ptrOpts = { clientX: vx, clientY: vy, screenX: vx, screenY: vy, bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', button: 0, buttons: 1, view: window };
+          inp.dispatchEvent(new PointerEvent('pointerdown', ptrOpts));
+          inp.dispatchEvent(new MouseEvent('mousedown', mouseOpts));
+          inp.dispatchEvent(new PointerEvent('pointerup', ptrOpts));
+          inp.dispatchEvent(new MouseEvent('mouseup', mouseOpts));
+          inp.dispatchEvent(new MouseEvent('click', mouseOpts));
+          try { inp.focus(); } catch(_) {}
 
-          // Clear existing value and notify frameworks
-          inp.select();
-          inp.value = '';
+          // Resolve the native value setter (React overrides HTMLInputElement.prototype.value)
+          const nativeSetter = Object.getOwnPropertyDescriptor(
+            (inp.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement : window.HTMLInputElement).prototype, 'value'
+          );
+          const setValue = nativeSetter && nativeSetter.set
+            ? function(v) { nativeSetter.set.call(inp, v); }
+            : function(v) { inp.value = v; };
+
+          // Select all, clear via native setter, notify frameworks
+          if (typeof inp.select === 'function') inp.select();
+          setValue('');
           inp.dispatchEvent(new Event('input', { bubbles: true }));
 
           if (!${JSON.stringify(text)}) {
             inp.dispatchEvent(new Event('change', { bubbles: true }));
             return 'cleared element at index ${index}';
           }
-          // Type each character with native input events
+
+          // Type each character with native input events + native value setter
           for (const ch of ${JSON.stringify(text)}) {
-            inp.dispatchEvent(new KeyboardEvent('keydown', { key: ch, bubbles: true, cancelable: true }));
-            inp.dispatchEvent(new KeyboardEvent('keypress', { key: ch, bubbles: true, cancelable: true }));
+            inp.dispatchEvent(new KeyboardEvent('keydown', { key: ch, code: 'Key' + ch.toUpperCase(), keyCode: ch.charCodeAt(0), bubbles: true, cancelable: true }));
+            inp.dispatchEvent(new KeyboardEvent('keypress', { key: ch, code: 'Key' + ch.toUpperCase(), keyCode: ch.charCodeAt(0), bubbles: true, cancelable: true }));
             const start = inp.selectionStart || 0;
-            inp.value = inp.value.slice(0, start) + ch + inp.value.slice(inp.selectionEnd || start);
+            const newVal = inp.value.slice(0, start) + ch + inp.value.slice(inp.selectionEnd || start);
+            setValue(newVal);
             inp.selectionStart = inp.selectionEnd = start + 1;
             inp.dispatchEvent(new Event('input', { bubbles: true }));
-            inp.dispatchEvent(new KeyboardEvent('keyup', { key: ch, bubbles: true, cancelable: true }));
+            inp.dispatchEvent(new KeyboardEvent('keyup', { key: ch, code: 'Key' + ch.toUpperCase(), keyCode: ch.charCodeAt(0), bubbles: true, cancelable: true }));
           }
           inp.dispatchEvent(new Event('change', { bubbles: true }));
           return 'typed "' + ${JSON.stringify(text)} + '" into ' + inp.tagName.toLowerCase() + ' at index ${index}';
@@ -1521,64 +1608,76 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
         const lines = [];
         lines.push('URL: ' + window.location.href);
         lines.push('Title: ' + document.title);
+        const vw = window.innerWidth, vh = window.innerHeight;
+        lines.push('Viewport: ' + vw + 'x' + vh);
 
-        // Visible text content — collect from body text nodes with layout
-        const body = document.body;
-        const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
-        const texts = [];
-        let node;
-        while ((node = walker.nextNode())) {
-          const el = node.parentElement;
-          if (!el) continue;
-          const style = window.getComputedStyle(el);
-          if (style.display === 'none' || style.visibility === 'hidden') continue;
-          const txt = node.textContent?.trim();
-          if (!txt) continue;
+        // Walk ALL elements via TreeWalker — indices match browser_get_dom exactly.
+        const isInteractive = function(el) {
           const tag = el.tagName.toLowerCase();
-          // Prepend tag for semantic elements
-          if (['h1','h2','h3','h4','h5','h6','button','a','label','strong','em','li'].includes(tag)) {
-            texts.push(tag.toUpperCase() + ': ' + txt);
+          if (tag === 'a' || tag === 'button' || tag === 'input' || tag === 'select' || tag === 'textarea') return true;
+          if (el.getAttribute('role')) return true;
+          if (el.getAttribute('tabindex') !== null) return true;
+          if (el.getAttribute('onclick') || el.onclick) return true;
+          try { if (window.getComputedStyle(el).cursor === 'pointer') return true; } catch(_) {}
+          return false;
+        };
+
+        const w = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+        const allEls = [];
+        const interactive = [];
+        let idx = 0;
+        let el;
+        while ((el = w.nextNode()) && idx < 300) {
+          const r = el.getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0 || r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw) continue;
+
+          const tag = el.tagName.toLowerCase();
+          const id = el.id ? '#' + el.id : '';
+          let label = '';
+          if (tag === 'a') {
+            label = (el.textContent || el.href || '').trim().slice(0, 50);
+          } else if (tag === 'button') {
+            label = (el.textContent || el.value || '').trim().slice(0, 50);
+          } else if (tag === 'input') {
+            const tp = el.type || 'text';
+            if (tp === 'submit' || tp === 'button') {
+              label = (el.value || '').trim().slice(0, 30);
+            } else {
+              label = (el.placeholder || el.value || el.name || '').trim().slice(0, 30);
+            }
+          } else if (tag === 'select') {
+            const selIdx = el.selectedIndex >= 0 ? el.selectedIndex : 0;
+            label = (el.options[selIdx]?.text || el.value || '').slice(0, 30);
+          } else if (tag === 'textarea') {
+            label = (el.placeholder || el.value || el.name || '').trim().slice(0, 30);
           } else {
-            texts.push(txt);
+            label = (el.textContent || '').trim().slice(0, 60);
           }
-          if (texts.length > 100) break;
-        }
-        lines.push('--- Page Text ---');
-        lines.push(texts.join('\\n'));
+          // Category markers
+          const markers = [];
+          if (['h1','h2','h3','h4','h5','h6'].includes(tag)) markers.push(tag.toUpperCase());
+          if (tag === 'img') markers.push('IMG');
+          if (tag === 'li') markers.push('LI');
+          if (tag === 'label') markers.push('LABEL');
+          const marker = markers.length ? ' [' + markers.join('/') + ']' : '';
 
-        // Form elements
-        const inputs = document.querySelectorAll('input:not([type="hidden"]), select, textarea');
-        if (inputs.length > 0) {
-          const formLines = [];
-          inputs.forEach(function(el, i) {
-            const tag = el.tagName.toLowerCase();
-            const type = el.getAttribute('type') || 'text';
-            const name = el.getAttribute('name') || '';
-            const placeholder = el.getAttribute('placeholder') || '';
-            const val = el.value || '';
-            const info = [tag];
-            if (type && tag === 'input') info.push('type=' + type);
-            if (name) info.push('name="' + name + '"');
-            if (placeholder) info.push('placeholder="' + placeholder + '"');
-            if (val) info.push('value="' + val + '"');
-            formLines.push('  [' + (i + texts.length) + '] <' + info.join(' ') + '>');
-          });
-          lines.push('--- Form Elements ---');
-          lines.push(formLines.join('\\n'));
+          const shortDesc = '[' + idx + '] <' + tag + id + '>' + marker + (label ? ' "' + label + '"' : '');
+          allEls.push(shortDesc);
+          if (isInteractive(el)) interactive.push(shortDesc);
+          idx++;
         }
 
-        // Buttons & links
-        const buttons = document.querySelectorAll('button, a, [role="button"], input[type="submit"], input[type="button"]');
-        const btnLines = [];
-        buttons.forEach(function(el, i) {
-          const txt = (el.textContent || el.value || '').trim().slice(0, 60);
-          const tag = el.tagName.toLowerCase();
-          const href = el.getAttribute('href') || '';
-          const info = tag + (href ? ' href="' + href.slice(0, 50) + '"' : '');
-          if (txt) btnLines.push('  [' + (i + texts.length + inputs.length) + '] <' + info + '> "' + txt + '"');
-        });
-        if (btnLines.length > 0) lines.push('--- Buttons & Links (' + btnLines.length + ') ---');
-        lines.push(btnLines.join('\\n'));
+        if (interactive.length > 0) {
+          lines.push('--- Interactive (' + interactive.length + ') ---');
+          lines.push(interactive.join('\\n'));
+        }
+        // If total element count is manageable, show everything
+        if (allEls.length <= 100) {
+          lines.push('--- All Elements (' + allEls.length + ') ---');
+          lines.push(allEls.join('\\n'));
+        } else {
+          lines.push('--- All Elements: ' + allEls.length + ' (use browser_get_dom for full listing) ---');
+        }
 
         // Error state: visible error text
         const errors = document.querySelectorAll('[role="alert"], .error, .alert-danger, [class*="error"], [class*="Error"]');
@@ -1667,23 +1766,31 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   }, [typeIntoElement]);
 
   // ── Coordinate-based mouse ──
+  // Uses enhanced event properties (pointerId, pointerType, button, buttons) so that
+  // React/Vue and other frameworks properly recognize the synthetic events.
   const mouseEvent = useCallback(async (x: number, y: number, eventType: string): Promise<string> => {
     return evalInPage(`
       (() => {
         const el = document.elementFromPoint(${x}, ${y});
         const target = el || document.body;
-        const opts = { clientX: ${x}, clientY: ${y}, bubbles: true, cancelable: true, view: window };
+        const mouseOpts = { clientX: ${x}, clientY: ${y}, screenX: ${x}, screenY: ${y}, bubbles: true, cancelable: true, button: 0, buttons: 1, view: window };
+        const pointerOpts = { clientX: ${x}, clientY: ${y}, screenX: ${x}, screenY: ${y}, bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', button: 0, buttons: 1, view: window };
         if (${JSON.stringify(eventType)} === 'click') {
-          target.dispatchEvent(new PointerEvent('pointerdown', opts));
-          target.dispatchEvent(new MouseEvent('mousedown', opts));
-          target.dispatchEvent(new PointerEvent('pointerup', opts));
-          target.dispatchEvent(new MouseEvent('mouseup', opts));
-          target.dispatchEvent(new MouseEvent('click', opts));
+          target.dispatchEvent(new PointerEvent('pointerdown', pointerOpts));
+          target.dispatchEvent(new MouseEvent('mousedown', mouseOpts));
+          target.dispatchEvent(new PointerEvent('pointerup', pointerOpts));
+          target.dispatchEvent(new MouseEvent('mouseup', mouseOpts));
+          target.dispatchEvent(new MouseEvent('click', mouseOpts));
+          // Fallback: native click() for handlers that require isTrusted
+          try { target.click(); } catch(_) {}
         } else if (${JSON.stringify(eventType)} === 'contextmenu') {
-          target.dispatchEvent(new MouseEvent('contextmenu', opts));
+          target.dispatchEvent(new PointerEvent('pointerdown', pointerOpts));
+          target.dispatchEvent(new MouseEvent('mousedown', { ...mouseOpts, button: 2, buttons: 2 }));
+          target.dispatchEvent(new MouseEvent('contextmenu', mouseOpts));
+          target.dispatchEvent(new MouseEvent('mouseup', { ...mouseOpts, button: 2, buttons: 0 }));
         } else if (${JSON.stringify(eventType)} === 'move') {
-          target.dispatchEvent(new MouseEvent('mousemove', opts));
-          target.dispatchEvent(new PointerEvent('pointermove', opts));
+          target.dispatchEvent(new MouseEvent('mousemove', mouseOpts));
+          target.dispatchEvent(new PointerEvent('pointermove', pointerOpts));
         }
         const tag = target.tagName ? target.tagName.toLowerCase() : 'unknown';
         return ${JSON.stringify(eventType)} + ' at (' + ${x} + ',' + ${y} + ') on <' + tag + '>';
@@ -1731,25 +1838,54 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     return evalInPage(`
       (() => {
         const el = document.activeElement || document.body;
-        el.dispatchEvent(new KeyboardEvent('keydown', { key: ${JSON.stringify(key)}, bubbles: true, cancelable: true }));
-        el.dispatchEvent(new KeyboardEvent('keypress', { key: ${JSON.stringify(key)}, bubbles: true, cancelable: true }));
-        el.dispatchEvent(new KeyboardEvent('keyup', { key: ${JSON.stringify(key)}, bubbles: true, cancelable: true }));
+        // Determine code and keyCode for common keys
+        const keyMap = {
+          Enter: { code: 'Enter', keyCode: 13 }, Escape: { code: 'Escape', keyCode: 27 },
+          Tab: { code: 'Tab', keyCode: 9 }, Backspace: { code: 'Backspace', keyCode: 8 },
+          Delete: { code: 'Delete', keyCode: 46 }, Space: { code: 'Space', keyCode: 32 },
+          ArrowUp: { code: 'ArrowUp', keyCode: 38 }, ArrowDown: { code: 'ArrowDown', keyCode: 40 },
+          ArrowLeft: { code: 'ArrowLeft', keyCode: 37 }, ArrowRight: { code: 'ArrowRight', keyCode: 39 },
+          Home: { code: 'Home', keyCode: 36 }, End: { code: 'End', keyCode: 35 },
+          PageUp: { code: 'PageUp', keyCode: 33 }, PageDown: { code: 'PageDown', keyCode: 34 },
+        };
+        const k = ${JSON.stringify(key)};
+        const mapped = keyMap[k];
+        const code = mapped ? mapped.code : (k.length === 1 ? 'Key' + k.toUpperCase() : k);
+        const keyCode = mapped ? mapped.keyCode : (k.length === 1 ? k.toUpperCase().charCodeAt(0) : 0);
+        const eventOpts = { key: k, code: code, keyCode: keyCode, which: keyCode, bubbles: true, cancelable: true };
+        el.dispatchEvent(new KeyboardEvent('keydown', eventOpts));
+        el.dispatchEvent(new KeyboardEvent('keypress', eventOpts));
+        // If Enter on an input/form element, try submitting the parent form
+        if (k === 'Enter') {
+          let form = el.closest ? el.closest('form') : null;
+          if (!form) {
+            let p = el; while (p && p.tagName !== 'FORM') p = p.parentElement;
+            form = p;
+          }
+          if (form && typeof form.submit === 'function') {
+            try { form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); } catch(_) {}
+          }
+        }
+        el.dispatchEvent(new KeyboardEvent('keyup', eventOpts));
         return 'Pressed ${key}.';
       })()
     `);
   }, [evalInPage]);
 
   const uploadFile = useCallback(async (index: number, paths: string[]): Promise<string> => {
-    const dt = new DataTransfer();
+    // Read files as ArrayBuffer and transfer to the iframe context
+    const fileDatas: { name: string; type: string; data: number[] }[] = [];
     for (const fp of paths) {
       try {
         const res = await fetch(`/api/fs/read-binary?path=${encodeURIComponent(fp)}`);
         if (!res.ok) return `Cannot read file: ${fp} (HTTP ${res.status})`;
         const blob = await res.blob();
+        const buf = await blob.arrayBuffer();
         const name = fp.split(/[/\\]/).pop() || "file";
-        dt.items.add(new File([blob], name));
+        fileDatas.push({ name, type: blob.type || "application/octet-stream", data: Array.from(new Uint8Array(buf)) });
       } catch { return `Cannot read file: ${fp}`; }
     }
+    const serialized = JSON.stringify(fileDatas);
     return evalInPage(`
       (() => {
         const w = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
@@ -1757,7 +1893,29 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
         while ((el = w.nextNode())) { if (i++ === ${index}) break; }
         if (!el) return 'Element not found at index ${index}.';
         if (el.tagName !== 'INPUT' || el.type !== 'file') return 'Element is not a file input.';
-        Object.defineProperty(el, 'files', { value: null, writable: true });
+
+        const fileDatas = ${serialized};
+        const dt = new DataTransfer();
+        for (const fd of fileDatas) {
+          const bytes = new Uint8Array(fd.data);
+          const blob = new Blob([bytes], { type: fd.type });
+          const file = new File([blob], fd.name, { type: fd.type });
+          dt.items.add(file);
+        }
+        // Use native setter for React compatibility (React overrides HTMLInputElement.files)
+        try {
+          const nativeFilesSetter = Object.getOwnPropertyDescriptor(
+            window.HTMLInputElement.prototype, 'files'
+          );
+          if (nativeFilesSetter && nativeFilesSetter.set) {
+            nativeFilesSetter.set.call(el, dt.files);
+          } else {
+            el.files = dt.files;
+          }
+        } catch(_) {
+          el.files = dt.files;
+        }
+        el.dispatchEvent(new Event('input', { bubbles: true }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
         return 'Uploaded ${paths.length} file(s).';
       })()
@@ -1773,19 +1931,23 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
         let i = 0; let el;
         while ((el = w.nextNode())) { if (i++ === ${index}) break; }
         if (!el) return 'Element not found at index ${index}.';
-        if (el.tagName !== 'SELECT') return 'Element at index ${index} is <' + el.tagName.toLowerCase() + '>, not a <select>.';
+        if (el.tagName !== 'SELECT') return 'Element at index ${index} is <' + el.tagName.toLowerCase() + '>, not a <select>. Tip: for custom dropdowns (not native <select>), use browser_click on the trigger, then browser_wait + browser_get_dom to find options, then browser_click on the desired option.';
         const sel = el;
 
-        // Click to activate — reactive frameworks need this
+        // Click to activate — enhanced properties for framework compatibility
         const rect = sel.getBoundingClientRect();
         const cx = rect.left + rect.width / 2;
         const cy = rect.top + rect.height / 2;
-        sel.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: cx, clientY: cy }));
-        sel.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
-        sel.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: cx, clientY: cy }));
-        sel.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
-        sel.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
-        sel.focus();
+        const vx = Math.max(0, Math.min(cx, window.innerWidth - 1));
+        const vy = Math.max(0, Math.min(cy, window.innerHeight - 1));
+        const mouseOpts = { clientX: vx, clientY: vy, screenX: vx, screenY: vy, bubbles: true, cancelable: true, button: 0, buttons: 1, view: window };
+        const ptrOpts = { clientX: vx, clientY: vy, screenX: vx, screenY: vy, bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', button: 0, buttons: 1, view: window };
+        sel.dispatchEvent(new PointerEvent('pointerdown', ptrOpts));
+        sel.dispatchEvent(new MouseEvent('mousedown', mouseOpts));
+        sel.dispatchEvent(new PointerEvent('pointerup', ptrOpts));
+        sel.dispatchEvent(new MouseEvent('mouseup', mouseOpts));
+        sel.dispatchEvent(new MouseEvent('click', mouseOpts));
+        try { sel.focus(); } catch(_) {}
 
         const value = ${v};
         const label = ${l};
@@ -1793,14 +1955,28 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
         if (value !== null) {
           if (sel.value !== value) { sel.value = value; changed = true; }
         } else if (label !== null) {
+          // Try exact match first, then case-insensitive match
           for (let j = 0; j < sel.options.length; j++) {
             if (sel.options[j].text.trim() === label.trim()) {
               if (sel.selectedIndex !== j) { sel.selectedIndex = j; changed = true; }
               break;
             }
           }
+          if (!changed) {
+            // Case-insensitive fallback
+            for (let j = 0; j < sel.options.length; j++) {
+              if (sel.options[j].text.trim().toLowerCase() === label.trim().toLowerCase()) {
+                sel.selectedIndex = j;
+                changed = true;
+                break;
+              }
+            }
+          }
         }
-        if (!changed) return 'Option already selected.';
+        if (!changed) {
+          const optList = Array.from(sel.options).slice(0, 10).map(function(o) { return o.value + ':"' + o.text.slice(0,40) + '"'; }).join(', ');
+          return 'Option not found. Available options: ' + optList;
+        }
         // Dispatch both input and change — some frameworks listen for 'input' on select
         sel.dispatchEvent(new Event('input', { bubbles: true }));
         sel.dispatchEvent(new Event('change', { bubbles: true }));

@@ -1056,6 +1056,9 @@ body.resizing iframe { pointer-events: none; }
 .file-icon { font-size: 11px; flex-shrink: 0; display: inline-flex; align-items: center; }
 .file-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-name-new { color: #4ec94e; }
+.file-name-error { color: #f44747 !important; }
+.file-name-warning { color: #e2b714 !important; }
+.fs-diag-count { font-size: 10px; }
 
 /* File-type SVG icons (Material Icon Theme) */
 .file-icon-img { width: 16px; height: 16px; display: block; }
