@@ -1028,6 +1028,12 @@ export default function TerminalPane({
           const { [id]: _, ...rest } = labels;
           return rest;
         });
+        // Dispose the old xterm to prevent memory leaks, especially after
+        // auto-recreate on Ctrl+C in pipe mode.
+        if (inst) {
+          inst.term.dispose();
+          termsRef.current.delete(id);
+        }
       }
     };
 

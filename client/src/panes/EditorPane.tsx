@@ -978,6 +978,83 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   }, [fsBasePath]);
 
   const agentDiffsPendingRef = useRef<Record<string, { originalContent: string; newContent: string }>>({});
+  // Keep a ref of latest files so applyAgentFileChanges can resolve diffs immediately
+  const filesRef = useRef<VFile[]>([]);
+  filesRef.current = files;
+
+  // Apply agent diff decorations (inline red/green backgrounds)
+  const applyAgentDiffDecorations = useCallback((editor: any, fileId: string, diff: { originalContent: string; newContent: string } | undefined) => {
+    try {
+      const monaco = (window as any).monaco;
+      if (!monaco) return;
+      const model = editor.getModel();
+      if (!model) return;
+
+      // Clear previous agent decorations for this file
+      const old = agentDiffDecoRef.current[fileId];
+      if (old?.length) editor.deltaDecorations(old, []);
+
+      if (!diff) { agentDiffDecoRef.current[fileId] = []; return; }
+
+      const oLines = diff.originalContent.split("\n");
+      const nLines = diff.newContent.split("\n");
+      // LCS for diff
+      const m = oLines.length, n = nLines.length;
+      const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+      for (let i = 1; i <= m; i++)
+        for (let j = 1; j <= n; j++)
+          dp[i][j] = oLines[i - 1] === nLines[j - 1] ? dp[i - 1][j - 1] + 1 : Math.max(dp[i - 1][j], dp[i][j - 1]);
+
+      // Backtrack
+      const ops: (" " | "-" | "+")[] = [];
+      let i = m, j = n;
+      while (i > 0 || j > 0) {
+        if (i > 0 && j > 0 && oLines[i - 1] === nLines[j - 1]) { ops.unshift(" "); i--; j--; }
+        else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) { ops.unshift("+"); j--; }
+        else { ops.unshift("-"); i--; }
+      }
+
+      const decos: any[] = [];
+      let newLine = 1;
+      let firstChangeLine = 0;
+      for (const op of ops) {
+        if (op === "-") {
+          if (!firstChangeLine) firstChangeLine = newLine;
+          decos.push({
+            range: new monaco.Range(newLine, 1, newLine, Number.MAX_SAFE_INTEGER),
+            options: {
+              isWholeLine: true,
+              className: "agent-diff-removed-line",
+              overviewRuler: { color: "#f85149", position: monaco.editor.OverviewRulerLane.Center },
+            },
+          });
+        } else if (op === "+") {
+          if (!firstChangeLine) firstChangeLine = newLine;
+          decos.push({
+            range: new monaco.Range(newLine, 1, newLine, Number.MAX_SAFE_INTEGER),
+            options: {
+              isWholeLine: true,
+              className: "agent-diff-added-line",
+              overviewRuler: { color: "#4ec94e", position: monaco.editor.OverviewRulerLane.Center },
+            },
+          });
+          newLine++;
+        } else {
+          newLine++;
+        }
+      }
+
+      const ids = editor.deltaDecorations([], decos);
+      agentDiffDecoRef.current[fileId] = ids;
+
+      // Scroll to the first changed line so the user sees what was modified
+      if (firstChangeLine > 0) {
+        editor.revealLineInCenterIfOutsideViewport?.(firstChangeLine);
+        // fallback if the method isn't available
+        editor.revealLineInCenter?.(firstChangeLine);
+      }
+    } catch { /* */ }
+  }, []);
 
   const applyAgentFileChanges = useCallback((changes: { name: string; content: string; fsPath?: string; originalContent?: string | null }[]) => {
     applyAiFiles(changes);
@@ -989,8 +1066,24 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     }
     if (Object.keys(pending).length > 0) {
       agentDiffsPendingRef.current = pending;
+      // After React commits AND @monaco-editor/react has updated the model,
+      // apply decorations directly to any already-mounted editor.
+      // The useState/useEffect chain handles the state-driven path too.
+      setTimeout(() => {
+        const latestFiles = filesRef.current;
+        const pendingNow = agentDiffsPendingRef.current;
+        for (const diffName of Object.keys(pendingNow)) {
+          const match = latestFiles.find((f) => f.name === diffName);
+          if (match) {
+            const editor = editorByFileIdRef.current[match.id];
+            if (editor) {
+              applyAgentDiffDecorations(editor, match.id, pendingNow[diffName]);
+            }
+          }
+        }
+      }, 0);
     }
-  }, [applyAiFiles]);
+  }, [applyAiFiles, applyAgentDiffDecorations]);
 
   // Resolve pending agent diffs when files state updates
   useEffect(() => {
@@ -1056,72 +1149,6 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     const f = files.find((x) => x._fsPath && normPath(x._fsPath) === normPath(fsPath));
     if (f) setActiveFileId(f.id);
   }, [files]);
-
-  // Apply agent diff decorations (inline red/green backgrounds)
-  const applyAgentDiffDecorations = useCallback((editor: any, fileId: string, diff: { originalContent: string; newContent: string } | undefined) => {
-    try {
-      const monaco = (window as any).monaco;
-      if (!monaco) return;
-      const model = editor.getModel();
-      if (!model) return;
-
-      // Clear previous agent decorations for this file
-      const old = agentDiffDecoRef.current[fileId];
-      if (old?.length) editor.deltaDecorations(old, []);
-
-      if (!diff) { agentDiffDecoRef.current[fileId] = []; return; }
-
-      const oLines = diff.originalContent.split("\n");
-      const nLines = diff.newContent.split("\n");
-      // LCS for diff
-      const m = oLines.length, n = nLines.length;
-      const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
-      for (let i = 1; i <= m; i++)
-        for (let j = 1; j <= n; j++)
-          dp[i][j] = oLines[i - 1] === nLines[j - 1] ? dp[i - 1][j - 1] + 1 : Math.max(dp[i - 1][j], dp[i][j - 1]);
-
-      // Backtrack
-      const ops: (" " | "-" | "+")[] = [];
-      let i = m, j = n;
-      while (i > 0 || j > 0) {
-        if (i > 0 && j > 0 && oLines[i - 1] === nLines[j - 1]) { ops.unshift(" "); i--; j--; }
-        else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) { ops.unshift("+"); j--; }
-        else { ops.unshift("-"); i--; }
-      }
-
-      const decos: any[] = [];
-      let newLine = 1;
-      for (const op of ops) {
-        if (op === "-") {
-          // Removed line — highlight in red
-          decos.push({
-            range: new monaco.Range(newLine, 1, newLine, Number.MAX_SAFE_INTEGER),
-            options: {
-              isWholeLine: true,
-              className: "agent-diff-removed-line",
-              overviewRuler: { color: "#f85149", position: monaco.editor.OverviewRulerLane.Center },
-            },
-          });
-        } else if (op === "+") {
-          // Added line — highlight in green
-          decos.push({
-            range: new monaco.Range(newLine, 1, newLine, Number.MAX_SAFE_INTEGER),
-            options: {
-              isWholeLine: true,
-              className: "agent-diff-added-line",
-              overviewRuler: { color: "#4ec94e", position: monaco.editor.OverviewRulerLane.Center },
-            },
-          });
-          newLine++;
-        } else {
-          newLine++;
-        }
-      }
-
-      const ids = editor.deltaDecorations([], decos);
-      agentDiffDecoRef.current[fileId] = ids;
-    } catch { /* */ }
-  }, []);
 
   // Apply agent diff decorations when agent changes or active file changes
   useEffect(() => {

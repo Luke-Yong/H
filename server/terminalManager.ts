@@ -35,6 +35,7 @@ interface Session {
   ws: WebSocket;
   proc?: ReturnType<typeof spawn>;
   pty?: { write: (data: string) => void; resize: (cols: number, rows: number) => void; kill: () => void; onData: (cb: (d: string) => void) => void; onExit: (cb: (e: { exitCode: number }) => void) => void };
+  createOpts?: { cwd?: string; venvDir?: string; activateScript?: string };
 }
 
 const sessions = new Map<string, Session[]>();
@@ -210,7 +211,7 @@ export function createSession(ws: WebSocket, groupKey: string, opts?: { cwd?: st
     windowsHide: true,
   });
 
-  const session: Session = { id, backend: "pipe", proc, ws };
+  const session: Session = { id, backend: "pipe", proc, ws, createOpts: opts };
 
   proc.stdout?.on("data", (data: Buffer) => {
     if (ws.readyState === WebSocket.OPEN) {
@@ -256,11 +257,19 @@ export function writeToSession(groupKey: string, sessionId: string, data: string
   }
   // Pipe backend: \x03 (Ctrl+C) doesn't work through stdin on any OS.
   // On Unix, send SIGINT; on Windows, kill the process (TerminateProcess).
+  // In either case this kills the shell process. Auto-recreate a fresh session
+  // immediately so the user gets a new prompt instead of a dead terminal.
   if (data === "\x03") {
     if (isWin) {
       s.proc?.kill();
     } else {
       s.proc?.kill("SIGINT");
+    }
+    const recreateOpts = s.createOpts;
+    if (recreateOpts && s.ws.readyState === WebSocket.OPEN) {
+      setTimeout(() => {
+        createSession(s.ws, groupKey, recreateOpts);
+      }, 50);
     }
     return;
   }

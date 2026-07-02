@@ -1941,6 +1941,7 @@ export async function* agentLoopStream(
           toolName: fnName,
           toolResult: "Diff ready",
           toolParams: params,
+          toolCallId: tc.id,
           originalContent,
           executedTools,
         };
