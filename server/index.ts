@@ -166,7 +166,7 @@ app.post("/api/chat/agent/stream", async (req, res) => {
 });
 
 app.post("/api/chat/agent/stream/continue", async (req, res) => {
-  const { sessionId, toolCallId, toolResult, permissionGranted, apiKey, model, thinking } = req.body || {};
+  const { sessionId, toolCallId, toolResult, permissionGranted, apiKey, model, thinking, consoleContext } = req.body || {};
   const effectiveModel = model || (thinking ? "deepseek-reasoner" : "deepseek-chat");
   if (!sessionId || !toolCallId) {
     return res.status(400).json({ error: "Missing sessionId or toolCallId" });
@@ -176,23 +176,43 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
     const state = getAgentSession(sessionId);
     if (!state) return res.status(404).json({ error: "Session not found" });
 
-    // Handle permission response
+    // ── Step 1: Handle deferred file tool Accept/Reject ──
+    // File tools auto-execute and yield "Diff ready". The second /continue call
+    // carries Accept ("OK") or Reject ("rejected") from the user.
     let cmdResult: string | null = null;
-    if (state.pendingPermission && state.pendingPermission.toolCallId === toolCallId) {
+    let permissionToolName: string | undefined = undefined;
+    let permissionToolParams: Record<string, unknown> | undefined;
+    if (state.deferredTool && state.deferredTool.toolCallId === toolCallId) {
+      const dt = state.deferredTool;
+      state.deferredTool = undefined;
+      const accepted = String(toolResult || "").toLowerCase() !== "rejected";
+      if (accepted) {
+        state.messages.push({ role: "tool", content: dt.result, tool_call_id: dt.toolCallId });
+      } else {
+        // Rejected — revert the file to original content.
+        if (dt.originalContent != null && dt.filePath) {
+          try {
+            const resolvedPath = path.resolve(state.projectRoot, dt.filePath);
+            fs.writeFileSync(resolvedPath, dt.originalContent, "utf-8");
+          } catch { /* best effort */ }
+        }
+        state.messages.push({ role: "tool", content: "Rejected by user.", tool_call_id: dt.toolCallId });
+      }
+      cmdResult = accepted ? dt.result : "Rejected by user.";
+    } else if (state.pendingPermission && state.pendingPermission.toolCallId === toolCallId) {
+      // ── Step 1 alternative: Handle permission Allow/Deny (run_in_terminal, browser_eval) ──
       const pp = state.pendingPermission;
+      permissionToolName = pp.toolName;
+      permissionToolParams = pp.params;
       state.pendingPermission = undefined;
+
       if (permissionGranted) {
         if (pp.toolName === "browser_eval") {
-          // Browser eval: client will execute and return result via /continue
-          cmdResult = null; // don't push a result yet — client will provide it
-        } else if (pp.params && (pp.toolName === "write_file" || pp.toolName === "edit_file" ||
-                                 pp.toolName === "delete_file" || pp.toolName === "rename_file")) {
-          // Destructive file tool: execute directly now that user approved
-          const fsResult = await runFsTool(pp.toolName, pp.params, state.projectRoot);
-          cmdResult = fsResult || "Done.";
+          cmdResult = null;
         } else {
-          // run_in_terminal: runs via terminal bridge — push placeholder result
-          cmdResult = `${pp.command} is starting in a terminal tab. The terminal may auto-detect a URL and open a browser tab shortly. Call browser_info to check if a tab opened — do NOT guess the port.`;
+          // run_in_terminal: use frontend-provided terminal output as tool result if available
+          const termOut = typeof toolResult === "string" && toolResult.trim() ? toolResult : null;
+          cmdResult = termOut || `${pp.command} is starting in a terminal tab. The terminal may auto-detect a URL and open a browser tab shortly. Call browser_info to check if a tab opened — do NOT guess the port.`;
         }
       } else {
         cmdResult = "Permission denied by user.";
@@ -201,6 +221,7 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
         state.messages.push({ role: "tool", content: cmdResult, tool_call_id: pp.toolCallId });
       }
     } else {
+      // Browser tool result (or other non-permission continue)
       addToolResultStream(sessionId, toolCallId, String(toolResult || ""));
     }
     broadcast({ type: "agent_tool_result", data: { sessionId, toolCallId, toolResult: String(toolResult || cmdResult || "").slice(0, 500) } });
@@ -217,16 +238,19 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
       res.write(`data: ${JSON.stringify({ ...event, sessionId })}\n\n`);
     };
 
-    // Yield tool_end for the command — run_in_terminal has no sandbox output (terminal bridge handles it)
-    if (cmdResult !== null) {
+    // Yield tool_end for permission-gated tools (run_in_terminal, browser_eval)
+    if (cmdResult !== null && !state.deferredTool) {
+      const termSandbox = typeof toolResult === "string" && toolResult.trim() ? toolResult : undefined;
       sendEvent({
         type: "tool_end",
-        toolName: "run_in_terminal",
-        toolResult: `Command completed`,
+        toolName: permissionToolName || "run_in_terminal",
+        toolResult: cmdResult,
+        toolParams: permissionToolParams,
       } as AgentSseEvent);
     }
 
-    for await (const event of agentLoopStream(state.projectRoot, state, "", sessionId, { model: effectiveModel, apiKey })) {
+    const continueContext = typeof consoleContext === "string" ? consoleContext : "";
+    for await (const event of agentLoopStream(state.projectRoot, state, continueContext, sessionId, { model: effectiveModel, apiKey })) {
       sendEvent(event);
       if (event.type === "browser_tool" || event.type === "done" || event.type === "error") break;
     }

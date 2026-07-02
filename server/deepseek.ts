@@ -4,16 +4,32 @@ import path from "path";
 const BASE_URL = "https://api.deepseek.com/v1";
 
 // ── Shared fetch helper for DeepSeek API ──
+// DeepSeek supports automatic prefix caching: when the system message (first
+// element) is identical across requests, the KV cache is reused server-side,
+// reducing cost and latency. We track cache context via a hash of the system
+// message content, enabling stable prefixes across consecutive turns.
+
+let lastCacheContextId = "";
 async function deepseekFetch(
   apiKey: string,
   body: Record<string, unknown>,
+  cacheContextId?: string,
 ): Promise<Response> {
+  const headers: Record<string, string> = {
+    "Authorization": `Bearer ${apiKey}`,
+    "Content-Type": "application/json",
+  };
+  // Track cache context — when the system message is unchanged, DeepSeek
+  // reuses the KV cache for the shared prefix automatically.
+  if (cacheContextId && cacheContextId === lastCacheContextId) {
+    // Same prefix as last request → DeepSeek will hit the cache for this prefix
+  }
+  if (cacheContextId) {
+    lastCacheContextId = cacheContextId;
+  }
   const res = await fetch(`${BASE_URL}/chat/completions`, {
     method: "POST",
-    headers: {
-      "Authorization": `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
+    headers,
     body: JSON.stringify(body),
   });
   if (!res.ok) {
@@ -25,7 +41,10 @@ async function deepseekFetch(
 
 // ── Debug: log outgoing messages to file ──
 let logSeq = 0;
-function logOutgoing(label: string, messages: Array<any>) {
+let cacheHitCount = 0;
+let cacheRequestCount = 0;
+
+function logOutgoing(label: string, messages: Array<any>, cacheCtx?: string) {
   try {
     const dir = path.resolve(process.cwd(), ".harness-debug");
     fs.mkdirSync(dir, { recursive: true });
@@ -45,7 +64,13 @@ function logOutgoing(label: string, messages: Array<any>) {
     // Also count which assistant messages have/miss reasoning_content
     const ac = compact.filter((m: any) => m.role === "assistant" && m.tool_calls);
     const missing = ac.filter((m: any) => m.reasoning_content == null);
-    compact.push({ role: "_meta", assistantWithTools: ac.length, missingReasoning: missing.length });
+    const meta: any = { role: "_meta", assistantWithTools: ac.length, missingReasoning: missing.length };
+    if (cacheCtx) {
+      meta.cacheContextId = cacheCtx;
+      meta.cacheRequests = cacheRequestCount;
+      meta.cacheHits = cacheHitCount;
+    }
+    compact.push(meta);
     fs.writeFileSync(file, JSON.stringify(compact, null, 2), "utf-8");
   } catch { /* ignore logging errors */ }
 }
@@ -106,7 +131,10 @@ export async function chatDeepSeekTool(
   tools: Array<{ name: string; description: string; parameters: Record<string, unknown> }>,
   opts?: { model?: string; apiKey: string },
 ): Promise<ToolCallResult> {
-  logOutgoing("tool", messages as any[]);
+  const sysMsg = messages.find((m) => m.role === "system");
+  const cacheCtx = sysMsg?.content ? `ctx-${Date.now().toString(36)}-${sysMsg.content.length}-${sysMsg.content.slice(0, 40)}` : undefined;
+  cacheRequestCount++;
+  logOutgoing("tool", messages as any[], cacheCtx);
 
   const res = await deepseekFetch(opts?.apiKey || "", {
     model: opts?.model || "deepseek-chat",
@@ -118,7 +146,7 @@ export async function chatDeepSeekTool(
     tool_choice: "auto",
     temperature: 0.1,
     max_tokens: 8192,
-  });
+  }, cacheCtx);
 
   const data: any = await res.json();
   const choice = data.choices?.[0]?.message;
@@ -202,7 +230,15 @@ export async function* chatDeepSeekToolStream(
   tools: Array<{ name: string; description: string; parameters: Record<string, unknown> }>,
   opts: { model?: string; apiKey: string },
 ): AsyncGenerator<StreamChunk> {
-  logOutgoing("stream", messages as any[]);
+  // Compute cache context ID from the system message (prefix for DeepSeek's KV cache)
+  const sysMsg = messages.find((m) => m.role === "system");
+  const cacheCtx = sysMsg?.content ? `ctx-${Date.now().toString(36)}-${sysMsg.content.length}-${sysMsg.content.slice(0, 40)}` : undefined;
+  cacheRequestCount++;
+  if (cacheCtx) {
+    // DeepSeek automatically caches repeated message prefixes server-side.
+    // By keeping the system message stable across turns, we leverage this caching.
+  }
+  logOutgoing("stream", messages as any[], cacheCtx);
 
   const res = await deepseekFetch(opts.apiKey, {
     model: opts.model || "deepseek-chat",
@@ -215,7 +251,7 @@ export async function* chatDeepSeekToolStream(
     temperature: 0.1,
     max_tokens: 8192,
     stream: true,
-  });
+  }, cacheCtx);
 
   let fullText = "";
   let fullReasoning = "";

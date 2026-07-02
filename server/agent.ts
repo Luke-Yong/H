@@ -41,6 +41,8 @@ export interface AgentState {
   iteration: number;
   projectRoot: string;
   pendingPermission?: { toolCallId: string; command: string; background?: boolean; toolName?: string; params?: Record<string, unknown> };
+  /** Deferred destructive file tool — executed on Allow, result held until Accept/Reject in UI. */
+  deferredTool?: { toolCallId: string; toolName: string; params: Record<string, unknown>; result: string; originalContent: string | null; filePath: string };
   /** True once the API has returned reasoning_content in any response. */
   isReasoningModel?: boolean;
 }
@@ -115,7 +117,9 @@ const TOOLS: ToolDef[] = [
   {
     name: "write_file",
     description:
-      "Create or overwrite a file in the project. Provide the relative path and the full new content.",
+      "Create a NEW file or completely rewrite an existing file. Provide the relative path and the full new content. "
+      + "IMPORTANT: PREFER edit_file for modifying existing files — only use write_file when creating a brand-new file or when the entire file content has changed. "
+      + "write_file sends the whole file content which is wasteful for small changes.",
     parameters: {
       type: "object",
       properties: {
@@ -192,8 +196,8 @@ const TOOLS: ToolDef[] = [
       + "Fast, no terminal tab, no user permission needed. "
       + "The working directory is ALREADY the project root — NEVER use cd, pushd, or absolute paths like /workspace. "
       + "On Windows: use PowerShell syntax — 'head' and 'tail' don't exist. Use 'Select-Object -First N' or 'Get-Content | Select -First N' instead. Use 'type' instead of 'cat'. Paths use backslash or forward slash (both work). The shell is cmd.exe (not bash). "
-      + "For starting servers (python app.py, npm start, flask run) or ANY long-running app, use run_in_terminal — NEVER use run_command for these. "
-      + "Use for: tests, lint, git, pip/npm install, building, etc.",
+      + "SERVER COMMANDS ARE BLOCKED. Do NOT use run_command for: python app.py, python manage.py runserver, python server.py, python run.py, python main.py, flask run, uvicorn, gunicorn, npm start, npm run dev, node server.js, go run, cargo run, next dev, vite. These will be rejected — use run_in_terminal instead. "
+      + "Use for ONLY: tests, lint, git, pip install, npm install, building, compiling, type-checking, reading files.",
     parameters: {
       type: "object",
       properties: {
@@ -206,16 +210,24 @@ const TOOLS: ToolDef[] = [
     name: "run_in_terminal",
     description:
       "Run a long-running command in a real terminal tab. "
-      + "User must Allow each command. The command runs in the background — you can continue working immediately. "
-      + "Output streams to the terminal card and the terminal tab. "
+      + "User must Allow each command. After Allow, the command runs and you will receive the full terminal output as the result — you will always see runtime errors (Traceback, EADDRINUSE, etc.) before your next turn. "
+      + "The terminal output is your tool result. "
       + "Use for: starting servers (python app.py, npm start, flask run), watching builds, interactive shells. "
       + "For short commands (tests, git, install, lint) use run_command instead. "
-      + "IMPORTANT — after the user Allows and the server starts: "
-      + "1) Wait 2-3 seconds for the server to initialize. "
-      + "2) Call \`read_problems\` to check the console state — this includes terminal output from the server. Look for errors, tracebacks, 'Address already in use', 'ModuleNotFoundError', etc. "
-      + "3) If you see errors: read the error message, fix the issue in the code, and call \`task_complete\` asking the user to restart the server. "
-      + "4) If no errors: call \`browser_info\` to check if a tab opened. If not, call \`browser_navigate\` to the likely URL (e.g. http://localhost:5000), then \`browser_screenshot\` or \`browser_get_dom\` to verify the page loads. "
-      + "5) If the page returns a 500 error or doesn't load — check \`browser_console\` and \`browser_request_errors\` for the cause. "
+      + "CRITICAL — after receiving the terminal output, follow these steps IN ORDER: "
+      + "1) CHECK THE OUTPUT for errors. Look for these patterns: "
+      + "   - \`Traceback (most recent call last)\` → Python runtime error, read the stack trace "
+      + "   - \`ModuleNotFoundError: No module named 'X'\` → missing Python package, run \`pip install X\` "
+      + "   - \`ImportError\` / \`cannot import name\` → broken import, circular import, or missing __init__.py "
+      + "   - \`Error: Cannot find module 'X'\` → missing npm package, run \`npm install\` "
+      + "   - \`Address already in use\` / \`EADDRINUSE\` → port conflict, kill existing process or use different port "
+      + "   - \`Error: listen EACCES\` → permission denied on port, use port > 1024 "
+      + "   - \`npm ERR!\` → npm error, read the error message "
+      + "   - \`fatal error\` / \`panic\` / \`segmentation fault\` → Go/Rust/C/C++ crash "
+      + "   - \`SyntaxError\` → code syntax issue, fix and restart "
+      + "   If you see ANY of these, fix the error FIRST. Do NOT proceed to browser navigation. "
+      + "2) If NO runtime errors in terminal output: call \`browser_info\` to check if a tab opened. If not, call \`browser_navigate\` to the likely URL (e.g. http://localhost:5000), then \`browser_screenshot\` or \`browser_get_dom\` to verify the page loads. "
+      + "3) If the page returns a 500 error or doesn't load — check \`browser_console\` and \`browser_request_errors\` for the cause. "
       + "Do NOT continue with the task until you've confirmed the server is running and the page loads successfully.",
     parameters: {
       type: "object",
@@ -588,17 +600,42 @@ async function runCommand(command: string, cwd: string): Promise<string> {
     }
 
     // Block common long-running servers — redirect to run_in_terminal.
-    const SERVER_PATTERNS = [
-      /\bpython\b.*\bapp\.py\b/i, /\bpython\b.*\bmanage\.py\brunserver\b/i,
-      /\bpython\b.*-m\s+flask\b/i, /\bflask\s+run\b/i,
-      /\bnpm\s+(?:start|run\s+dev|run\s+serve)\b/i, /\bnpx\s+.*\b(?:serve|dev|start)\b/i,
-      /\bnode\s+.*\b(index|server|app)\.(?:js|mjs|cjs)\b/i,
-      /\bgo\s+run\b/i, /\bcargo\s+run\b/i, /\bnext\s+(?:dev|start)\b/i,
+    // Exempt compiler/linter/package-manager invocations that happen to match.
+    const COMPILER_PATTERNS = [
+      /\bpython\b.*-m\s+(py_compile|compileall|pytest|pip)\b/i,
+      /\bpython\b.*-c\s/i,  // python -c "..." is inline code, not a server
+      /\bpython\b.*-\w*c\b/i,  // -c flag variants
+      /\bpip\b/i, /\bpytest\b/i, /\bpylint\b/i, /\bflake8\b/i, /\bblack\b/i,
     ];
-    for (const pat of SERVER_PATTERNS) {
-      if (pat.test(stripped)) {
-        resolve(`Blocked: this looks like a long-running server command. Use run_in_terminal for:\n"${command}"\nWait for the user to Allow, then call browser_info to check for the URL.`);
-        return;
+    const isCompiler = COMPILER_PATTERNS.some((pat) => pat.test(stripped));
+
+    if (!isCompiler) {
+      const SERVER_PATTERNS = [
+        // Python servers — match ANY `python somefile.py` that isn't a known compiler/linter
+        /\bpython(?:\.exe)?\s+.*\.py\b/i,
+        /\bpython(?:\.exe)?\s+.*-m\s+(?:flask|uvicorn|gunicorn|django|fastapi)\b/i,
+        /\b(?:flask|uvicorn|gunicorn)\s+/i,
+        /\bmanage\.py\b/i,
+        // Node.js servers
+        /\bnpm\s+(?:start|run\s+dev|run\s+serve|run\s+start)\b/i,
+        /\bnpx\s+.*\b(?:serve|dev|start)\b/i,
+        /\bnode\s+.*\b(index|server|app)\.(?:js|mjs|cjs|ts)\b/i,
+        // Go / Rust
+        /\bgo\s+run\b/i, /\bcargo\s+run\b/i,
+        // Other frameworks
+        /\bnext\s+(?:dev|start)\b/i,
+        /\b(?:vite|webpack-dev-server)\b/i,
+      ];
+      for (const pat of SERVER_PATTERNS) {
+        if (pat.test(stripped)) {
+          // Replace run_command with run_in_terminal in the message so the LLM has the exact fix
+          const fixed = stripped.replace(/^\s*/, "");
+          resolve(`BLOCKED: this is a server start command. DO NOT retry with a different path or syntax — use run_in_terminal instead.\n`
+            + `Original command: "${fixed}"\n`
+            + `Correct approach: call run_in_terminal with command="${fixed}"\n`
+            + `The user will Allow it, then you will receive the terminal output.`);
+          return;
+        }
       }
     }
 
@@ -774,6 +811,51 @@ function readCommandOutput(params: Record<string, unknown>): string {
   ].join("\n");
 
   return header + slice.join("\n");
+}
+
+// Auto-detect the best compile/check command for the current project.
+// Returns a command string ready to pass to run_command.
+function detectProjectBuild(root: string): string | null {
+  const hasExt = (ext: string) => {
+    try {
+      const entries = fs.readdirSync(root, { withFileTypes: true });
+      return entries.some((e) => e.isFile() && e.name.endsWith(ext));
+    } catch { return false; }
+  };
+  const hasFile = (name: string) => {
+    try { return fs.existsSync(path.join(root, name)); } catch { return false; }
+  };
+  // Order matters — check build-system configs before file extensions.
+  if (hasFile("Cargo.toml")) return "cargo check 2>&1";
+  if (hasFile("go.mod")) return "go vet ./... 2>&1";
+  if (hasFile("pom.xml")) return "mvn compile 2>&1";
+  if (hasFile("build.gradle") || hasFile("build.gradle.kts")) return "gradle compileJava 2>&1";
+  if (hasFile("package.json")) {
+    // Prefer tsc --noEmit if tsconfig exists; otherwise fall back to build script.
+    if (hasFile("tsconfig.json")) return "npx tsc --noEmit 2>&1";
+    const pkg = (() => { try { return JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf-8")); } catch { return null; } })();
+    if (pkg?.scripts?.build) return "npm run build 2>&1";
+    return "npx tsc --noEmit 2>&1"; // best guess
+  }
+  if (hasFile("requirements.txt") || hasFile("pyproject.toml") || hasFile("setup.py") || hasExt(".py"))
+    return "python -m compileall . 2>&1";
+  if (hasFile("Gemfile")) return "ruby -c *.rb 2>&1";
+  if (hasFile("composer.json")) return "php -l *.php 2>&1";
+  if (hasFile("Makefile")) return "make 2>&1";
+  if (hasFile("CMakeLists.txt")) return "cmake --build build 2>&1";
+  return null;
+}
+
+// Handler for read_problems — detects the project and runs the compile/lint command.
+async function runReadProblems(root: string): Promise<string> {
+  const cmd = detectProjectBuild(root);
+  if (!cmd) {
+    return "No build system detected. Try a specific command with run_command (e.g. npx tsc --noEmit, python -m compileall ., go vet ./...).";
+  }
+  const result = await runCommand(cmd, root);
+  // Strip the [cmd #N] prefix so it doesn't confuse the agent.
+  const stripped = result.replace(/^\[cmd #\d+\]\s*/, "");
+  return `Build check (${cmd}):\n${stripped}`;
 }
 
 export async function runFsTool(name: string, params: Record<string, unknown>, root: string): Promise<string | null> {
@@ -987,7 +1069,22 @@ export async function runFsTool(name: string, params: Record<string, unknown>, r
 
 const MAX_ITERATIONS = 50;
 
-const SYSTEM_PROMPT = `You are an expert software developer agent running inside a web IDE called Harness.
+// ── Dynamic Instruction Retrieval (ITR) ──
+// The system prompt is broken into themed chunks. At each agent turn,
+// buildSystemPrompt() selects only the chunks relevant to the current
+// conversation context, reducing token usage by up to ~95% compared
+// to sending the full prompt every turn.
+
+interface PromptChunk {
+  id: string;
+  content: string;
+  /** Keywords/patterns that trigger this chunk. */
+  triggers: string[];
+  /** If true, this chunk is always included. */
+  always?: boolean;
+}
+
+const CORE_RULES = `You are an expert software developer agent running inside a web IDE called Harness.
 You have access to tools that let you read/write files, run commands, interact with a browser preview, and inspect the current page.
 
 ### Rules
@@ -997,20 +1094,22 @@ You have access to tools that let you read/write files, run commands, interact w
 4. If you encounter an error, explain what happened and suggest how to fix it.
 5. Keep responses concise — one sentence of reasoning, one tool call.
 6. Do NOT guess browser DOM indices — call \`browser_get_dom\` first.
-7. **Before interacting with a web app in the browser, you MUST start the server first.** Use \`run_in_terminal\` to start the server (e.g. \`python app.py\`, \`npm start\`), wait for the user to Allow the command, then call \`browser_info\` to check if a tab opened automatically. Do NOT try to navigate to localhost URLs before confirming the server is running.
+7. **Before interacting with a web app in the browser, you MUST start the server first.** Use \`run_in_terminal\` to start the server, wait for the user to Allow the command. Then CHECK THE TERMINAL OUTPUT for runtime errors BEFORE navigating to the browser. Only call \`browser_info\` after confirming the terminal output shows no errors.
 8. After starting a server, do NOT guess the URL or port. Call \`browser_info\` to check if a tab opened. If none, ask the user for the URL.
 9. Only use tools from the registry. NEVER invent tools — use \`read_file\` (not cat/head/tail), \`list_files\` (not ls/dir), \`search_files\` (not find/locate), \`grep\` (the tool, not the shell command), \`edit_file\` (not sed/awk), \`write_file\` (not echo>/cp), \`run_command\` for short commands, \`run_in_terminal\` for servers.
 
 ### File conventions
 - All file paths are relative to the project root.
 - Use \`read_file\` to see existing code before editing it.
-- Use \`write_file\` to create or overwrite a file with full content.
-- Use \`edit_file\` for targeted edits — provide old_string (exact text to replace) and new_string. Much cheaper than write_file; only send the lines that change. old_string must match exactly including whitespace/indentation. If it matches multiple locations, set replace_all to true or make it more specific.
+- PREFER \`edit_file\` for any change to an existing file — only send the exact lines that change. old_string must match exactly including whitespace/indentation. If it matches multiple locations, set replace_all to true or make it more specific. This is much cheaper (fewer tokens) and preserves the file's history.
+- Use \`write_file\` ONLY for creating a brand-new file, or when the entire file needs to be rewritten from scratch.
 - Use \`list_files\` to browse a specific directory.
 - Use \`search_files\` to find any file or folder anywhere in the project (by name pattern).
 - Use \`grep\` to search file contents for a string or regex — find definitions, usages, references.
 
-### Browser usage
+Current time: ${new Date().toISOString()}`;
+
+const BROWSER_USAGE = `### Browser usage
 - Use \`browser_navigate\` to go to a URL.
 - Use \`browser_info\` to check the current browser tab URL before navigating — avoid navigating to a URL that's already loaded.
 - Use \`browser_wait\` to wait for an element to appear before interacting (avoid race conditions).
@@ -1062,54 +1161,58 @@ Close with: \`browser_press_key key="Escape"\` or click close button.
 **File uploads**  
 \`browser_upload_file index=N paths=["/absolute/path/to/file.pdf"]\`.
 
-**If submits, navigations, or dialog triggers don't work** — use \`browser_eval\` to inspect the page state or trigger the action programmatically.
+**If submits, navigations, or dialog triggers don't work** — use \`browser_eval\` to inspect the page state or trigger the action programmatically.`;
 
-### Build & fix loop
+const BUILD_FIX_LOOP = `### Build & fix loop
 CRITICAL: After making ANY code changes, follow this flow to catch and fix errors:
-1. Determine the project language and use the correct validation command (see table below).
+1. Determine the project language and use the correct validation command (see language guides).
 2. Read the output carefully. The sandbox returns stdout + stderr — compile errors, lint warnings, and test failures are all there.
-3. If the build FAILS: identify the file, line, and error message from the output. Fix it with \`edit_file\` or \`write_file\`. Then build again.
+3. If the build FAILS: identify the file, line, and error message from the output. Fix it with \`edit_file\`. Then build again.
 4. Repeat step 3 until the build passes with zero errors.
-5. Build passes? Proceed to the next task step.
+5. Build passes? Proceed to the next task step.`;
 
-### Language-specific troubleshooting
-When you encounter errors, use these language-specific patterns to diagnose and fix them efficiently.
-
-**JavaScript / TypeScript**
+const LANG_JS = `### JavaScript / TypeScript troubleshooting
 Build commands:
   - \`npx tsc --noEmit\` — type-check without emitting (preferred, catches all type errors)
   - \`npm run build\` — full build (check package.json scripts first)
   - \`npx eslint .\` — lint only (if ESLint is configured)
 Error patterns:
-  - \`error TS2345: Argument of type 'X' is not assignable\` → type mismatch, fix the type or the value
+  - \`error TS2345: Argument of type 'X' is not assignable\` → type mismatch
   - \`Cannot find module 'X'\` → missing import or missing npm package (run \`npm install\`)
   - \`Property 'X' does not exist on type 'Y'\` → add the property to the type/interface, or fix the access
   - \`'X' is declared but its value is never read\` → unused variable, remove it or use it
 Runtime debugging:
   - After starting a dev server, use \`browser_console\` to check for JS errors in the browser
   - Use \`browser_request_errors\` to check for failed API calls (404, 500, CORS)
-  - Common runtime issues: undefined variables, null property access, unhandled promise rejections
+  - Common runtime issues: undefined variables, null property access, unhandled promise rejections`;
 
-**Python**
+const LANG_PYTHON = `### Python troubleshooting
 Build commands:
   - \`python -m py_compile file.py\` — check single file syntax
   - \`python -m compileall .\` — compile all .py files, catches syntax errors
   - \`python -m pytest\` — run tests (if pytest is configured)
   - \`pip install -r requirements.txt\` — install dependencies before running
 Error patterns — Python tracebacks are read BOTTOM-UP (last line is the actual error):
+  - \`Traceback (most recent call last)\` → always read from the bottom; the LAST line is the actual error type and message
   - \`ModuleNotFoundError: No module named 'X'\` → missing import or package not installed. Run \`pip install X\` or fix the import path.
+  - \`ImportError: cannot import name 'X'\` → circular import, broken import chain, or missing \`__init__.py\`
   - \`NameError: name 'X' is not defined\` → variable used before assignment, typo, or missing import
-  - \`AttributeError: 'X' object has no attribute 'Y'\` → wrong attribute name or wrong object type
+  - \`AttributeError: 'X' object has no attribute 'Y'\` → wrong attribute name, wrong object type, or None where object expected
+  - \`TypeError: X() missing N required positional argument\` → wrong number or type of function arguments
+  - \`ValueError\` → bad value passed (e.g. int('abc'), list.index() of missing item, wrong config format)
+  - \`KeyError: 'X'\` → missing dictionary key; check the data structure or use .get()
+  - \`IndexError: list index out of range\` → accessing list position that doesn't exist
+  - \`FileNotFoundError: [Errno 2] No such file or directory\` → wrong file path, missing config file, or directory doesn't exist
+  - \`PermissionError: [Errno 13] Permission denied\` → can't read/write file, or port < 1024 on Linux
   - \`IndentationError\` / \`TabError\` → mixed tabs/spaces or wrong indentation level
   - \`SyntaxError\` → usually shows exact line with a caret (^) pointing to the problem
-  - \`ImportError\` → broken import chain, check \`sys.path\`, circular imports, or missing \`__init__.py\`
-  - The traceback shows the call stack — the BOTTOM line is the actual error type and message, read upward to trace where it was called from.
+  - \`ZeroDivisionError: division by zero\` → math error, check denominator
 Runtime debugging for web apps (Flask/Django/FastAPI):
   - After \`run_in_terminal\`, use \`browser_console\` and \`browser_request_errors\` to see HTTP errors
   - Flask debug mode shows full tracebacks in the browser on 500 errors — use \`browser_screenshot\` or \`browser_get_dom\` to read them
-  - Common pitfalls: missing template files, undefined Jinja2 variables, database connection failures, port already in use
+  - Common pitfalls: missing template files, undefined Jinja2 variables, database connection failures, port already in use`;
 
-**Go**
+const LANG_GO = `### Go troubleshooting
 Build commands:
   - \`go build ./...\` — compile all packages
   - \`go vet ./...\` — run static analysis (catches common mistakes)
@@ -1119,9 +1222,9 @@ Error patterns:
   - \`cannot use X (type Y) as type Z\` → type mismatch
   - \`imported and not used: "X"\` → remove unused import (Go forbids unused imports)
   - \`X declared and not used\` → remove unused variable or use \`_\` to discard
-  - Errors include exact file:line:column — use those coordinates directly
+  - Errors include exact file:line:column — use those coordinates directly`;
 
-**Rust**
+const LANG_RUST = `### Rust troubleshooting
 Build commands:
   - \`cargo check\` — fast compile check without producing a binary (preferred for quick feedback)
   - \`cargo build\` — full compilation
@@ -1133,9 +1236,9 @@ Error patterns:
   - \`error[E0597]: X does not live long enough\` → lifetime issue, check borrow scope
   - \`error[E0382]: use of moved value\` → ownership issue, clone or borrow instead
   - \`error[E0277]: the trait bound X: Y is not satisfied\` → missing trait implementation
-  - Errors show exact file:line:column — use these directly
+  - Errors show exact file:line:column — use these directly`;
 
-**Java**
+const LANG_JAVA = `### Java troubleshooting
 Build commands:
   - \`mvn compile\` (Maven) or \`gradle build\` (Gradle) — check build config files (\`pom.xml\`, \`build.gradle\`)
   - No build tool? Use \`javac File.java\` for single files
@@ -1143,9 +1246,9 @@ Error patterns:
   - \`cannot find symbol\` → missing import or undefined class/method
   - \`incompatible types\` → type mismatch
   - \`unreported exception X; must be caught or declared to be thrown\` → missing try/catch or throws clause
-  - Errors show class name, line number, and column — use those to locate the issue
+  - Errors show class name, line number, and column — use those to locate the issue`;
 
-**C / C++**
+const LANG_C = `### C / C++ troubleshooting
 Build commands:
   - \`gcc -Wall -Wextra file.c -o output\` (C) or \`g++ -Wall -Wextra file.cpp -o output\` (C++)
   - \`cmake --build build\` (CMake projects)
@@ -1154,9 +1257,9 @@ Error patterns:
   - \`undefined reference to 'X'\` → linker error, missing function definition or library
   - \`error: expected ';' before X\` → missing semicolon
   - \`warning: implicit declaration of function 'X'\` → missing header include
-  - \`segmentation fault\` at runtime → null pointer, buffer overflow, or use-after-free — check pointer usage
+  - \`segmentation fault\` at runtime → null pointer, buffer overflow, or use-after-free — check pointer usage`;
 
-**Ruby**
+const LANG_RUBY = `### Ruby troubleshooting
 Build commands:
   - \`ruby -c file.rb\` — syntax check only (cheap, catches syntax errors)
   - \`bundle exec rake test\` or \`bundle exec rspec\` — run tests
@@ -1165,9 +1268,9 @@ Error patterns:
   - \`NameError: undefined local variable or method 'X'\` → typo or missing definition
   - \`NoMethodError: undefined method 'X' for Y\` → wrong object type or missing method
   - \`LoadError: cannot load such file -- X\` → missing gem, run \`bundle install\` or \`gem install X\`
-  - \`SyntaxError\` → shows exact line, usually missing \`end\` or wrong syntax
+  - \`SyntaxError\` → shows exact line, usually missing \`end\` or wrong syntax`;
 
-**PHP**
+const LANG_PHP = `### PHP troubleshooting
 Build commands:
   - \`php -l file.php\` — syntax check (lint) only
   - \`php -l *.php\` — lint all PHP files in directory
@@ -1175,38 +1278,269 @@ Build commands:
 Error patterns:
   - \`Parse error: syntax error, unexpected X\` → missing semicolon, bracket, or wrong syntax
   - \`Fatal error: Class 'X' not found\` → missing require/include or autoload issue
-  - \`Fatal error: Call to undefined function X()\` → missing extension or typo
+  - \`Fatal error: Call to undefined function X()\` → missing extension or typo`;
 
-**Shell (Bash)**
+const LANG_SHELL = `### Shell (Bash) troubleshooting
 Build commands:
   - \`bash -n script.sh\` — syntax check without executing (safe, catches syntax errors)
   - \`shellcheck script.sh\` — static analysis (if installed, highly recommended)
 Error patterns:
   - \`command not found\` → missing program or typo in command name
   - \`Permission denied\` → script not executable, or file permissions wrong
-  - \`unexpected token\` → syntax error, usually missing quote or bracket
+  - \`unexpected token\` → syntax error, usually missing quote or bracket`;
 
-**General multi-language tips**
+const LANG_GENERAL = `### General multi-language tips
 - When you don't know the language: check the file extensions in the project. Look for config files (\`package.json\`, \`requirements.txt\`, \`go.mod\`, \`Cargo.toml\`, \`pom.xml\`, \`Gemfile\`, \`composer.json\`) to identify the stack.
 - If a test fails: ALWAYS read the full failure output. It tells you exactly what went wrong — expected vs actual values, error messages, and stack traces.
 - After fixing an error, ONLY re-run the build command — don't re-run tests or other commands until the build passes.
-- For web projects: after starting the server, check the browser (with browser tools) for runtime errors even if the build passed. Build success does not guarantee runtime success.
+- For web projects: after starting the server, check the browser (with browser tools) for runtime errors even if the build passed. Build success does not guarantee runtime success.`;
 
-### Diagnostics
-- Use \`run_command\` to compile, lint, or run tests — read errors directly from the output.
-- Use \`read_problems\` for a quick IDE diagnostics overview (linter/TypeScript errors). This is optional — the build output alone is sufficient.
+const SERVER_STARTUP = `### Server startup troubleshooting
+CRITICAL: After starting a server with \`run_in_terminal\`, READ THE TERMINAL OUTPUT before navigating to the browser. The terminal shows runtime errors that compile checks miss.
+
+**Python servers** (Flask/Django/FastAPI):
+- \`Traceback (most recent call last)\` → read the traceback from the BOTTOM up to find the actual error
+- \`ModuleNotFoundError: No module named 'X'\` → run \`pip install X\`, then restart the server
+- \`ImportError: cannot import name 'X'\` → check for circular imports or typos in import statements
+- \`SyntaxError\` / \`IndentationError\` → shows exact line with caret (^); fix and restart
+- \`Address already in use\` → the port is taken; kill the existing process or change the port
+- No output at all → the server started but may be running on a different port; check for "Running on http://..."
+- If the terminal output ends with \`(venv) PS D:\\...>\` or \`$\`, the command has exited — check output for errors above
+
+**Node.js servers** (Express/Next.js/Vite):
+- \`Error: Cannot find module 'X'\` → run \`npm install\` to install missing dependencies
+- \`npm ERR!\` → read the error; usually a missing package, version conflict, or broken node_modules
+- \`EADDRINUSE\` / \`Error: listen EADDRINUSE\` → port conflict, kill existing process or use different port
+- \`Error: listen EACCES\` → permission denied (port < 1024 on Linux); use a higher port
+- \`TypeError: X is not a function\` → code bug; read the stack trace and fix the source
+
+**Go servers**: \`panic: runtime error\` → runtime crash; \`listen tcp :X: bind: address already in use\` → port conflict
+**Rust servers**: \`thread 'main' panicked at\` → runtime panic; \`error: could not compile\` → compile error
+
+**General pattern**:
+1. Start server with \`run_in_terminal\` → user clicks Allow → you receive the terminal output
+2. Errors are auto-detected — if the server crashes (Python traceback, npm ERR, port conflict, etc.), you will see this output immediately
+3. CHECK THE TERMINAL OUTPUT for any of the error patterns above
+4. If errors found: use \`read_file\` to open the failing file, \`edit_file\` to fix, then restart the server
+5. If no errors AND the server shows "Running on http://..." or similar: call \`browser_info\`, then \`browser_navigate\` if needed
+6. If no server output at all: the server may have hung; check the code for blocking operations or missing startup messages`;
+
+const DIAGNOSTICS = `### Diagnostics
+- Use \`read_problems\` to check for compile/lint errors — it auto-detects your project's build system and runs the right command (tsc --noEmit, python -m compileall, go vet, cargo check, etc.). This is the easiest way to check for errors after making changes.
+- Use \`run_command\` for specific build/test/lint commands when you know the exact command you want.
 - Use \`browser_console\` to inspect browser console output for runtime errors.
 - Use \`browser_request_errors\` to check for failed network requests in the browser.
 - **When \`run_command\` output is truncated**: every \`run_command\` result starts with \`[cmd #N]\`. If you see \`... (showing last 4000 of N chars)\`, use \`read_command_output cmd_id=N\` to re-read the output with pagination. Use \`priority=top\` to see the beginning, \`limit=N\` to control how many lines, \`offset=N\` to advance through pages, or \`filter="pattern"\` to extract only matching lines.
 
 ### Terminal
 - Use \`run_command\` for sandboxed short commands: tests, lint, git, pip, npm, builds, etc. (no permission needed, fast inline output).
-- Use \`run_in_terminal\` for long-running commands: starting servers (python app.py, npm start), watch mode, interactive shells. User must Allow, command runs in background.
+- Use \`run_in_terminal\` for long-running commands: starting servers, watch mode, interactive shells. User must Allow. You receive the full terminal output before your next turn.
 - The working directory is already the project root — do NOT use cd/pushd.
-- After starting a web server with \`run_in_terminal\`: wait for the user to Allow the command, then call \`browser_info\` to see if the terminal auto-opened a browser tab. If no tab is open, the server URL may not have been detected — ask the user for the URL instead of guessing the port (do NOT assume port 5000 or 8000).
+- After starting a web server with \`run_in_terminal\`: CHECK THE TERMINAL OUTPUT for runtime errors FIRST. Then call \`browser_info\` to see if the terminal auto-opened a browser tab. If no tab is open, ask the user for the URL — do NOT guess the port.`;
 
-Current time: ${new Date().toISOString()}
-`;
+// ── Chunk registry ──
+const PROMPT_CHUNKS: PromptChunk[] = [
+  {
+    id: "browser",
+    content: BROWSER_USAGE,
+    triggers: [
+      "browser_", "DOM", "navigate", "screenshot", "click", "type",
+      "web", "UI", "frontend", "page", "HTML", "CSS", "form",
+      "modal", "dialog", "dropdown", "autocomplete", "hover",
+    ],
+  },
+  {
+    id: "build_fix",
+    content: BUILD_FIX_LOOP,
+    triggers: [
+      "build", "compile", "error", "fails", "lint", "test fail",
+      "fix", "debug", "edit_file", "write_file", "read_problems",
+      "run_command", "type-check", "syntax",
+    ],
+  },
+  {
+    id: "lang_js",
+    content: LANG_JS,
+    triggers: [
+      ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", "package.json",
+      "typescript", "javascript", "node", "npm", "npx", "tsc",
+      "react", "vue", "angular", "next", "vite", "webpack", "eslint",
+      "TS", "JSX", "esm", "cjs", "require(", "import ",
+    ],
+  },
+  {
+    id: "lang_python",
+    content: LANG_PYTHON,
+    triggers: [
+      ".py", "python", "pip", "pytest", "flask", "django", "fastapi",
+      "requirements.txt", "pyproject.toml", "setup.py", "conda",
+      "traceback", "ModuleNotFoundError", "jinja", "uvicorn",
+    ],
+  },
+  {
+    id: "lang_go",
+    content: LANG_GO,
+    triggers: [
+      ".go", "go.mod", "go.sum", "golang", "go build", "go vet",
+      "go test", "go run",
+    ],
+  },
+  {
+    id: "lang_rust",
+    content: LANG_RUST,
+    triggers: [
+      ".rs", "cargo", "Cargo.toml", "Cargo.lock", "rustc",
+      "rust", "clippy", "crate",
+    ],
+  },
+  {
+    id: "lang_java",
+    content: LANG_JAVA,
+    triggers: [
+      ".java", "pom.xml", "build.gradle", ".gradle", "maven", "mvn",
+      "gradle", "javac", "spring", "classpath",
+    ],
+  },
+  {
+    id: "lang_c",
+    content: LANG_C,
+    triggers: [
+      ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", "CMakeLists.txt",
+      "gcc", "g++", "cmake", "makefile", "clang", "Makefile",
+    ],
+  },
+  {
+    id: "lang_ruby",
+    content: LANG_RUBY,
+    triggers: [
+      ".rb", "Gemfile", "ruby", "rake", "rspec", "bundle", "gem",
+      "rubocop", "rails",
+    ],
+  },
+  {
+    id: "lang_php",
+    content: LANG_PHP,
+    triggers: [
+      ".php", "composer.json", "composer.lock", "php", "laravel",
+      "symfony", "wordpress",
+    ],
+  },
+  {
+    id: "lang_shell",
+    content: LANG_SHELL,
+    triggers: [
+      ".sh", ".bash", "shellcheck", "#!/bin/bash", "#!/bin/sh",
+      "bash ", "shell script", "Makefile", ".mk",
+    ],
+  },
+  {
+    id: "lang_general",
+    content: LANG_GENERAL,
+    triggers: [],
+    always: true,
+  },
+  {
+    id: "server_startup",
+    content: SERVER_STARTUP,
+    triggers: [
+      "run_in_terminal", "start server", "start the server", "dev server",
+      "app.py", "npm start", "npm run dev", "flask run", "uvicorn",
+      "manage.py runserver", "go run", "cargo run", "EADDRINUSE",
+      "port", "listen", "Running on http",
+    ],
+  },
+  {
+    id: "diagnostics",
+    content: DIAGNOSTICS,
+    triggers: [
+      "run_command", "read_problems", "read_command_output",
+      "read_file", "terminal", "sandbox", "run_in_terminal",
+      "build", "compile", "test", "lint", "error",
+    ],
+  },
+];
+
+// ── Dynamic system prompt builder ──
+// Scans conversation messages, tool call names, and file paths to select
+// only the relevant instruction chunks for the current turn.
+
+/** Normalize text for keyword matching. */
+function norm(text: string): string {
+  return text.toLowerCase();
+}
+
+/** Count the number of trigger hits for a chunk in a body of text. */
+function countTriggers(text: string, triggers: string[]): number {
+  const t = norm(text);
+  let count = 0;
+  for (const trigger of triggers) {
+    if (t.includes(norm(trigger))) count++;
+  }
+  return count;
+}
+
+/** Extract tool names from assistant messages that contain tool_calls JSON. */
+function extractToolNames(
+  messages: Array<{ role: string; content: string | null; name?: string }>,
+): string[] {
+  const names: string[] = [];
+  for (const m of messages) {
+    if (m.role === "assistant" && m.name) {
+      names.push(m.name);
+    } else if (m.role === "assistant" && m.content) {
+      // Try parsing tool_calls JSON from content
+      try {
+        const calls = JSON.parse(m.content);
+        if (Array.isArray(calls)) {
+          for (const c of calls) {
+            if (c.function?.name) names.push(c.function.name);
+          }
+        }
+      } catch { /* not tool_calls JSON */ }
+    }
+  }
+  return names;
+}
+
+function buildSystemPrompt(
+  messages: Array<{ role: string; content: string | null; name?: string }>,
+  context: string,
+): string {
+  // Always include core rules
+  const parts: string[] = [CORE_RULES];
+
+  // Build a combined text blob from all message content for keyword matching
+  let combined = context || "";
+  for (const m of messages) {
+    if (m.content) combined += "\n" + m.content;
+    if (m.role === "user") combined += "\n" + (m.content || "");
+  }
+
+  // Also scan tool names
+  const toolNames = extractToolNames(messages);
+  combined += "\n" + toolNames.join(" ");
+
+  // Select optional chunks by trigger match score
+  for (const chunk of PROMPT_CHUNKS) {
+    if (chunk.always) {
+      parts.push(chunk.content);
+      continue;
+    }
+    const score = countTriggers(combined, chunk.triggers);
+    // Browser chunk also activates when any browser_* tool has been called
+    const browserBoost = (chunk.id === "browser" && toolNames.some((n) => n.startsWith("browser_"))) ? 5 : 0;
+    if (score >= 2 || browserBoost > 0) {
+      parts.push(chunk.content);
+    }
+  }
+
+  // Append IDE context if provided
+  if (context && context.trim()) {
+    parts.push(`### Additional context from the IDE\n${context}`);
+  }
+
+  return parts.join("\n\n");
+}
 
 let callSeq = 0;
 
@@ -1232,9 +1566,8 @@ export async function agentLoop(
   const rc2 = (reasoning: string | null | undefined) =>
     (reasoning || state.isReasoningModel) ? { reasoning_content: reasoning || "" } : {};
 
-  const systemMsg = context
-    ? SYSTEM_PROMPT + `\n\n### Additional context from the IDE\n${context}`
-    : SYSTEM_PROMPT;
+  // Dynamic instruction retrieval — only include relevant prompt chunks
+  const systemMsg = buildSystemPrompt(state.messages, context);
 
   const openaiMessages: Array<{ role: string; content: string | null; tool_call_id?: string; tool_calls?: any[]; reasoning_content?: string }> = [];
   // Push a system message
@@ -1310,6 +1643,15 @@ export async function agentLoop(
         continue;
       }
 
+      // read_problems: auto-detect project and run compile/lint.
+      if (fnName === "read_problems") {
+        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc2(reasoningContent) });
+        const diagResult = await runReadProblems(projectRoot);
+        state.messages.push({ role: "tool", content: diagResult, tool_call_id: tc.id });
+        executedTools.push({ name: fnName, result: diagResult.slice(0, 1000) });
+        continue;
+      }
+
       // task_complete ends the loop.
       if (fnName === "task_complete") {
         const summary = String(params.summary || "Task completed.");
@@ -1364,13 +1706,11 @@ export async function* agentLoopStream(
     return;
   }
   const MAX_ITERS = 50;
-  const systemMsg = context
-    ? SYSTEM_PROMPT + `\n\n### Additional context from the IDE\n${context}`
-    : SYSTEM_PROMPT;
 
+  // Dynamic instruction retrieval — rebuilt each iteration as conversation evolves
   const buildMessages = () => {
     const msgs: Array<{ role: string; content: string | null; tool_call_id?: string; tool_calls?: any[]; reasoning_content?: string }> = [];
-    msgs.push({ role: "system", content: systemMsg });
+    msgs.push({ role: "system", content: buildSystemPrompt(state.messages, context) });
     const pendingIds = new Set<string>(); // track all tool_call_ids waiting for a response
     for (const m of state.messages) {
       if (m.role === "tool") {
@@ -1564,41 +1904,69 @@ export async function* agentLoopStream(
         return;
       }
 
-      // ── Destructive filesystem tools: require user permission ──
-      const DESTRUCTIVE_TOOLS = ["write_file", "delete_file", "rename_file", "edit_file"];
-      if (DESTRUCTIVE_TOOLS.includes(fnName)) {
+      // ── File tools: auto-execute, yield diff for Accept/Reject in UI ──
+      const FILE_TOOLS = ["write_file", "edit_file", "delete_file", "rename_file"];
+      if (FILE_TOOLS.includes(fnName)) {
         const fp = String(params.path || params.oldPath || "");
-        // Push all tool calls as assistant messages; deferred tools get NOT_EXECUTED
+        // Push all tool calls as assistant messages; only this one gets executed
         for (let j = 0; j < finalToolCalls.length; j++) {
           const t = finalToolCalls[j];
           state.messages.push({ role: "assistant", content: JSON.stringify([{ id: t.id, type: "function", function: { name: t.function.name, arguments: t.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
           if (j !== i) {
-            state.messages.push({ role: "tool", content: "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_get_dom, browser_select, or any other browser_* tool) on your next turn to get the actual result.", tool_call_id: t.id });
+            state.messages.push({ role: "tool", content: "NOT_EXECUTED: This tool was not run because it was batched with other tools. Do NOT interpret this as a real result. Call this tool BY ITSELF on your next turn to get the actual result.", tool_call_id: t.id });
           }
         }
-        // Capture original content before the operation (for undo support)
+        // Capture original content before executing
         let originalContent: string | null = null;
         const resolvedPath = path.resolve(projectRoot, fp);
         try { originalContent = fs.readFileSync(resolvedPath, "utf-8"); } catch { originalContent = null; }
-        state.pendingPermission = { toolCallId: tc.id, command: `${fnName}: ${fp}`, background: false, toolName: fnName, params: params as Record<string, unknown> };
+        // Execute the file change immediately (no Allow/Deny — user reviews after)
         yield {
           type: "tool_start", toolName: fnName, toolParams: params,
           ...(originalContent !== null ? { originalContent } : {}),
         };
-        yield {
-          type: "permission_required",
+        const fsResult = await runFsTool(fnName, params, projectRoot);
+        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
+        // Defer the result — user must Accept/Reject before agent continues
+        state.deferredTool = {
           toolCallId: tc.id,
           toolName: fnName,
-          permissionCommand: `${fnName}: ${fp}`,
-          backgroundPerm: false,
+          params: params as Record<string, unknown>,
+          result: fsResult || "Done.",
+          originalContent,
+          filePath: fp,
+        };
+        yield {
+          type: "tool_end",
+          toolName: fnName,
+          toolResult: "Diff ready",
+          toolParams: params,
+          originalContent,
           executedTools,
         };
+        executedTools.push({ name: fnName, result: fsResult?.slice(0, 500) || "" });
         return;
       }
 
+      // ── read_problems: auto-detect project and run compile/lint ──
+      if (fnName === "read_problems") {
+        yield { type: "tool_start", toolName: fnName, toolParams: params };
+        const diagResult = await runReadProblems(projectRoot);
+        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
+        state.messages.push({ role: "tool", content: diagResult, tool_call_id: tc.id });
+        yield {
+          type: "tool_end",
+          toolName: fnName,
+          toolResult: diagResult.slice(0, 2000),
+          toolSandbox: diagResult,
+          executedTools: [{ name: fnName, result: diagResult.slice(0, 500) }],
+        };
+        executedTools.push({ name: fnName, result: diagResult.slice(0, 1000) });
+        continue;
+      }
+
       // ── Read-only filesystem tools: auto-execute ──
-      // write_file, edit_file, delete_file, and rename_file are handled above with permission.
-      // These remaining tools are safe to auto-execute without asking.
+      // write_file, edit_file, delete_file, and rename_file are handled above with deferred Accept/Reject.
       const isFsTool = [
         "read_file", "list_files", "search_files", "grep", "create_directory", "write_todos", "read_command_output",
       ].includes(fnName);

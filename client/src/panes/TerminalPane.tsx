@@ -30,6 +30,7 @@ interface TermInstance {
   historyKey: string;
   commandRunning: boolean;
   commandSawError: boolean;
+  commandEchoSeen: boolean;
   currentPromptMarker?: IMarker;
   lastCommandMarker?: IMarker;
   promptMarkers: Array<{ id: number; marker: IMarker; kind: "idle" | "success" | "error" }>;
@@ -614,6 +615,9 @@ export default function TerminalPane({
           inst.commandRunning = false;
           inst.commandSawError = false;
           inst.lastCommandMarker = undefined;
+          // Signal the agent wait loop that the command has finished
+          // (for pipe-mode terminals, proc.on("close") never fires since the shell stays alive with -NoExit)
+          (agentTerminalBridge as AgentTerminalBridgeInternal)?._pushFinish(-1);
         }
         createPromptDecoration(inst);
         last = start + full.length;
@@ -800,6 +804,7 @@ export default function TerminalPane({
       historyKey: "",
       commandRunning: false,
       commandSawError: false,
+      commandEchoSeen: false,
       promptMarkers: [],
       commandMarkerIds: [],
       commandNavIndex: -1,
@@ -955,18 +960,22 @@ export default function TerminalPane({
           const ac = agentCmdRef.current;
           agentTermIdRef.current = id;
           agentCmdRef.current = null;
-          // Small delay to let the shell initialise before sending the command
-          setTimeout(() => {
-            sendToServer(id, `${ac.command}\r\n`);
-            // Track command running for error detection
+          // Poll for the shell to be ready (initial prompt has appeared) before sending the command.
+          // This avoids a race where _pushFinish fires on the initial prompt instead of the command's prompt.
+          const waitForShell = () => {
             const inst = termsRef.current.get(id);
-            if (inst) {
-              inst.commandRunning = true;
-              inst.commandSawError = false;
-              const label = getCommandLabel(ac.command);
-              if (label) setLabelById((prev) => ({ ...prev, [id]: label }));
-            }
-          }, 150);
+            if (!inst) { setTimeout(waitForShell, 100); return; }
+            // Check if the initial prompt has been rendered (createPromptDecoration was called)
+            if (inst.promptMarkers.length === 0) { setTimeout(waitForShell, 100); return; }
+            // Shell is ready — send the command
+            sendToServer(id, `${ac.command}\r\n`);
+            inst.commandRunning = true;
+            inst.commandSawError = false;
+            inst.commandEchoSeen = false;
+            const label = getCommandLabel(ac.command);
+            if (label) setLabelById((prev) => ({ ...prev, [id]: label }));
+          };
+          setTimeout(waitForShell, 50);
         }
       } else if (data.startsWith("term:out:")) {
         const rest = data.slice(9);

@@ -376,3 +376,61 @@ The agent works with a fixed tool registry. To prevent it from inventing tools t
 - **Running commands** → use `run_command` for short tasks, `run_in_terminal` for servers (never background with `&` or `nohup`)
 - **Checking diagnostics** → use `read_problems` (not `tsc`, `eslint`, or `pylint` directly — those go through `run_command`)
 - **Starting servers** → use `run_in_terminal` only (never `run_command` for `python app.py`, `npm start`, etc.)
+
+## Token Optimization (ITR + Context Caching)
+
+Harness uses two techniques to reduce token usage and API costs when talking to DeepSeek:
+
+### 1. Instruction-Tool Retrieval (ITR)
+
+Instead of sending the entire system prompt on every agent turn, the prompt is broken into **14 themed chunks** in `server/agent.ts`:
+
+| Chunk | Contents | When Included |
+|---|---|---|
+| **Core Rules** | Agent identity, workflow rules, file conventions | Always |
+| **Browser Usage** | Browser tool reference, web element patterns (modals, dropdowns, autocomplete, etc.) | When `browser_*` tools are in use, or UI keywords detected |
+| **Build & Fix Loop** | Compile → fix → repeat workflow | When errors, builds, or `edit_file`/`write_file` are detected |
+| **Language-specific** (8 chunks) | JS/TS, Python, Go, Rust, Java, C/C++, Ruby, PHP, Shell troubleshooting | Detected from file extensions (`.py`, `.ts`, `.go`, etc.), config files (`package.json`, `go.mod`, `Cargo.toml`), and error patterns |
+| **General Tips** | Multi-language detection, config file recognition | Always |
+| **Server Startup** | Per-language server startup debugging (port conflicts, missing modules, etc.) | When `run_in_terminal` or server start commands are detected |
+| **Diagnostics** | `read_problems`, `read_command_output` pagination, terminal usage | When `run_command`, `read_problems`, or build commands are detected |
+
+The `buildSystemPrompt()` function in `server/agent.ts` scans the conversation history, tool call names, and file references at each turn, then assembles a **mini-prompt** containing only the relevant chunks. This reduces the system prompt by up to **~95%** compared to sending the full prompt every turn.
+
+A typical turn without browser interaction sends only ~3 chunks (Core + Build/Fix + one language chunk) instead of all 14.
+
+### 2. Context Caching
+
+DeepSeek API supports **automatic prefix caching**: when consecutive requests share an identical message prefix (the system message), the server reuses the KV cache for those tokens — reducing both cost and latency.
+
+Harness leverages this in two ways:
+
+- **Stable system messages**: Because `buildSystemPrompt()` produces the same output for the same context, the system message stays stable across turns where the detected project stack doesn't change. DeepSeek hits the prefix cache automatically for these consecutive calls.
+- **Cache tracking**: `server/deepseek.ts` computes a context ID from the system message content and logs cache metrics (`cacheRequests`, `cacheHits`) to `.harness-debug/` for observability.
+
+No extra API parameters are needed — DeepSeek handles prefix caching transparently on the server side.
+
+### Architecture
+
+```
+                ┌─────────────────────────────┐
+                │    buildSystemPrompt()       │
+                │  scans messages + context    │
+                │  selects relevant chunks     │
+                └──────────────┬──────────────┘
+                               │
+                    ┌──────────▼──────────┐
+                    │   Mini system prompt │
+                    │   (only ~3-5 chunks)  │
+                    └──────────┬──────────┘
+                               │
+                    ┌──────────▼──────────┐
+                    │  deepseekFetch()     │
+                    │  + cacheContextId    │
+                    │  → DeepSeek API     │
+                    └─────────────────────┘
+```
+
+Files:
+- `server/agent.ts` — `buildSystemPrompt()`, `PROMPT_CHUNKS[]`, chunk definitions
+- `server/deepseek.ts` — `deepseekFetch()` with `cacheContextId` parameter, cache metrics logging
