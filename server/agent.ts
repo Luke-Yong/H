@@ -40,7 +40,7 @@ export interface AgentState {
   messages: AgentMessage[];
   iteration: number;
   projectRoot: string;
-  pendingPermission?: { toolCallId: string; command: string; background?: boolean; toolName?: string };
+  pendingPermission?: { toolCallId: string; command: string; background?: boolean; toolName?: string; params?: Record<string, unknown> };
   /** True once the API has returned reasoning_content in any response. */
   isReasoningModel?: boolean;
 }
@@ -100,11 +100,14 @@ const TOOLS: ToolDef[] = [
     name: "read_file",
     description:
       "Read a file or list a directory's contents. Returns the file text with line numbers, "
-      + "or a directory listing showing files and subdirectories.",
+      + "or a directory listing showing files and subdirectories. "
+      + "For large files, use offset and limit to paginate — e.g. offset=100 limit=50 reads lines 100-149.",
     parameters: {
       type: "object",
       properties: {
         path: { type: "string", description: "Path to the file relative to the project root." },
+        offset: { type: "integer", description: "Line number to start reading from (1-based, default: 1)." },
+        limit: { type: "integer", description: "Max lines to return (default: all lines)." },
       },
       required: ["path"],
     },
@@ -185,11 +188,12 @@ const TOOLS: ToolDef[] = [
   {
     name: "run_command",
     description:
-      "Run a shell command in a sandbox and return stdout + stderr. "
+      "Run a short shell command in a sandbox and return stdout + stderr. "
       + "Fast, no terminal tab, no user permission needed. "
-      + "The working directory is already the project root — do NOT use cd/pushd. "
-      + "Use for: tests, lint, git, installing packages, building, grep, etc. "
-      + "For starting servers or long-running apps use run_in_terminal instead.",
+      + "The working directory is ALREADY the project root — NEVER use cd, pushd, or absolute paths like /workspace. "
+      + "On Windows: use PowerShell syntax — 'head' and 'tail' don't exist. Use 'Select-Object -First N' or 'Get-Content | Select -First N' instead. Use 'type' instead of 'cat'. Paths use backslash or forward slash (both work). The shell is cmd.exe (not bash). "
+      + "For starting servers (python app.py, npm start, flask run) or ANY long-running app, use run_in_terminal — NEVER use run_command for these. "
+      + "Use for: tests, lint, git, pip/npm install, building, etc.",
     parameters: {
       type: "object",
       properties: {
@@ -206,9 +210,13 @@ const TOOLS: ToolDef[] = [
       + "Output streams to the terminal card and the terminal tab. "
       + "Use for: starting servers (python app.py, npm start, flask run), watching builds, interactive shells. "
       + "For short commands (tests, git, install, lint) use run_command instead. "
-      + "After starting a web server: the terminal may detect URL output and auto-open a browser tab. "
-      + "After the user Allows the command, wait a moment and call \`browser_info\` to check if a tab opened. "
-      + "If no tab opened, ask the user to check the terminal output for the server URL — do NOT guess the port.",
+      + "IMPORTANT — after the user Allows and the server starts: "
+      + "1) Wait 2-3 seconds for the server to initialize. "
+      + "2) Call \`read_problems\` to check the console state — this includes terminal output from the server. Look for errors, tracebacks, 'Address already in use', 'ModuleNotFoundError', etc. "
+      + "3) If you see errors: read the error message, fix the issue in the code, and call \`task_complete\` asking the user to restart the server. "
+      + "4) If no errors: call \`browser_info\` to check if a tab opened. If not, call \`browser_navigate\` to the likely URL (e.g. http://localhost:5000), then \`browser_screenshot\` or \`browser_get_dom\` to verify the page loads. "
+      + "5) If the page returns a 500 error or doesn't load — check \`browser_console\` and \`browser_request_errors\` for the cause. "
+      + "Do NOT continue with the task until you've confirmed the server is running and the page loads successfully.",
     parameters: {
       type: "object",
       properties: {
@@ -523,6 +531,27 @@ const TOOLS: ToolDef[] = [
       + "that no new errors were introduced and existing problems were resolved.",
     parameters: { type: "object", properties: {}, required: [] },
   },
+  {
+    name: "read_command_output",
+    description:
+      "Re-read output from a previous run_command call. Use this when the output was truncated "
+      + "(showing only the last 4000 chars) and you need to see earlier lines, the top of the output, "
+      + "or filter for specific lines. The command ID is shown as `[cmd #N]` in the original result. "
+      + "Use offset and limit for pagination (e.g. offset=0 limit=100 reads the first 100 lines). "
+      + "Use priority=top to read from the beginning, priority=bottom (default) for the end. "
+      + "Use a regex filter to extract only matching lines (e.g. filter='error|ERR|FAIL').",
+    parameters: {
+      type: "object",
+      properties: {
+        cmd_id: { type: "integer", description: "The command sequence number (e.g. 1, 2) from [cmd #N] in the result." },
+        offset: { type: "integer", description: "Line offset (0-based, default: 0)." },
+        limit: { type: "integer", description: "Max lines to return (default: 200)." },
+        priority: { type: "string", enum: ["top", "bottom"], description: "Read from top or bottom of output (default: bottom)." },
+        filter: { type: "string", description: "Regex filter — only return lines matching this pattern (case-insensitive)." },
+      },
+      required: ["cmd_id"],
+    },
+  },
 ];
 
 const TOOL_BY_NAME = new Map(TOOLS.map((t) => [t.name, t]));
@@ -540,12 +569,56 @@ export type ToolExecutor = (
 async function runCommand(command: string, cwd: string): Promise<string> {
   return new Promise((resolve) => {
     const MAX_KEEP = 4000;
+    const MAX_CACHE = 50000; // full output cache limit
     const HARD_TIMEOUT_MS = 45000;
     const IDLE_TIMEOUT_MS = 2000; // resolve early if output stops for this long
     let buf = "";
+    let fullBuf = "";  // untruncated — saved to commandOutputStore
     let totalChars = 0;
     let timedOut = false;
     let idleTimer: ReturnType<typeof setTimeout> | null = null;
+
+    // ── Command sanitization ──
+
+    // Block cd/pushd — the working directory is already the project root.
+    const stripped = command.trimStart();
+    if (/^(?:cd|pushd|chdir)\b/i.test(stripped)) {
+      resolve(`Blocked: do NOT use cd/pushd. The working directory is already the project root (${cwd}). Just run the command directly.`);
+      return;
+    }
+
+    // Block common long-running servers — redirect to run_in_terminal.
+    const SERVER_PATTERNS = [
+      /\bpython\b.*\bapp\.py\b/i, /\bpython\b.*\bmanage\.py\brunserver\b/i,
+      /\bpython\b.*-m\s+flask\b/i, /\bflask\s+run\b/i,
+      /\bnpm\s+(?:start|run\s+dev|run\s+serve)\b/i, /\bnpx\s+.*\b(?:serve|dev|start)\b/i,
+      /\bnode\s+.*\b(index|server|app)\.(?:js|mjs|cjs)\b/i,
+      /\bgo\s+run\b/i, /\bcargo\s+run\b/i, /\bnext\s+(?:dev|start)\b/i,
+    ];
+    for (const pat of SERVER_PATTERNS) {
+      if (pat.test(stripped)) {
+        resolve(`Blocked: this looks like a long-running server command. Use run_in_terminal for:\n"${command}"\nWait for the user to Allow, then call browser_info to check for the URL.`);
+        return;
+      }
+    }
+
+    // Auto-convert Linux head/tail to PowerShell on Windows
+    if (process.platform === "win32") {
+      // Replace "| head -N" with PowerShell Select-Object equivalent
+      // Since the shell is cmd.exe, we need to pipe to powershell -Command
+      const headMatch = stripped.match(/^(.*)\|\s*head\s+-(\d+)\s*$/i);
+      if (headMatch && !stripped.includes("powershell")) {
+        const actualCmd = headMatch[1].trim();
+        const n = headMatch[2];
+        command = `${actualCmd} | powershell -Command "$input | Select-Object -First ${n}"`;
+      }
+      const tailMatch = stripped.match(/^(.*)\|\s*tail\s+-(\d+)\s*$/i);
+      if (tailMatch && !stripped.includes("powershell")) {
+        const actualCmd = tailMatch[1].trim();
+        const n = tailMatch[2];
+        command = `${actualCmd} | powershell -Command "$input | Select-Object -Last ${n}"`;
+      }
+    }
 
     // Strip secrets from environment before passing to child process
     const safeEnv: Record<string, string> = {};
@@ -589,7 +662,22 @@ async function runCommand(command: string, cwd: string): Promise<string> {
       if (timedOut) {
         prefix += `[Command timed out after ${HARD_TIMEOUT_MS / 1000}s]\n`;
       }
-      const result = prefix + (out || "(command completed with no output)");
+      // Save full output to cache for later re-reading
+      const seq = ++cmdSeq;
+      commandOutputStore.set(seq, {
+        command,
+        output: fullBuf.trimEnd(),
+        totalChars,
+        exitCode: code,
+        timedOut,
+      });
+      // Keep only the last 50 commands in cache
+      if (commandOutputStore.size > 50) {
+        const oldest = Math.min(...commandOutputStore.keys());
+        commandOutputStore.delete(oldest);
+      }
+      const header = `[cmd #${seq}] `;
+      const result = header + prefix + (out || "(command completed with no output)");
       if (code !== 0 && code !== null && !timedOut) {
         resolve(`Exit code ${code}: ${result}`.slice(0, 4400));
       } else {
@@ -614,6 +702,7 @@ async function runCommand(command: string, cwd: string): Promise<string> {
       const text = chunk.toString("utf-8");
       totalChars += text.length;
       buf = (buf + text).slice(-MAX_KEEP);
+      fullBuf = (fullBuf + text).slice(-MAX_CACHE); // untruncated cache
       // Reset idle timer — if output stops for IDLE_TIMEOUT_MS, resolve early
       if (idleTimer) clearTimeout(idleTimer);
       idleTimer = setTimeout(() => {
@@ -636,6 +725,55 @@ async function runCommand(command: string, cwd: string): Promise<string> {
       resolve(`Failed to spawn: ${err.message}`);
     });
   });
+}
+
+function readCommandOutput(params: Record<string, unknown>): string {
+  const seq = Number(params.cmd_id);
+  if (!seq || isNaN(seq)) return "Error: cmd_id is required (e.g. 1, 2 from [cmd #N] in result).";
+
+  const entry = commandOutputStore.get(seq);
+  if (!entry) return `Command #${seq} not found. It may have been evicted from the cache (max 50 commands) or never existed.`;
+
+  const lines = entry.output.split("\n");
+  const totalLines = lines.length;
+  const offset = Number(params.offset) || 0;
+  const limit = Number(params.limit) || 200;
+  const priority = String(params.priority || "bottom");
+  const filterStr = String(params.filter || "");
+
+  let selected = lines;
+
+  // Apply regex filter
+  if (filterStr) {
+    try {
+      const re = new RegExp(filterStr, "i");
+      selected = lines.filter((l) => re.test(l));
+    } catch {
+      return `Invalid regex filter: ${filterStr}`;
+    }
+  }
+
+  // Apply priority-based slicing
+  let slice: string[];
+  if (priority === "top") {
+    slice = selected.slice(offset, offset + limit);
+  } else {
+    // bottom: offset counts from the end
+    const start = Math.max(0, selected.length - limit - offset);
+    slice = selected.slice(start, start + limit);
+  }
+
+  const header = [
+    `Command #${seq}: ${entry.command}`,
+    `Total: ${totalLines} lines, ${entry.totalChars} chars${filterStr ? ` (filter: /${filterStr}/i matched ${selected.length} lines)` : ""}`,
+    `Exit code: ${entry.exitCode ?? "N/A"}${entry.timedOut ? ", timed out" : ""}`,
+    priority === "top"
+      ? `Showing lines ${offset + 1}-${Math.min(offset + limit, selected.length)} (from top)`
+      : `Showing ${Math.min(offset + limit, selected.length)} lines from bottom (offset ${offset})`,
+    ``,
+  ].join("\n");
+
+  return header + slice.join("\n");
 }
 
 export async function runFsTool(name: string, params: Record<string, unknown>, root: string): Promise<string | null> {
@@ -792,6 +930,9 @@ export async function runFsTool(name: string, params: Record<string, unknown>, r
   if (name === "run_command") {
     return await runCommand(String(params.command || ""), root);
   }
+  if (name === "read_command_output") {
+    return readCommandOutput(params);
+  }
   if (name === "create_directory") {
     const dirPath = resolve(String(params.path || ""));
     fs.mkdirSync(dirPath, { recursive: true });
@@ -858,6 +999,7 @@ You have access to tools that let you read/write files, run commands, interact w
 6. Do NOT guess browser DOM indices — call \`browser_get_dom\` first.
 7. **Before interacting with a web app in the browser, you MUST start the server first.** Use \`run_in_terminal\` to start the server (e.g. \`python app.py\`, \`npm start\`), wait for the user to Allow the command, then call \`browser_info\` to check if a tab opened automatically. Do NOT try to navigate to localhost URLs before confirming the server is running.
 8. After starting a server, do NOT guess the URL or port. Call \`browser_info\` to check if a tab opened. If none, ask the user for the URL.
+9. Only use tools from the registry. NEVER invent tools — use \`read_file\` (not cat/head/tail), \`list_files\` (not ls/dir), \`search_files\` (not find/locate), \`grep\` (the tool, not the shell command), \`edit_file\` (not sed/awk), \`write_file\` (not echo>/cp), \`run_command\` for short commands, \`run_in_terminal\` for servers.
 
 ### File conventions
 - All file paths are relative to the project root.
@@ -923,20 +1065,139 @@ Close with: \`browser_press_key key="Escape"\` or click close button.
 **If submits, navigations, or dialog triggers don't work** — use \`browser_eval\` to inspect the page state or trigger the action programmatically.
 
 ### Build & fix loop
-CRITICAL: After making ANY code changes, you MUST verify the project still compiles without errors.
-1. Run the project's build command (e.g. \`npm run build\`, \`tsc --noEmit\`, \`python -m py_compile\`, \`go build\`).
-2. If the build FAILS: read the error output carefully, identify the file and line causing the error, fix it, and build again.
-3. Repeat the edit → build → fix loop until the build passes with zero errors.
-4. After the build passes, call \`read_problems\` to confirm no IDE diagnostics remain.
-5. Only then proceed to the next task step.
-If you are unsure which build command to use, check \`package.json\` scripts, \`tsconfig.json\`, or common build files first.
+CRITICAL: After making ANY code changes, follow this flow to catch and fix errors:
+1. Determine the project language and use the correct validation command (see table below).
+2. Read the output carefully. The sandbox returns stdout + stderr — compile errors, lint warnings, and test failures are all there.
+3. If the build FAILS: identify the file, line, and error message from the output. Fix it with \`edit_file\` or \`write_file\`. Then build again.
+4. Repeat step 3 until the build passes with zero errors.
+5. Build passes? Proceed to the next task step.
+
+### Language-specific troubleshooting
+When you encounter errors, use these language-specific patterns to diagnose and fix them efficiently.
+
+**JavaScript / TypeScript**
+Build commands:
+  - \`npx tsc --noEmit\` — type-check without emitting (preferred, catches all type errors)
+  - \`npm run build\` — full build (check package.json scripts first)
+  - \`npx eslint .\` — lint only (if ESLint is configured)
+Error patterns:
+  - \`error TS2345: Argument of type 'X' is not assignable\` → type mismatch, fix the type or the value
+  - \`Cannot find module 'X'\` → missing import or missing npm package (run \`npm install\`)
+  - \`Property 'X' does not exist on type 'Y'\` → add the property to the type/interface, or fix the access
+  - \`'X' is declared but its value is never read\` → unused variable, remove it or use it
+Runtime debugging:
+  - After starting a dev server, use \`browser_console\` to check for JS errors in the browser
+  - Use \`browser_request_errors\` to check for failed API calls (404, 500, CORS)
+  - Common runtime issues: undefined variables, null property access, unhandled promise rejections
+
+**Python**
+Build commands:
+  - \`python -m py_compile file.py\` — check single file syntax
+  - \`python -m compileall .\` — compile all .py files, catches syntax errors
+  - \`python -m pytest\` — run tests (if pytest is configured)
+  - \`pip install -r requirements.txt\` — install dependencies before running
+Error patterns — Python tracebacks are read BOTTOM-UP (last line is the actual error):
+  - \`ModuleNotFoundError: No module named 'X'\` → missing import or package not installed. Run \`pip install X\` or fix the import path.
+  - \`NameError: name 'X' is not defined\` → variable used before assignment, typo, or missing import
+  - \`AttributeError: 'X' object has no attribute 'Y'\` → wrong attribute name or wrong object type
+  - \`IndentationError\` / \`TabError\` → mixed tabs/spaces or wrong indentation level
+  - \`SyntaxError\` → usually shows exact line with a caret (^) pointing to the problem
+  - \`ImportError\` → broken import chain, check \`sys.path\`, circular imports, or missing \`__init__.py\`
+  - The traceback shows the call stack — the BOTTOM line is the actual error type and message, read upward to trace where it was called from.
+Runtime debugging for web apps (Flask/Django/FastAPI):
+  - After \`run_in_terminal\`, use \`browser_console\` and \`browser_request_errors\` to see HTTP errors
+  - Flask debug mode shows full tracebacks in the browser on 500 errors — use \`browser_screenshot\` or \`browser_get_dom\` to read them
+  - Common pitfalls: missing template files, undefined Jinja2 variables, database connection failures, port already in use
+
+**Go**
+Build commands:
+  - \`go build ./...\` — compile all packages
+  - \`go vet ./...\` — run static analysis (catches common mistakes)
+  - \`go test ./...\` — run all tests
+Error patterns:
+  - \`undefined: X\` → missing import or undefined variable/function
+  - \`cannot use X (type Y) as type Z\` → type mismatch
+  - \`imported and not used: "X"\` → remove unused import (Go forbids unused imports)
+  - \`X declared and not used\` → remove unused variable or use \`_\` to discard
+  - Errors include exact file:line:column — use those coordinates directly
+
+**Rust**
+Build commands:
+  - \`cargo check\` — fast compile check without producing a binary (preferred for quick feedback)
+  - \`cargo build\` — full compilation
+  - \`cargo test\` — run tests
+  - \`cargo clippy\` — lint with extra warnings (if installed)
+Error patterns:
+  - Rust error messages are detailed and include suggested fixes — READ THE SUGGESTION before editing
+  - \`error[E0308]: mismatched types\` → type mismatch, the error shows expected vs found types
+  - \`error[E0597]: X does not live long enough\` → lifetime issue, check borrow scope
+  - \`error[E0382]: use of moved value\` → ownership issue, clone or borrow instead
+  - \`error[E0277]: the trait bound X: Y is not satisfied\` → missing trait implementation
+  - Errors show exact file:line:column — use these directly
+
+**Java**
+Build commands:
+  - \`mvn compile\` (Maven) or \`gradle build\` (Gradle) — check build config files (\`pom.xml\`, \`build.gradle\`)
+  - No build tool? Use \`javac File.java\` for single files
+Error patterns:
+  - \`cannot find symbol\` → missing import or undefined class/method
+  - \`incompatible types\` → type mismatch
+  - \`unreported exception X; must be caught or declared to be thrown\` → missing try/catch or throws clause
+  - Errors show class name, line number, and column — use those to locate the issue
+
+**C / C++**
+Build commands:
+  - \`gcc -Wall -Wextra file.c -o output\` (C) or \`g++ -Wall -Wextra file.cpp -o output\` (C++)
+  - \`cmake --build build\` (CMake projects)
+  - \`make\` (Makefile projects)
+Error patterns:
+  - \`undefined reference to 'X'\` → linker error, missing function definition or library
+  - \`error: expected ';' before X\` → missing semicolon
+  - \`warning: implicit declaration of function 'X'\` → missing header include
+  - \`segmentation fault\` at runtime → null pointer, buffer overflow, or use-after-free — check pointer usage
+
+**Ruby**
+Build commands:
+  - \`ruby -c file.rb\` — syntax check only (cheap, catches syntax errors)
+  - \`bundle exec rake test\` or \`bundle exec rspec\` — run tests
+  - \`bundle install\` — install gem dependencies before running
+Error patterns:
+  - \`NameError: undefined local variable or method 'X'\` → typo or missing definition
+  - \`NoMethodError: undefined method 'X' for Y\` → wrong object type or missing method
+  - \`LoadError: cannot load such file -- X\` → missing gem, run \`bundle install\` or \`gem install X\`
+  - \`SyntaxError\` → shows exact line, usually missing \`end\` or wrong syntax
+
+**PHP**
+Build commands:
+  - \`php -l file.php\` — syntax check (lint) only
+  - \`php -l *.php\` — lint all PHP files in directory
+  - \`composer install\` — install dependencies
+Error patterns:
+  - \`Parse error: syntax error, unexpected X\` → missing semicolon, bracket, or wrong syntax
+  - \`Fatal error: Class 'X' not found\` → missing require/include or autoload issue
+  - \`Fatal error: Call to undefined function X()\` → missing extension or typo
+
+**Shell (Bash)**
+Build commands:
+  - \`bash -n script.sh\` — syntax check without executing (safe, catches syntax errors)
+  - \`shellcheck script.sh\` — static analysis (if installed, highly recommended)
+Error patterns:
+  - \`command not found\` → missing program or typo in command name
+  - \`Permission denied\` → script not executable, or file permissions wrong
+  - \`unexpected token\` → syntax error, usually missing quote or bracket
+
+**General multi-language tips**
+- When you don't know the language: check the file extensions in the project. Look for config files (\`package.json\`, \`requirements.txt\`, \`go.mod\`, \`Cargo.toml\`, \`pom.xml\`, \`Gemfile\`, \`composer.json\`) to identify the stack.
+- If a test fails: ALWAYS read the full failure output. It tells you exactly what went wrong — expected vs actual values, error messages, and stack traces.
+- After fixing an error, ONLY re-run the build command — don't re-run tests or other commands until the build passes.
+- For web projects: after starting the server, check the browser (with browser tools) for runtime errors even if the build passed. Build success does not guarantee runtime success.
 
 ### Diagnostics
-- Use \`read_problems\` to check the current IDE diagnostics — linter errors, TypeScript errors, warnings, hints. Call this after making file changes to verify no new errors were introduced.
-- **IMPORTANT:** \`read_problems\` is a browser-side tool. Call it BY ITSELF — do NOT batch it in the same response with other browser_* tools (browser_click, browser_type, browser_navigate, browser_screenshot, browser_get_dom, browser_select, etc.). If you batch it, it will return NOT_EXECUTED and you must re-call it alone.
+- Use \`run_command\` to compile, lint, or run tests — read errors directly from the output.
+- Use \`read_problems\` for a quick IDE diagnostics overview (linter/TypeScript errors). This is optional — the build output alone is sufficient.
 - Use \`browser_console\` to inspect browser console output for runtime errors.
 - Use \`browser_request_errors\` to check for failed network requests in the browser.
-- Use \`run_command\` to run tests, linters, or build commands and read their output directly.
+- **When \`run_command\` output is truncated**: every \`run_command\` result starts with \`[cmd #N]\`. If you see \`... (showing last 4000 of N chars)\`, use \`read_command_output cmd_id=N\` to re-read the output with pagination. Use \`priority=top\` to see the beginning, \`limit=N\` to control how many lines, \`offset=N\` to advance through pages, or \`filter="pattern"\` to extract only matching lines.
 
 ### Terminal
 - Use \`run_command\` for sandboxed short commands: tests, lint, git, pip, npm, builds, etc. (no permission needed, fast inline output).
@@ -1033,9 +1294,9 @@ export async function agentLoop(
       const fnName = tc.function.name;
       const params = (() => { try { return JSON.parse(tc.function.arguments); } catch { return {}; } })();
 
-      // Capture original content before write_file / delete_file for undo support
+      // Capture original content before write_file / edit_file / delete_file for undo support
       let originalContent: string | null = null;
-      if (fnName === "write_file" || fnName === "delete_file") {
+      if (fnName === "write_file" || fnName === "edit_file" || fnName === "delete_file") {
         const targetPath = path.resolve(projectRoot, String(params.path || ""));
         try { originalContent = fs.readFileSync(targetPath, "utf-8"); } catch { originalContent = null; }
       }
@@ -1303,31 +1564,67 @@ export async function* agentLoopStream(
         return;
       }
 
-      // Filesystem tool — execute directly
-      // For write_file and delete_file, capture original content before the operation
-      let originalContent: string | null = null;
-      if (fnName === "write_file" || fnName === "delete_file") {
-        const targetPath = path.resolve(projectRoot, String(params.path || ""));
-        try { originalContent = fs.readFileSync(targetPath, "utf-8"); } catch { originalContent = null; }
-      }
-      // Yield tool_start immediately so the client shows the spinner before we await
-      yield {
-        type: "tool_start", toolName: fnName, toolParams: params,
-        ...(originalContent !== null ? { originalContent } : {}),
-      };
-      const fsResult = await runFsTool(fnName, params, projectRoot);
-      if (fsResult !== null) {
-        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
-        state.messages.push({ role: "tool", content: fsResult, tool_call_id: tc.id });
-        const isCmd = fnName === "run_command";
+      // ── Destructive filesystem tools: require user permission ──
+      const DESTRUCTIVE_TOOLS = ["write_file", "delete_file", "rename_file", "edit_file"];
+      if (DESTRUCTIVE_TOOLS.includes(fnName)) {
+        const fp = String(params.path || params.oldPath || "");
+        // Push all tool calls as assistant messages; deferred tools get NOT_EXECUTED
+        for (let j = 0; j < finalToolCalls.length; j++) {
+          const t = finalToolCalls[j];
+          state.messages.push({ role: "assistant", content: JSON.stringify([{ id: t.id, type: "function", function: { name: t.function.name, arguments: t.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
+          if (j !== i) {
+            state.messages.push({ role: "tool", content: "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_get_dom, browser_select, or any other browser_* tool) on your next turn to get the actual result.", tool_call_id: t.id });
+          }
+        }
+        // Capture original content before the operation (for undo support)
+        let originalContent: string | null = null;
+        const resolvedPath = path.resolve(projectRoot, fp);
+        try { originalContent = fs.readFileSync(resolvedPath, "utf-8"); } catch { originalContent = null; }
+        state.pendingPermission = { toolCallId: tc.id, command: `${fnName}: ${fp}`, background: false, toolName: fnName, params: params as Record<string, unknown> };
         yield {
-          type: "tool_end",
-          toolName: fnName,
-          toolResult: isCmd ? `Command completed` : fsResult.slice(0, 2000),
-          toolSandbox: isCmd ? fsResult : undefined,
-          executedTools: [{ name: fnName, result: fsResult.slice(0, 500) }],
+          type: "tool_start", toolName: fnName, toolParams: params,
+          ...(originalContent !== null ? { originalContent } : {}),
         };
-        executedTools.push({ name: fnName, result: fsResult.slice(0, 1000) });
+        yield {
+          type: "permission_required",
+          toolCallId: tc.id,
+          toolName: fnName,
+          permissionCommand: `${fnName}: ${fp}`,
+          backgroundPerm: false,
+          executedTools,
+        };
+        return;
+      }
+
+      // ── Read-only filesystem tools: auto-execute ──
+      // write_file, edit_file, delete_file, and rename_file are handled above with permission.
+      // These remaining tools are safe to auto-execute without asking.
+      const isFsTool = [
+        "read_file", "list_files", "search_files", "grep", "create_directory", "write_todos", "read_command_output",
+      ].includes(fnName);
+
+      if (isFsTool) {
+        // For create_directory, capture the parent path (originalContent = parent dir contents)
+        let originalContent: string | null = null;
+        if (fnName === "read_file") {
+          // read_file needs originalContent for no reason; skip
+        }
+        yield {
+          type: "tool_start", toolName: fnName, toolParams: params,
+          ...(originalContent !== null ? { originalContent } : {}),
+        };
+        const fsResult = await runFsTool(fnName, params, projectRoot);
+        if (fsResult !== null) {
+          state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
+          state.messages.push({ role: "tool", content: fsResult, tool_call_id: tc.id });
+          yield {
+            type: "tool_end",
+            toolName: fnName,
+            toolResult: fsResult.slice(0, 2000),
+            executedTools: [{ name: fnName, result: fsResult.slice(0, 500) }],
+          };
+          executedTools.push({ name: fnName, result: fsResult.slice(0, 1000) });
+        }
         continue;
       }
 
@@ -1387,6 +1684,21 @@ export function addToolResultStream(sessionId: string, toolCallId: string, resul
 
 export function deleteAgentSession(sessionId: string): boolean {
   return agentSessions.delete(sessionId);
+}
+
+// ── Command output cache ──
+// Stores full raw output from run_command so the agent can re-read with pagination/filter.
+// Keyed by incrementing sequence number returned in the tool result.
+let cmdSeq = 0;
+const commandOutputStore = new Map<number, { command: string; output: string; totalChars: number; exitCode: number | null; timedOut: boolean }>();
+
+export function getCommandOutput(seq: number) {
+  return commandOutputStore.get(seq);
+}
+
+export function clearCommandOutputs() {
+  cmdSeq = 0;
+  commandOutputStore.clear();
 }
 
 // ── Session management ──

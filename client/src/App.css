@@ -1345,6 +1345,22 @@ body.resizing iframe { pointer-events: none; }
 .agent-toolbar-btn:hover { color: var(--text); background: rgba(255,255,255,0.06); }
 .agent-toolbar-btn .codicon { font-size: 11px; }
 
+/* ── Goal bar ── */
+.agent-goal-bar {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 10px; font-size: 12px;
+  background: rgba(173, 133, 45, 0.1);
+  border-bottom: 1px solid rgba(173, 133, 45, 0.2);
+  color: var(--accent); flex-shrink: 0;
+}
+.agent-goal-bar .codicon { font-size: 12px; }
+.agent-goal-bar span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-goal-clear {
+  background: none; border: none; color: var(--text-dim); cursor: pointer; padding: 0;
+  display: flex; align-items: center;
+}
+.agent-goal-clear:hover { color: var(--text); }
+
 /* ── History panel ── */
 .agent-history-panel {
   max-height: 200px; overflow-y: auto;
@@ -1431,6 +1447,11 @@ body.resizing iframe { pointer-events: none; }
 .agent-tool-card-header .codicon-check { font-size: 10px; color: #4ec94e; flex-shrink: 0; }
 .agent-tool-card-header .codicon { font-size: 11px; opacity: 0.7; }
 .agent-tool-card-name { font-weight: 600; color: var(--text); text-transform: capitalize; }
+.agent-tool-card-label {
+  font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;
+  padding: 1px 6px; border-radius: 3px;
+  background: rgba(0, 122, 204, 0.12); color: rgba(0, 122, 204, 0.9);
+}
 .agent-tool-card-args {
   display: flex; gap: 4px; margin-left: auto; overflow: hidden;
   font-size: 10px; opacity: 0.5;
@@ -1706,7 +1727,7 @@ body.resizing iframe { pointer-events: none; }
   font-family: var(--mono-font, monospace);
 }
 .agent-terminal-prompt { color: #4ec94e; flex-shrink: 0; font-weight: 600; }
-.agent-terminal-cmd { color: #ccc; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-terminal-cmd { color: #ccc; word-break: break-all; }
 .agent-terminal-out {
   padding: 8px 10px; margin: 0;
   font-size: 11px; line-height: 1.45; color: #ccc;

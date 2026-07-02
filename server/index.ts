@@ -185,6 +185,11 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
         if (pp.toolName === "browser_eval") {
           // Browser eval: client will execute and return result via /continue
           cmdResult = null; // don't push a result yet — client will provide it
+        } else if (pp.params && (pp.toolName === "write_file" || pp.toolName === "edit_file" ||
+                                 pp.toolName === "delete_file" || pp.toolName === "rename_file")) {
+          // Destructive file tool: execute directly now that user approved
+          const fsResult = await runFsTool(pp.toolName, pp.params, state.projectRoot);
+          cmdResult = fsResult || "Done.";
         } else {
           // run_in_terminal: runs via terminal bridge — push placeholder result
           cmdResult = `${pp.command} is starting in a terminal tab. The terminal may auto-detect a URL and open a browser tab shortly. Call browser_info to check if a tab opened — do NOT guess the port.`;

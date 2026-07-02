@@ -264,3 +264,115 @@ The AI agent has access to these tools when working on your project:
 |------|-------------|
 | `write_todos` | Create or update a structured task list to track progress |
 | `task_complete` | Signal completion with a summary of what was done |
+
+## Troubleshooting by Language
+
+The agent knows how to diagnose and fix errors for each language stack. Below is the guidance it follows — useful to understand what the agent will do when your build fails.
+
+### JavaScript / TypeScript
+
+| Scenario | Tool | Command / Approach |
+|---|---|---|
+| Type-check | `run_command` | `npx tsc --noEmit` |
+| Full build | `run_command` | `npm run build` (check `package.json` first) |
+| Lint only | `run_command` | `npx eslint .` |
+| Missing module | `run_command` | `npm install <pkg>` |
+| Runtime errors in browser | `browser_console` | After starting dev server, check console output |
+| Failed API calls | `browser_request_errors` | Check for 404/500/CORS errors in the browser |
+| Find a definition | `grep` | Regex search across project files |
+
+### Python
+
+| Scenario | Tool | Command / Approach |
+|---|---|---|
+| Syntax check (single file) | `run_command` | `python -m py_compile <file>.py` |
+| Syntax check (all files) | `run_command` | `python -m compileall .` |
+| Run tests | `run_command` | `python -m pytest` |
+| Install dependencies | `run_command` | `pip install -r requirements.txt` or `pip install <pkg>` |
+| Flask/Django runtime errors | `browser_screenshot` or `browser_get_dom` | Flask debug mode shows full tracebacks in the browser |
+| HTTP errors from backend | `browser_request_errors` | Check for 500 errors and CORS issues |
+| Find where a function is defined | `grep` | `def <name>` or `class <Name>` |
+| Read stack traces | `read_file` | Open the failing file at the line from the traceback |
+
+### Go
+
+| Scenario | Tool | Command / Approach |
+|---|---|---|
+| Compile check | `run_command` | `go build ./...` |
+| Static analysis | `run_command` | `go vet ./...` |
+| Run tests | `run_command` | `go test ./...` |
+| Unused import | `edit_file` | Remove the import line (Go forbids unused imports) |
+| Find definitions | `grep` | `func <Name>` or `type <Name>` |
+
+### Rust
+
+| Scenario | Tool | Command / Approach |
+|---|---|---|
+| Fast compile check | `run_command` | `cargo check` (preferred — no binary output) |
+| Full build | `run_command` | `cargo build` |
+| Lint | `run_command` | `cargo clippy` |
+| Run tests | `run_command` | `cargo test` |
+
+### Java
+
+| Scenario | Tool | Command / Approach |
+|---|---|---|
+| Maven compile | `run_command` | `mvn compile` |
+| Gradle build | `run_command` | `gradle build` |
+| Single file compile | `run_command` | `javac <File>.java` |
+| Find class definition | `grep` | `class <Name>` |
+
+### C / C++
+
+| Scenario | Tool | Command / Approach |
+|---|---|---|
+| Compile with warnings | `run_command` | `gcc -Wall -Wextra <file>.c -o output` |
+| CMake build | `run_command` | `cmake --build build` |
+| Make build | `run_command` | `make` |
+| Find function definition | `grep` | `void <name>(` or `int <name>(` |
+
+### Ruby
+
+| Scenario | Tool | Command / Approach |
+|---|---|---|
+| Syntax check | `run_command` | `ruby -c <file>.rb` |
+| Install deps | `run_command` | `bundle install` |
+| Run tests | `run_command` | `bundle exec rspec` or `bundle exec rake test` |
+
+### PHP
+
+| Scenario | Tool | Command / Approach |
+|---|---|---|
+| Syntax lint | `run_command` | `php -l <file>.php` |
+| Install deps | `run_command` | `composer install` |
+
+### Shell (Bash)
+
+| Scenario | Tool | Command / Approach |
+|---|---|---|
+| Syntax check | `run_command` | `bash -n <script>.sh` |
+| Static analysis | `run_command` | `shellcheck <script>.sh` |
+
+### General troubleshooting flow
+
+1. **Start the server** (`run_in_terminal`) — user must Allow
+2. **Check for build errors** (`run_command`) — fixes go through `edit_file` / `write_file`
+3. **Verify the page loads** (`browser_info` → `browser_screenshot` / `browser_get_dom`)
+4. **Check browser runtime errors** (`browser_console`, `browser_request_errors`)
+5. **Read relevant source files** (`read_file`) before making fixes
+6. **Make targeted edits** (`edit_file` — just send the lines that change)
+7. **Rebuild and verify** — repeat until clean
+
+### Avoiding tool hallucinations
+
+The agent works with a fixed tool registry. To prevent it from inventing tools that don't exist:
+
+- **Reading files** → use `read_file` (never `cat`, `head`, `tail`)
+- **Listing directories** → use `list_files` (never `ls`, `dir`)
+- **Finding files by name** → use `search_files` (never `find`, `locate`)
+- **Searching file contents** → use `grep` (the tool, not the shell command)
+- **Editing files** → use `edit_file` (never `sed`, `awk`)
+- **Writing files** → use `write_file` (never `echo >`, `cp`)
+- **Running commands** → use `run_command` for short tasks, `run_in_terminal` for servers (never background with `&` or `nohup`)
+- **Checking diagnostics** → use `read_problems` (not `tsc`, `eslint`, or `pylint` directly — those go through `run_command`)
+- **Starting servers** → use `run_in_terminal` only (never `run_command` for `python app.py`, `npm start`, etc.)

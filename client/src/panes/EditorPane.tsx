@@ -843,21 +843,53 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   const openFsFile = useCallback(async (filePath: string, handle?: FileSystemFileHandle) => {
     const target = normPath(filePath);
     const name = filePath.split(/[/\\]/).pop() || "untitled";
-    // Fast path: tab already open → just focus it, skip the read entirely.
-    // First try path-based dedup, then fallback to name match (fixes stale relative paths).
-    let existing = files.find((f) => normPath(f._fsPath) === target);
-    if (!existing) {
-      existing = files.find((f) => f.name === name);
-      if (existing) {
-        // Fix up stale relative paths that don't match by _fsPath.
-        setFiles((prev) => prev.map((f) => f.id === existing!.id ? { ...f, _fsPath: filePath } : f));
+    // Re-read from disk so external edits (saved via Ctrl+S / agent tools) are reflected.
+    // Even if a tab is already open, fetch fresh content from disk.
+    const existing = files.find((f) => normPath(f._fsPath) === target)
+      || files.find((f) => f.name === name);
+
+    if (existing && existing._isNew) {
+      setFiles((prev) => prev.map((f) => f.id === existing.id ? { ...f, _isNew: false } : f));
+    }
+
+    // Always re-read from disk (skip handles — those are browser File System API).
+    if (!handle && !existing?._isNew) {
+      try {
+        const res = await fetch(`/api/fs/read?path=${encodeURIComponent(filePath)}`);
+        const data = await res.json();
+        let openId = existing?.id || "";
+        if (existing) {
+          setFiles((prev) => prev.map((f) =>
+            f.id === existing.id ? { ...f, content: data.content, _encoding: data.encoding || "utf8" } : f
+          ));
+          openId = existing.id;
+        } else {
+          const f = createFile(name);
+          f._fsPath = filePath;
+          f.content = data.content;
+          f._encoding = data.encoding || "utf8";
+          openId = f.id;
+          setFiles((prev) => {
+            // Dedup: if another tab with the same name was added while fetch was in flight
+            const dup = prev.find((x) => normPath(x._fsPath) === target);
+            if (dup) {
+              dup.content = data.content;
+              openId = dup.id;
+              return prev;
+            }
+            return [...prev, f];
+          });
+        }
+        setActiveFileId(openId);
+        return;
+      } catch {
+        // Read failed — fall through to create tab with error content
       }
     }
+
     if (existing) {
-      if (existing._isNew) {
-        setFiles((prev) => prev.map((f) => f.id === existing.id ? { ...f, _isNew: false } : f));
-      }
-      setActiveFileId(existing.id); return;
+      setActiveFileId(existing.id);
+      return;
     }
     try {
       const f = createFile(name);
@@ -1372,7 +1404,37 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     }
   }, [files, refreshGitStatus, fsBasePath]);
 
-  // Ctrl+S save
+  // Auto-save: persist dirty files to disk after 1.5s of inactivity
+  const autoSaveTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  useEffect(() => {
+    if (dirtyFiles.size === 0) return;
+    for (const id of dirtyFiles) {
+      // Clear existing timer for this file
+      if (autoSaveTimers.current[id]) {
+        clearTimeout(autoSaveTimers.current[id]);
+      }
+      // Schedule a new auto-save
+      autoSaveTimers.current[id] = setTimeout(() => {
+        saveFile(id);
+        delete autoSaveTimers.current[id];
+      }, 1500);
+    }
+    // Cleanup old timers for files no longer dirty
+    for (const id of Object.keys(autoSaveTimers.current)) {
+      if (!dirtyFiles.has(id)) {
+        clearTimeout(autoSaveTimers.current[id]);
+        delete autoSaveTimers.current[id];
+      }
+    }
+    return () => {
+      // Cleanup all timers on unmount
+      for (const id of Object.keys(autoSaveTimers.current)) {
+        clearTimeout(autoSaveTimers.current[id]);
+      }
+    };
+  }, [dirtyFiles, saveFile]);
+
+  // Ctrl+S save (immediate, bypasses debounce)
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === "s") {
