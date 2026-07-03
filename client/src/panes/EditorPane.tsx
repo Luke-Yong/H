@@ -2084,14 +2084,12 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
               <div className="agent-diff-banner-actions">
                 <button className="agent-diff-banner-btn accept" onClick={() => {
                   const fp = activeFile?._fsPath;
-                  acceptAgentChanges(activeFileId);
                   if (fp) onBannerAcceptFile?.(fp);
                 }}>
                   <i className="codicon codicon-check" /> Accept
                 </button>
                 <button className="agent-diff-banner-btn reject" onClick={() => {
                   const fp = activeFile?._fsPath;
-                  rejectAgentChanges(activeFileId);
                   if (fp) onBannerRejectFile?.(fp);
                 }}>
                   <i className="codicon codicon-close" /> Reject

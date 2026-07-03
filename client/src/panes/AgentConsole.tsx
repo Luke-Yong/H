@@ -353,12 +353,12 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
   }, []);
 
   const handleBannerFileAction = useCallback((fcPath: string, accepted: boolean) => {
-    const norm = (s: string) => s.replace(/\\/g, "/");
+    const norm = (s: string) => s.replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/+$/, "");
     // Match fcPath (absolute from Monaco) against fc.path (relative from agent tool calls)
     const matches = (fcPathAbs: string, fcPathRel: string) => {
       const a = norm(fcPathAbs);
       const b = norm(fcPathRel);
-      return a === b || a.endsWith("/" + b) || a.endsWith("\\" + b);
+      return a === b || a.endsWith("/" + b);
     };
     setMessages((prev) => {
       let changed = false;
@@ -416,13 +416,26 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
   const [fileList, setFileList] = useState<string[]>([]);
   const [fileLoading, setFileLoading] = useState(false);
 
-  // Reload threads when project path changes
+  // Reload threads when project path changes — auto‑select the latest chat.
   useEffect(() => {
-    setThreads(loadThreads(threadKey));
-    setActiveThreadId("");
-    setMessages([]);
-    setAgentStatus("idle");
-    setAgentUsage(null);
+    const loaded = loadThreads(threadKey);
+    setThreads(loaded);
+    if (loaded.length > 0) {
+      // Pick the most recent thread by createdAt
+      const latest = loaded.reduce((a, b) => (a.createdAt > b.createdAt ? a : b));
+      setActiveThreadId(latest.id);
+      setMessages(latest.messages);
+      syncMid(latest.messages);
+      // Loaded saved chats are no longer streaming — show the footer.
+      setAgentStatus("completed");
+      setAgentUsage(null);
+      setLoading(false);
+    } else {
+      setActiveThreadId("");
+      setMessages([]);
+      setAgentStatus("idle");
+      setAgentUsage(null);
+    }
     preRoundRef.current = [];
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadKey]);
@@ -482,8 +495,12 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
     if (t) {
       setActiveThreadId(id);
       setMessages(t.messages);
+      syncMid(t.messages);
       preRoundRef.current = [];
-      _mid = t.messages.length > 0 ? Math.max(...t.messages.map((m) => Number(m.id) || 0)) + 1 : 0;
+      // Loaded saved chats are no longer streaming — show the footer.
+      setAgentStatus("completed");
+      setAgentUsage(null);
+      setLoading(false);
     }
     setShowHistory(false);
   }, [threads]);
@@ -506,16 +523,23 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
     fetch(`/api/chat/agent/sessions/${encodeURIComponent(id)}`, { method: "DELETE" }).catch(() => {});
   }, [activeThreadId, threadKey]);
 
-  // Update thread title from first user message
-  const updateThreadTitle = useCallback((content: string) => {
+  // Update thread title from first user message — use first sentence as concise summary
+  const updateThreadTitle = useCallback((threadId: string, content: string) => {
     setThreads((prev) => {
-      const idx = prev.findIndex((t) => t.id === activeThreadId);
-      if (idx === -1 || prev[idx].title !== `Chat ${idx + 1}`) return prev;
+      const idx = prev.findIndex((t) => t.id === threadId);
+      if (idx === -1) return prev;
+      // Only update if title still has the default "Chat N" pattern
+      if (!/^Chat \d+$/.test(prev[idx].title)) return prev;
+      // Extract first sentence (split on . ! ? or newline), or truncate to 40 chars
+      const firstSentence = content.split(/[.!?\n]/)[0].trim();
+      const title = firstSentence.length > 4
+        ? (firstSentence.length > 40 ? firstSentence.slice(0, 40) + "..." : firstSentence)
+        : (content.length > 40 ? content.slice(0, 40) + "..." : content);
       const next = [...prev];
-      next[idx] = { ...next[idx], title: content.slice(0, 60) + (content.length > 60 ? "..." : "") };
+      next[idx] = { ...next[idx], title };
       return next;
     });
-  }, [activeThreadId]);
+  }, []);
 
   // Export current chat as markdown file
   const exportChat = useCallback(() => {
@@ -777,7 +801,8 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
             const orig = (evt as any).originalContent;
             // Compute full new content: apply the replacement to originalContent
             const content = orig ? orig.split(oldStr).join(newStr) : newStr;
-            const tokenCount = Math.round(content.length / 4);
+            // Token cost = only the changed strings sent to the API, not the whole file
+            const tokenCount = Math.round((oldStr.length + newStr.length) / 4);
             fileChangesRef.current.push({
               path: p, name, content, changeType: "write",
               status: "streaming",
@@ -1106,6 +1131,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
         }
 
         if (evt.type === "tool_end") {
+          const DESTRUCTIVE = ["write_file", "edit_file", "delete_file", "rename_file"];
           // Update the last tool card (the one most recently started)
           const id = toolIds[toolIds.length - 1];
           if (id) {
@@ -1113,7 +1139,9 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
               const next = [...prev];
               const idx = next.findIndex((m) => m.id === id);
               if (idx >= 0) {
-                const patch: Partial<ConsoleMessage> = { content: evt.toolResult || "", state: undefined };
+                // Don't show raw "Diff ready" as tool-card content — the
+                // accept/reject buttons convey the action. Show nothing.
+                const patch: Partial<ConsoleMessage> = { content: "", state: undefined };
                 if (evt.toolSandbox != null) patch.sandboxOutput = evt.toolSandbox;
                 next[idx] = { ...next[idx], ...patch };
               }
@@ -1121,22 +1149,31 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
             });
           }
           // Sync Monaco diffs for permission-gated destructive file tools
-          const DESTRUCTIVE = ["write_file", "edit_file", "delete_file", "rename_file"];
           if (DESTRUCTIVE.includes(tn) && id) {
             const params = evt.toolParams || {};
             const orig = evt.originalContent ?? null;
             const p = String(params.path || params.oldPath || "");
             const name = p.split(/[/\\]/).pop() || p;
+            // Attach fileChange to the tool card message so findFcByPath / tool-card
+            // accept/reject buttons can locate it (previously it was pushed to
+            // fileChangesRef.current but never attached when Diff ready stops early).
             setMessages((prev) => {
               const idx = prev.findIndex((m) => m.id === id);
               if (idx < 0) return prev;
               const fc: FileChange = { path: p, name, status: "done", changeType: "write", originalContent: orig };
+              let fcContent = "";
+              let tkn = 0;
               if (tn === "write_file") {
-                fc.content = String(params.content || "");
+                fcContent = String(params.content || "");
+                fc.content = fcContent;
+                tkn = Math.round(fcContent.length / 4);
               } else if (tn === "edit_file") {
                 const oldStr = String(params.old_string || "");
                 const newStr = String(params.new_string || "");
-                fc.content = orig ? orig.split(oldStr).join(newStr) : newStr;
+                fcContent = orig ? orig.split(oldStr).join(newStr) : newStr;
+                fc.content = fcContent;
+                // Token cost = only the changed strings sent to the API
+                tkn = Math.round((oldStr.length + newStr.length) / 4);
               } else if (tn === "delete_file") {
                 fc.changeType = "delete";
               } else if (tn === "rename_file") {
@@ -1144,10 +1181,11 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
                 fc.content = String(params.newPath || "");
                 fc.originalContent = p; // for reject: old path
               }
-              // Append to file changes if there's a surrounding assistant message
-              fileChangesRef.current.push(fc);
+              fc.tokenCount = tkn;
+              const next = [...prev];
+              next[idx] = { ...next[idx], fileChanges: [fc], tokenCount: tkn };
               onRefreshFs?.();
-              return prev;
+              return next;
             });
             // Apply diff decorations in Monaco for file tools
             if ((tn === "write_file" || tn === "edit_file") && applyAgentFileChanges && orig != null) {
@@ -1282,15 +1320,132 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
       }
     };
     continueDeferredRef.current = async (accepted: boolean, sid: string, tcid: string) => {
-      await continueStreaming({
-        sessionId: sid,
-        toolCallId: tcid,
-        toolResult: accepted ? "OK" : "rejected",
-        model: selectedModel || "deepseek-chat",
-        apiKey,
-        thinking: isThinking,
-        consoleContext: getConsoleContext?.() || "",
-      });
+      // Loop: keep processing permissions / tools that arrive during the
+      // deferred continue stream, just like the outer while loop does.
+      isPermission = false;
+      agentDoneRef.current = false;
+      while (!agentDoneRef.current && sid && tcid) {
+        await continueStreaming({
+          sessionId: sid,
+          toolCallId: tcid,
+          toolResult: accepted ? "OK" : "rejected",
+          model: selectedModel || "deepseek-chat",
+          apiKey,
+          thinking: isThinking,
+          consoleContext: getConsoleContext?.() || "",
+        });
+        // Only pass toolResult on the first call; subsequent iterations use "OK"
+        accepted = true;
+
+        if (isPermission) {
+          if (signal?.aborted) return;
+          const permMsgId = agentTermMsgIdRef.current || toolIds[toolIds.length - 1];
+          pendingPermissionMsgIdRef.current = permMsgId || null;
+          const queuedDecision = queuedPermissionDecisionRef.current;
+          const granted = queuedDecision != null
+            ? queuedDecision
+            : await new Promise<boolean>((resolve) => {
+                permissionResolveRef.current = (decision: boolean) => {
+                  pendingPermissionMsgIdRef.current = null;
+                  resolve(decision);
+                };
+              });
+          queuedPermissionDecisionRef.current = null;
+          permissionResolveRef.current = null;
+          pendingPermissionMsgIdRef.current = null;
+          const permTool = permMsgId ? streamToolRef.current.get(permMsgId) : undefined;
+
+          if (!granted && permMsgId) {
+            setMessages((prev) => prev.filter((m) => m.id !== permMsgId));
+            agentTermMsgIdRef.current = null;
+            agentTermOutputRef.current = "";
+          }
+
+          if (!signal?.aborted) {
+            if (granted && permTool?.name === "browser_eval") {
+              const code = String(permTool?.params?.code || "");
+              let evalResult = "Browser not available.";
+              if (executeBrowserAction) {
+                evalResult = await executeBrowserAction("browser_eval", { code });
+              }
+              setMessages((prev) => {
+                const next = [...prev];
+                const idx = next.findIndex((m) => m.id === permMsgId);
+                if (idx >= 0) next[idx] = { ...next[idx], permissionPrompt: undefined, content: evalResult, state: undefined };
+                return next;
+              });
+              isPermission = false;
+              tcid = toolCallId || sid;
+            } else if (permTool?.name === "run_in_terminal") {
+              if (permMsgId && granted) {
+                const cmd = String(permTool?.params?.command || "");
+                if (cmd && agentTerminalBridge) {
+                  agentTerminalBridge.setCommand({ id: permMsgId!, command: cmd });
+                  agentTermOutputRef.current = "";
+                }
+                setMessages((prev) => {
+                  const next = [...prev];
+                  const idx = next.findIndex((m) => m.id === permMsgId);
+                  if (idx >= 0) next[idx] = { ...next[idx], permissionPrompt: undefined };
+                  return next;
+                });
+              }
+              let termResult: string | null = null;
+              if (granted && permTool?.name === "run_in_terminal" && agentTerminalBridge) {
+                const FINISH_TIMEOUT_MS = 120_000;
+                const EARLY_PATTERNS = /(?:running on|listening on|server started|serving on|started server|development server|watching for changes|compiled successfully|webpack compiled|vite .* ready|localhost:[0-9]|127\.0\.0\.1:[0-9]|0\.0\.0\.0:[0-9]|Traceback\s*\(most\s+recent\s+call\s+last\)|ModuleNotFoundError|ImportError|IndentationError|TabError|SyntaxError|NameError|TypeError|AttributeError|FileNotFoundError|PermissionError|ValueError|KeyError|IndexError|ZeroDivisionError|npm\s+ERR!|Error:\s*Cannot\s+find\s+module|Error:\s*listen\s+EADDRINUSE|Error:\s*listen\s+EACCES|panic:|fatal\s+error:|thread\s+'main'\s+panicked|error\[E\d|command\s+not\s+found)/im;
+                let earlyDetected = false;
+                const exitCode = await new Promise<number | null>((resolve) => {
+                  let ended = false;
+                  const finish = (code: number | null) => {
+                    if (!ended) { ended = true; resolve(code); unsubFin(); unsubOut(); }
+                  };
+                  const timer = setTimeout(() => finish(null), FINISH_TIMEOUT_MS);
+                  const unsubFin = agentTerminalBridge.onFinish((code: number | null) => {
+                    clearTimeout(timer);
+                    finish(code);
+                  });
+                  const unsubOut = agentTerminalBridge.onOutput((_text: string) => {
+                    if (!ended && !earlyDetected && EARLY_PATTERNS.test(agentTermOutputRef.current)) {
+                      earlyDetected = true;
+                      clearTimeout(timer);
+                      finish(null);
+                    }
+                  });
+                });
+                termResult = agentTermOutputRef.current.trim() || "(no terminal output)";
+                agentTermOutputRef.current = "";
+                setMessages((prev) => {
+                  const next = [...prev];
+                  const idx = next.findIndex((m) => m.id === permMsgId);
+                  if (idx >= 0) next[idx] = { ...next[idx], content: termResult || agentTermOutputRef.current, state: undefined, sandboxOutput: agentTermOutputRef.current };
+                  return next;
+                });
+              } else if (!granted && permTool?.name === "run_in_terminal") {
+                agentTermOutputRef.current = "";
+              }
+              isPermission = false;
+              // Send the real terminal output to the LLM (not "OK").
+              await continueStreaming({
+                sessionId: sid,
+                toolCallId: toolCallId || sid,
+                permissionGranted: granted,
+                toolResult: termResult ?? undefined,
+                model: selectedModel || "deepseek-chat",
+                apiKey,
+                thinking: isThinking,
+                consoleContext: getConsoleContext?.() || "",
+              });
+              // Update tcid for the next loop iteration
+              tcid = toolCallId || sid;
+            } else {
+              isPermission = false;
+              // Non-terminal, non-browser permission: just continue
+              tcid = toolCallId || sid;
+            }
+          }
+        }
+      }
     };
 
     // ── Loop: keep processing browser_tool / permission_required until done ──
@@ -1402,27 +1557,32 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
         agentDoneRef.current = true;
       }
     } else if (sessionId && toolCallId && !isPermission) {
-      // If we got a browser_tool, execute it and continue
+      // Only process browser tools here.  File tools (rename_file, write_file,
+      // etc.) are handled by acceptFile → continueDeferredRef — don't try to
+      // execute them via executeBrowserAction.
       const lastToolId = toolIds[toolIds.length - 1];
-      let toolResult = "Tool not available.";
-      if (executeBrowserAction) {
-        const toolData = lastToolId ? streamToolRef.current.get(lastToolId) : undefined;
-        if (toolData) {
-          toolResult = await executeBrowserAction(toolData.name, toolData.params || {});
+      const toolData = lastToolId ? streamToolRef.current.get(lastToolId) : undefined;
+      const isBrowser = toolData?.name?.startsWith("browser_");
+      if (isBrowser) {
+        let toolResult = "Tool not available.";
+        if (executeBrowserAction) {
+          toolResult = await executeBrowserAction(toolData!.name, toolData!.params || {});
         }
-      }
-      if (lastToolId) {
-        setMessages((prev) => {
-          const next = [...prev];
-          const idx = next.findIndex((m) => m.id === lastToolId);
-          if (idx >= 0) next[idx] = { ...next[idx], content: toolResult, state: undefined };
-          return next;
-        });
-      }
-
-      if (!signal.aborted) {
-        await continueStreaming({ sessionId, toolCallId, toolResult, model: selectedModel || "deepseek-chat", apiKey, thinking: isThinking, consoleContext: getConsoleContext?.() || "" });
+        if (lastToolId) {
+          setMessages((prev) => {
+            const next = [...prev];
+            const idx = next.findIndex((m) => m.id === lastToolId);
+            if (idx >= 0) next[idx] = { ...next[idx], content: toolResult, state: undefined };
+            return next;
+          });
+        }
+        if (!signal.aborted) {
+          await continueStreaming({ sessionId, toolCallId, toolResult, model: selectedModel || "deepseek-chat", apiKey, thinking: isThinking, consoleContext: getConsoleContext?.() || "" });
+        } else {
+          agentDoneRef.current = true;
+        }
       } else {
+        // Not a browser tool — nothing to process in this loop.
         agentDoneRef.current = true;
       }
     }
@@ -1450,8 +1610,8 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
   const send = useCallback(async () => {
     const msg = input.trim();
     if (!msg) return;
-    ensureThread();
-    updateThreadTitle(msg);
+    const tid = ensureThread();
+    updateThreadTitle(tid, msg);
     setInput("");
     onGoalChange(msg);
     setLoading(true);
@@ -1609,6 +1769,18 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
   const hasPendingFileActions = unconfirmedFileChanges.length > 0;
 
   const acceptAllChanges = useCallback(() => {
+    // Collect paths before state update so side effects can run OUTSIDE the
+    // setMessages functional updater (avoiding setState-during-render in EditorPane).
+    const pathsToAccept: string[] = [];
+    for (const m of messages) {
+      if (m.fileChanges) {
+        for (const fc of m.fileChanges) {
+          if (!fc.accepted && !fc.rejected) pathsToAccept.push(fc.path);
+        }
+      }
+    }
+    if (pathsToAccept.length === 0) return;
+
     setMessages((prev) => {
       let changed = false;
       const next = prev.map((m) => {
@@ -1619,20 +1791,15 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
         });
         return changed ? { ...m, fileChanges: updated } : m;
       });
-      // Notify editor to clear all agent diffs + refresh file tree
-      if (changed) {
-        onRefreshFs?.();
-        for (const m of next) {
-          if (m.fileChanges) {
-            for (const fc of m.fileChanges) {
-              if (fc.accepted && fc.path) acceptEditorChange?.(resolvePath(fc.path));
-            }
-          }
-        }
-      }
       return changed ? next : prev;
     });
-  }, [acceptEditorChange, onRefreshFs, resolvePath]);
+
+    // Notify editor to clear all agent diffs + refresh file tree
+    onRefreshFs?.();
+    for (const p of pathsToAccept) {
+      acceptEditorChange?.(resolvePath(p));
+    }
+  }, [messages, acceptEditorChange, onRefreshFs, resolvePath]);
 
   const [showPendingBanner, setShowPendingBanner] = useState(false);
 
@@ -1824,75 +1991,14 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
     }
   }, [findFcByPath, rejectFile, resolvePath]);
 
-// ── Standalone components (outside AgentConsole to avoid React key conflicts on re-render) ──
+// ── Standalone utilities ──
 
 function truncPath(p: string) {
   const s = p.replace(/\\/g, "/");
   return s.length > 50 ? "..." + s.slice(-47) : s;
 }
 
-function FileChangeCard({ fc, msgId, openEditorFile }: { fc: FileChange; msgId: string; openEditorFile?: (path: string) => void }) {
-    const isStreaming = fc.status === "streaming";
-    const isResolved = fc.accepted || fc.rejected;
-    const ct = fc.changeType || "write";
-    const icon = isStreaming ? "loading"
-      : fc.accepted ? "check"
-      : fc.rejected ? "close"
-      : ct === "delete" ? "trash"
-      : ct === "create" ? "folder-opened"
-      : ct === "rename" ? "arrow-right"
-      : "diff";
-    const actionLabel = ct === "delete" ? (fc.accepted ? "Deleted" : "Kept")
-      : ct === "create" ? (fc.accepted ? "Created" : "Skipped")
-      : ct === "rename" ? (fc.accepted ? "Renamed" : "Kept")
-      : fc.accepted ? "Applied" : "Dismissed";
-    return (
-      <div className={`agent-fc${isStreaming ? " streaming" : ""}${isResolved ? " resolved" : ""}${fc.accepted ? " accepted" : ""}${fc.rejected ? " rejected" : ""}`}>
-        <i className={`codicon codicon-${icon}`} />
-        <span className="agent-fc-name">
-          {isResolved ? <s>{fc.name}</s> : fc.name}
-        </span>
-        <span className="agent-fc-path">{truncPath(fc.path)}</span>
-        {isStreaming ? (
-          <>
-            <span className="agent-fc-tokens"><i className="codicon codicon-arrow-down" />{fc.tokenCount ?? 0}</span>
-            <span className="agent-spinner" />
-          </>
-        ) : !isResolved ? (
-          <>
-            {ct === "write" && (
-              <span className="agent-fc-delta">
-                {fc.linesAdded != null && <span className="agent-fc-added">+{fc.linesAdded}</span>}
-                {fc.linesRemoved != null && <span className="agent-fc-removed">-{fc.linesRemoved}</span>}
-              </span>
-            )}
-            {ct === "delete" && (
-              <span className="agent-fc-delta">
-                <span className="agent-fc-removed">Delete</span>
-              </span>
-            )}
-            {ct === "create" && (
-              <span className="agent-fc-delta">
-                <span className="agent-fc-added">New</span>
-              </span>
-            )}
-            {ct === "rename" && fc.content && (
-              <span className="agent-fc-delta">
-                <span className="agent-fc-removed">{fc.name}</span>
-                <span className="agent-fc-arrow">&rarr;</span>
-                <span className="agent-fc-added">{fc.content.split(/[/\\]/).pop()}</span>
-              </span>
-            )}
-            {ct === "write" && (
-              <button className="agent-fc-diff-btn" title="Open diff" onClick={(e) => { e.stopPropagation(); openEditorFile?.(fc.path); }}><i className="codicon codicon-diff" /></button>
-            )}
-          </>
-        ) : (
-          <span className="agent-fc-label">{actionLabel}</span>
-        )}
-      </div>
-    );
-}
+// ── Standalone components ──
 
 function TodoCard({ todos }: { todos: TodoItem[] }) {
     if (!todos || todos.length === 0) return null;
@@ -1958,6 +2064,23 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
   }, [messages]);
   syncMid(safeMessages);
 
+  // Group messages by user-assistant turns so we can insert a slim footer
+  // after each assistant response group: user → assistant(+tools) → footer.
+  const messageGroups = useMemo(() => {
+    const groups: { key: string; items: ConsoleMessage[] }[] = [];
+    for (const m of safeMessages) {
+      if (m.role === "user" || groups.length === 0) {
+        groups.push({ key: m.id, items: [m] });
+      } else {
+        groups[groups.length - 1].items.push(m);
+      }
+    }
+    return groups;
+  }, [safeMessages]);
+
+  const lastGroupIsUserOnly = messageGroups.length > 0
+    && messageGroups[messageGroups.length - 1].items.every((m) => m.role === "user");
+
   return (
     <div className="console-panel">
       {/* ── Toolbar ── */}
@@ -2009,8 +2132,13 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
         {safeMessages.length === 0 && (
           <div className="agent-empty">Ask the agent to do anything — write code, run tests, browse the web, manage files...</div>
         )}
-        {safeMessages.map((msg) => (
-          <div key={msg.id} className={`agent-msg agent-msg-${msg.role}${msg.isWarning ? " agent-msg-warning" : ""}`}>
+        {messageGroups.map((group, gi) => {
+           const isLast = gi === messageGroups.length - 1;
+           const hasAssistant = group.items.some((m) => m.role !== "user");
+           return (
+              <div key={group.key}>
+              {group.items.map((msg) => (
+                <div key={msg.id} className={`agent-msg agent-msg-${msg.role}${msg.isWarning ? " agent-msg-warning" : ""}`}>
             {msg.state && (
               <div key={`${msg.id}-state`} className="agent-state">
                 {msg.state === "thinking" && <span className="agent-spinner" />}
@@ -2053,14 +2181,6 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
                   <button className="agent-btn agent-btn-accept" onClick={() => acceptDiff(msg)}><i className="codicon codicon-check" /> Accept</button>
                   <button className="agent-btn agent-btn-reject" onClick={() => rejectDiff(msg)}><i className="codicon codicon-close" /> Reject</button>
                 </div>
-              </div>
-            )}
-            {/* File change containers */}
-            {msg.fileChanges && msg.fileChanges.length > 0 && (
-              <div key={`${msg.id}-fc`} className="agent-fc-list">
-                {msg.fileChanges.map((fc, i) => (
-                  <FileChangeCard key={`${fc.path}-${fc.changeType}-${i}`} fc={fc} msgId={msg.id} openEditorFile={openEditorFile} />
-                ))}
               </div>
             )}
             {/* Todo list */}
@@ -2251,7 +2371,21 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
             )}
           </div>
         ))}
-        {loading && !messages[messages.length - 1]?.state && (
+        {/* Compact footer after each assistant turn (except the last — main footer handles that) */}
+        {!isLast && hasAssistant && (
+          <div className="agent-turn-footer">
+            <i className="codicon codicon-check" /> Response complete
+          </div>
+        )}
+        {isLast && !hasAssistant && lastGroupIsUserOnly && (
+          <div className="agent-turn-footer agent-turn-footer-pending">
+            <span className="agent-spinner" /> Waiting for agent...
+          </div>
+        )}
+      </div>
+    );
+})}
+    {loading && !messages[messages.length - 1]?.state && (
           <div className="agent-msg agent-msg-system">
             <div className="agent-state"><span className="agent-spinner" /> Thinking...</div>
           </div>

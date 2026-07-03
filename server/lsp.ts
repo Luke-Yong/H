@@ -330,10 +330,6 @@ function handleMessage(session: LspSession, msg: LspResponse) {
   if (msg.method === "textDocument/publishDiagnostics" && msg.params?.uri) {
     const uri = normalizeUri(msg.params.uri as string);
     const diags: any[] = msg.params.diagnostics || [];
-    console.log(`[diag] publishDiagnostics from=${session.language} uri=${msg.params.uri} count=${diags.length}`);
-    if (diags.length > 0) {
-      console.log(`[diag]   first: ${diags[0].message} (line ${(diags[0].range?.start?.line ?? 0) + 1})`);
-    }
     diagnosticsByUri.set(uri, diags.map((d) => ({
       message: d.message,
       severity: mapSeverity(d.severity),
@@ -436,9 +432,7 @@ export async function getFileDiagnostics(
 ): Promise<FileDiagnosticsResult> {
   const specs = SERVER_SPECS[language];
   if (!specs) {
-    const err = `No LSP server configured for language "${language}"`;
-    console.log(`[diag] ${err}`);
-    return { markers: [], error: err };
+    return { markers: [], error: `No LSP server configured for language "${language}"` };
   }
 
   let anyInstalled = false;
@@ -448,7 +442,6 @@ export async function getFileDiagnostics(
     const exists = commandExists(spec.bin);
     if (exists) anyInstalled = true;
     const failed = failedCommands.has(spec.cmd);
-    console.log(`[diag] try ${spec.cmd} exists=${exists} failed=${failed}`);
     if (!exists || failed) {
       if (!exists) lastError = `LSP binary "${spec.bin}" not found on PATH`;
       else lastError = `LSP "${spec.cmd}" previously failed to initialise`;
@@ -457,7 +450,6 @@ export async function getFileDiagnostics(
     }
 
     const key = startLspWithSpec(rootPath, language, spec);
-    console.log(`[diag] startLsp key=${key}`);
     if (!key) {
       lastError = `Failed to start LSP "${spec.cmd}"`;
       languageErrors.set(language, lastError);
@@ -471,7 +463,6 @@ export async function getFileDiagnostics(
     if (!session) {
       lastError = `LSP session for "${spec.cmd}" disappeared`;
       languageErrors.set(language, lastError!);
-      console.log(`[diag] session null for ${spec.cmd}`);
       continue;
     }
 
@@ -489,7 +480,6 @@ export async function getFileDiagnostics(
       lastError = errMsg;
       continue;
     }
-    console.log(`[diag] ${spec.cmd} ready`);
     // Pyright needs a moment to process workspace/didChangeConfiguration
     // before it will publish diagnostics for didOpen.
     if (spec.cmd === "pyright-langserver") await delay(500);
@@ -512,21 +502,28 @@ export async function getFileDiagnostics(
       });
     }
 
-    // Phase 1 – wait for publish (up to 5 s).
-    const PHASE1_MS = 5000;
+    // Wait for diagnostics.  Some servers (pylsp) send an empty batch first,
+    // then the real analysis a moment later.  We poll for a non‑empty result
+    // with a total cap of 5 s, but if we *have* seen at least one (empty) batch
+    // we shorten the timeout to avoid blocking the UI when the file has no errors.
+    const TOTAL_MS = 5000;
+    const POST_EMPTY_MS = 1500;
     const tick = 200;
-    for (let elapsed = 0; elapsed < PHASE1_MS; elapsed += tick) {
+    let markers: MonacoMarker[] | undefined;
+    let emptySeenAt = 0;
+    for (let elapsed = 0; elapsed < TOTAL_MS; elapsed += tick) {
       await delay(tick);
-      if (diagnosticsByUri.has(normUri)) break;
+      const cur = diagnosticsByUri.get(normUri);
+      const now = Date.now();
+      if (cur !== undefined) {
+        markers = cur;
+        if (cur.length > 0) break;               // real analysis ─ done
+        if (!emptySeenAt) emptySeenAt = now;     // first empty batch timestamp
+      }
+      // If we received an empty batch, only wait POST_EMPTY_MS for real results.
+      if (emptySeenAt && now - emptySeenAt >= POST_EMPTY_MS) break;
     }
-
-    // Phase 2 – buffer window for late-arriving diagnostics.
-    const PHASE2_MS = 800;
-    for (let elapsed = 0; elapsed < PHASE2_MS; elapsed += tick) {
-      await delay(tick);
-    }
-
-    const markers = diagnosticsByUri.get(normUri);
+    if (!markers) markers = diagnosticsByUri.get(normUri);
     // Clear the language-level error on a successful diagnostics fetch.
     languageErrors.delete(language);
     return { markers: markers || [] };

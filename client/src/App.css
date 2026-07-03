@@ -1487,45 +1487,6 @@ body.resizing iframe { pointer-events: none; }
   font-size: 10px; color: var(--text-dim); font-weight: 600;
 }
 
-/* ── File Change Containers ── */
-.agent-fc-list { margin: 4px 0; display: flex; flex-direction: column; gap: 2px; }
-.agent-fc {
-  display: flex; align-items: center; gap: 6px;
-  padding: 5px 10px; font-size: 11px;
-  border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 5px;
-  background: rgba(255, 255, 255, 0.02);
-}
-.agent-fc.streaming { border-color: rgba(0, 122, 204, 0.25); background: rgba(0, 122, 204, 0.04); }
-.agent-fc .codicon { font-size: 11px; flex-shrink: 0; opacity: 0.6; }
-.agent-fc.streaming .codicon { opacity: 0.9; }
-.agent-fc-name { font-weight: 600; white-space: nowrap; }
-.agent-fc-path {
-  color: var(--text-dim); font-family: monospace; font-size: 10px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0;
-}
-.agent-fc-tokens {
-  display: flex; align-items: center; gap: 2px;
-  font-size: 10px; color: var(--text-dim); white-space: nowrap;
-}
-.agent-fc-delta { display: flex; gap: 2px; white-space: nowrap; }
-.agent-fc-added { color: #4ec94e; font-weight: 600; }
-.agent-fc-removed { color: #f85149; font-weight: 600; }
-.agent-fc-arrow { color: var(--text-dim); margin: 0 2px; }
-.agent-fc-diff-btn {
-  background: none; border: none; color: var(--text-dim);
-  cursor: pointer; padding: 1px 4px; border-radius: 3px;
-  display: flex; align-items: center;
-}
-.agent-fc-diff-btn:hover { color: var(--text); background: rgba(255,255,255,0.08); }
-.agent-fc .agent-spinner { width: 10px; height: 10px; border-width: 1.5px; flex-shrink: 0; }
-/* Accept/reject on file change cards */
-.agent-fc-actions { display: flex; gap: 2px; margin-left: auto; }
-.agent-fc-actions .agent-btn { padding: 1px 6px; font-size: 11px; border-radius: 3px; }
-.agent-fc.resolved { opacity: 0.6; }
-.agent-fc.accepted { border-color: rgba(46, 160, 67, 0.3); }
-.agent-fc.rejected { border-color: rgba(248, 81, 73, 0.15); }
-.agent-fc-label { font-size: 10px; color: var(--text-dim); white-space: nowrap; margin-left: auto; }
-
 /* ── Todo List Card ── */
 .agent-todo-card {
   margin: 4px 0; border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 6px;
@@ -1591,6 +1552,18 @@ body.resizing iframe { pointer-events: none; }
 }
 .agent-footer-btn:hover { color: var(--text); background: rgba(255,255,255,0.08); }
 .agent-footer-btn.active { color: #4ec94e; }
+
+/* ── Per-turn response delimiter ── */
+.agent-turn-footer {
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 14px; margin-top: 4px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  font-size: 11px; color: var(--text-dim);
+  flex-shrink: 0;
+}
+.agent-turn-footer .codicon { font-size: 11px; color: #4ec94e; }
+.agent-turn-footer-pending .codicon,
+.agent-turn-footer-pending .agent-spinner { color: #d29922; }
 
 /* ── Agent Diff Panel ── */
 .agent-diff-host { position: relative; }

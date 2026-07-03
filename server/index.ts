@@ -1018,25 +1018,20 @@ app.post("/api/lsp/complete", (req, res) => {
 app.post("/api/lsp/diagnostics", (req, res) => {
   try {
     const { rootPath, language, filePath, text } = req.body || {};
-    console.log(`[diag] request language=${language} file=${filePath}`);
     if (!rootPath || !language || !filePath) {
-      console.log(`[diag] missing params`);
       return res.json({ ok: false, markers: [], error: "Missing required parameters (rootPath, language, filePath)" });
     }
     getFileDiagnostics(rootPath, language, filePath, text || "")
       .then(({ markers, error }) => {
-        console.log(`[diag] response markers=${markers.length}${error ? ` error="${error}"` : ""}`);
         res.json({ ok: true, markers, error });
       })
       .catch((err) => {
-        const msg = `[diag] error: ${err instanceof Error ? err.message : String(err)}`;
-        console.error(msg);
-        res.json({ ok: false, markers: [], error: msg });
+        console.error(`LSP diagnostics error: ${err instanceof Error ? err.message : String(err)}`);
+        res.json({ ok: false, markers: [], error: err instanceof Error ? err.message : String(err) });
       });
   } catch (err) {
-    const msg = `[diag] fatal: ${err instanceof Error ? err.message : String(err)}`;
-    console.error(msg);
-    res.json({ ok: false, markers: [], error: msg });
+    console.error(`LSP diagnostics fatal: ${err instanceof Error ? err.message : String(err)}`);
+    res.json({ ok: false, markers: [], error: err instanceof Error ? err.message : String(err) });
   }
 });
 
