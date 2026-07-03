@@ -634,6 +634,8 @@ export default function App() {
             openEditorFile={(path) => { editorRef.current?.openFileByFsPath(path); }}
             acceptEditorChange={(path) => { editorRef.current?.acceptAgentChange(path); }}
             rejectEditorChange={(path) => { editorRef.current?.rejectAgentChange(path); }}
+            closeEditorFile={(path) => { editorRef.current?.closeFileByFsPath(path); }}
+            renameEditorFile={(oldPath, newPath) => { editorRef.current?.renameFileByFsPath(oldPath, newPath); }}
             agentTerminalBridge={agentTerminalBridge}
           />
         </div>

@@ -189,7 +189,7 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
       if (accepted) {
         state.messages.push({ role: "tool", content: dt.result, tool_call_id: dt.toolCallId });
       } else {
-        // Rejected — revert the file to original content.
+        // Rejected — revert to original content (only edit_file is deferred now)
         if (dt.originalContent != null && dt.filePath) {
           try {
             const resolvedPath = path.resolve(state.projectRoot, dt.filePath);

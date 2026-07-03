@@ -1580,7 +1580,7 @@ body.resizing iframe { pointer-events: none; }
   max-width: 480px;
   max-height: 400px;
   overflow-y: auto;
-  z-index: 300;
+  z-index: 11000;
   box-shadow: 0 4px 16px rgba(0,0,0,0.5);
 }
 
@@ -1637,6 +1637,7 @@ body.resizing iframe { pointer-events: none; }
   white-space: pre;
   overflow-x: auto;
   border-top: 1px solid #3c3c3c;
+  z-index: 9999;
   font-family: var(--mono-font, monospace);
   max-height: 280px;
   overflow-y: auto;
@@ -1759,6 +1760,7 @@ body.resizing iframe { pointer-events: none; }
 /* ── Diff accept/reject ── */
 .agent-diff {
   margin: 4px 0; border: 1px solid #388bfd; border-radius: 4px; overflow: hidden;
+  position: relative; z-index: 11000;
 }
 .agent-diff-header {
   display: flex; align-items: center; gap: 6px;

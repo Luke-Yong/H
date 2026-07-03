@@ -46,6 +46,10 @@ export interface EditorPaneHandle {
   rejectAgentChange: (fsPath: string) => void;
   /** Switch active tab to a file by its fsPath. */
   openFileByFsPath: (fsPath: string) => void;
+  /** Close a file tab by its fsPath. */
+  closeFileByFsPath: (fsPath: string) => void;
+  /** Rename a file tab by its old fsPath to a new fsPath. */
+  renameFileByFsPath: (oldPath: string, newPath: string) => void;
 }
 
 export interface StatusBarState {
@@ -211,6 +215,8 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   const peekRef = useRef<Record<string, { line: number; zoneId: string } | null>>({});
   // fileId → { originalContent, newContent } for agent-pending inline diffs
   const [agentDiffs, setAgentDiffs] = useState<Record<string, { originalContent: string; newContent: string }>>({});
+  const agentDiffsRef = useRef(agentDiffs);
+  agentDiffsRef.current = agentDiffs;
   const agentDiffDecoRef = useRef<Record<string, string[]>>({}); // fileId → decorationIds
 
   const handleWelcomeClick = useCallback((fn: () => void) => {
@@ -1257,10 +1263,8 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     }
     if (Object.keys(pending).length > 0) {
       agentDiffsPendingRef.current = pending;
-      // After React commits AND @monaco-editor/react has updated the model,
-      // apply decorations directly to any already-mounted editor.
-      // The useState/useEffect chain handles the state-driven path too.
-      setTimeout(() => {
+      // After React commits, apply decorations directly using the ref.
+      requestAnimationFrame(() => {
         const latestFiles = filesRef.current;
         const pendingNow = agentDiffsPendingRef.current;
         for (const diffName of Object.keys(pendingNow)) {
@@ -1272,7 +1276,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
             }
           }
         }
-      }, 0);
+      });
     }
   }, [applyAiFiles, applyAgentDiffDecorations]);
 
@@ -1545,6 +1549,8 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     acceptAgentChange: acceptAgentChangeByPath,
     rejectAgentChange: rejectAgentChangeByPath,
     openFileByFsPath,
+    closeFileByFsPath,
+    renameFileByFsPath,
     goToLine: handleGoToLine, goToBracket: handleGoToBracket,
     setLanguage: handleSetLanguage, setIndent: handleIndentChange,
     setLineEnding: handleLineEnding, setEncoding,
@@ -1821,6 +1827,26 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
       return remaining;
     });
   }, [clearScheduledLspDiagnostics, files, onCloseBrowser]);
+
+  const closeFileByFsPath = useCallback((fsPath: string) => {
+    const f = files.find((x) => x._fsPath && normPath(x._fsPath) === normPath(fsPath));
+    if (f) closeTab(f.id);
+  }, [files, closeTab]);
+
+  const renameFileByFsPath = useCallback((oldPath: string, newPath: string) => {
+    const newName = newPath.split(/[/\\]/).pop() || newPath;
+    setFiles((prev) => {
+      let changed = false;
+      const updated = prev.map((f) => {
+        if (f._fsPath && normPath(f._fsPath) === normPath(oldPath)) {
+          changed = true;
+          return { ...f, name: newName, _fsPath: newPath, language: detectLanguage(newName) };
+        }
+        return f;
+      });
+      return changed ? updated : prev;
+    });
+  }, []);
 
   const renameFile = useCallback((id: string) => {
     const f = files.find((x) => x.id === id);
@@ -2204,7 +2230,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
 
                     // Apply decorations immediately with whatever is available
                     applyDecorations(ed, f.id, gitDiffs[f.id], markersByFileId[f.id]);
-                    applyAgentDiffDecorations(ed, f.id, agentDiffs[f.id]);
+                    applyAgentDiffDecorations(ed, f.id, agentDiffsRef.current[f.id]);
                     syncProblemMarkersForFile(f.id, ed);
 
                     // Click a glyph (git change or error/warning) to open the inline popup.

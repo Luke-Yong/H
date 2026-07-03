@@ -1,5 +1,6 @@
 import { useRef, useEffect, useState, useCallback, useMemo } from "react";
 import { flushSync } from "react-dom";
+import { createPortal } from "react-dom";
 import type { AgentTerminalBridge } from "./AgentTerminalBridge";
 
 // ── Rich message types for the unified agent chat ──
@@ -54,6 +55,8 @@ interface FileChange {
   rejected?: boolean;
   /** Kind of change: "write" (default), "create" (new dir), "delete", "rename". */
   changeType?: "write" | "create" | "delete" | "rename";
+  /** Whether this change requires user Accept/Reject (only edit_file). */
+  deferred?: boolean;
 }
 
 interface ChatThread {
@@ -130,14 +133,20 @@ interface Props {
   acceptEditorChange?: (fsPath: string) => void;
   /** Reject agent change on a file (restores original in Monaco). */
   rejectEditorChange?: (fsPath: string) => void;
+  /** Close a file tab in the editor (e.g. after deleting it). */
+  closeEditorFile?: (fsPath: string) => void;
+  /** Rename a file tab in the editor (e.g. after agent renames a file). */
+  renameEditorFile?: (oldPath: string, newPath: string) => void;
   /** Agent ↔ terminal bridge — when agent runs a command it spawns in a real terminal */
   agentTerminalBridge?: AgentTerminalBridge;
 }
 
 // ── Component ──
 
-export default function AgentConsole({ goal, onGoalChange, getConsoleContext, executeBrowserAction, getProjectFiles, getFsBasePath, refreshEditor, applyAgentFileChanges, onRefreshFs, setAgentFileActionRef, openEditorFile, acceptEditorChange, rejectEditorChange, agentTerminalBridge }: Props) {
+export default function AgentConsole({ goal, onGoalChange, getConsoleContext, executeBrowserAction, getProjectFiles, getFsBasePath, refreshEditor, applyAgentFileChanges, onRefreshFs, setAgentFileActionRef, openEditorFile, acceptEditorChange, rejectEditorChange, closeEditorFile, renameEditorFile, agentTerminalBridge }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
+  const consoleListRef = useRef<HTMLDivElement>(null);
+  const userScrolledUpRef = useRef(false);
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<ConsoleMessage[]>([]);
   const [loading, setLoading] = useState(false);
@@ -360,6 +369,9 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
       const b = norm(fcPathRel);
       return a === b || a.endsWith("/" + b);
     };
+    // Capture rename paths while updating the file-change status
+    let renameOldPath = "";
+    let renameNewPath = "";
     setMessages((prev) => {
       let changed = false;
       const next = prev.map((m) => {
@@ -367,6 +379,10 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
         const updated = m.fileChanges.map((fc) => {
           if (matches(fcPath, fc.path) && !fc.accepted && !fc.rejected) {
             changed = true;
+            if (fc.changeType === "rename" && fc.content) {
+              renameOldPath = fc.path;
+              renameNewPath = fc.content;
+            }
             return { ...fc, accepted, rejected: !accepted };
           }
           return fc;
@@ -388,6 +404,10 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
           rejectEditorChange?.(absDtPath);
         }
         onRefreshFs?.();
+        // Update editor tab on rename accept (tab still shows old name)
+        if (accepted && renameOldPath && renameNewPath) {
+          renameEditorFile?.(resolvePath(renameOldPath), resolvePath(renameNewPath));
+        }
         setLoading(true);
         deferredToolRef.current = null;
         continueDeferredRef.current?.(accepted, dt.sessionId, dt.toolCallId);
@@ -400,7 +420,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
       }
       onRefreshFs?.();
     }
-  }, [getFsBasePath, acceptEditorChange, rejectEditorChange, onRefreshFs, resolvePath]);
+  }, [getFsBasePath, acceptEditorChange, rejectEditorChange, onRefreshFs, resolvePath, renameEditorFile]);
 
   useEffect(() => {
     setAgentFileActionRef?.(handleBannerFileAction);
@@ -622,7 +642,36 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
     else if (!mentionActive && mentionOpen) { setMentionOpen(false); }
   }, [mentionActive, mentionOpen]);
 
-  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
+  // Auto-scroll to bottom only when user is already near the bottom.
+  // If they've scrolled up to read history, don't yank them back.
+  useEffect(() => {
+    const el = consoleListRef.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    if (nearBottom || !userScrolledUpRef.current) {
+      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [messages]);
+
+  // Track manual scroll — if user scrolls up, stop auto-scrolling.
+  useEffect(() => {
+    const el = consoleListRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+      userScrolledUpRef.current = !nearBottom;
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, []);
+
+  // Safety: if loading is stuck true for 30 s with no new messages, force it off
+  // so the footer can appear (covers server-side errors that don't send done).
+  useEffect(() => {
+    if (!loading) return;
+    const timer = setTimeout(() => { setLoading(false); setAgentStatus("stopped"); }, 30_000);
+    return () => clearTimeout(timer);
+  }, [loading, messages.length]);
 
   // ── Message helpers ──
 
@@ -808,6 +857,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
               status: "streaming",
               tokenCount,
               originalContent: orig ?? null,
+              deferred: true,
             });
           } else if (tn === "delete_file" && evt.toolParams?.path) {
             const p = String(evt.toolParams.path);
@@ -872,15 +922,19 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
           // For run_in_terminal: defer card creation to permission_required event.
           // The command will NOT run until user clicks Allow.
           if (!isTerminal) {
-            // Open file in Monaco for file tools
+            // Open file in Monaco for file tools (close tab for delete to release handle)
             const FILE_EDIT_TOOLS = ["write_file", "edit_file", "delete_file", "rename_file"];
-            if (FILE_EDIT_TOOLS.includes(evt.toolName) && evt.toolParams?.path) {
+            if (FILE_EDIT_TOOLS.includes(evt.toolName) && (evt.toolParams?.path || evt.toolParams?.oldPath)) {
               const root = (getFsBasePath?.() || "").replace(/[/\\]$/, "");
               let p = String(evt.toolParams.path || evt.toolParams.oldPath || "");
               if (root && !/^[a-zA-Z]:/.test(p) && !p.startsWith("/")) {
                 p = root + "/" + p.replace(/\\/g, "/");
               }
-              openEditorFile?.(p);
+              if (evt.toolName === "delete_file") {
+                closeEditorFile?.(p);
+              } else {
+                openEditorFile?.(p);
+              }
             }
             flushSync(() => {
               pushRaw(id, { role: "tool", content: "", toolName: evt.toolName, toolParams: evt.toolParams, state: "waiting", sandboxOutput: evt.toolName === "run_command" ? "" : undefined, tokenCount: fcTokenSaved as number | undefined });
@@ -927,6 +981,16 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
             onRefreshFs?.();
           } else if (tn === "delete_file" || tn === "create_directory" || tn === "rename_file") {
             onRefreshFs?.();
+            if (tn === "rename_file") {
+              const root = (getFsBasePath?.() || "").replace(/[/\\]$/, "");
+              let oldP = String(evt.toolParams?.oldPath || "");
+              let newP = String(evt.toolParams?.newPath || "");
+              if (root && oldP && newP) {
+                if (!/^[a-zA-Z]:/.test(oldP) && !oldP.startsWith("/")) oldP = root + "/" + oldP;
+                if (!/^[a-zA-Z]:/.test(newP) && !newP.startsWith("/")) newP = root + "/" + newP;
+                renameEditorFile?.(oldP, newP);
+              }
+            }
           }
           const id = toolIds[toolIds.length - 1];
           const isTerminal = evt.toolName === "run_in_terminal";
@@ -944,7 +1008,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
             });
           }
           // If file tool Diff ready, defer — user must Accept/Reject before agent continues
-          const FILE_TOOLS = ["write_file", "edit_file", "delete_file", "rename_file"];
+          const FILE_TOOLS = ["edit_file"];
           if (FILE_TOOLS.includes(tn) && evt.toolResult === "Diff ready") {
             const fp = String(evt.toolParams?.path || evt.toolParams?.oldPath || "");
             deferredToolRef.current = {
@@ -1016,6 +1080,14 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
               return next;
             });
           }
+          // Clear stale state indicators on all assistant/tool messages
+          setMessages((prev) =>
+            prev.map((m) =>
+              (m.role === "assistant" || m.role === "tool") && m.state
+                ? { ...m, state: undefined }
+                : m
+            )
+          );
           currentThought = "";
           currentText = "";
           if (evt.reply && !assistantMsgId) {
@@ -1111,7 +1183,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
           // Look up token count from the file-change just flushed above
           const fp = String(evt.toolParams?.path || evt.toolParams?.oldPath || "");
           const fcTokenCount = fp ? fcTokenByPathRef.current.get(fp) : undefined;
-          // Open file in Monaco for file tools
+          // Open file in Monaco for file tools (close tab for delete to release handle)
           const FILE_EDIT_TOOLS2 = ["write_file", "edit_file", "delete_file", "rename_file"];
           if (FILE_EDIT_TOOLS2.includes(tn) && fp) {
             const root = (getFsBasePath?.() || "").replace(/[/\\]$/, "");
@@ -1119,7 +1191,11 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
             if (root && !/^[a-zA-Z]:/.test(p) && !p.startsWith("/")) {
               p = root + "/" + p.replace(/\\/g, "/");
             }
-            openEditorFile?.(p);
+            if (tn === "delete_file") {
+              closeEditorFile?.(p);
+            } else {
+              openEditorFile?.(p);
+            }
           }
           pushRaw(id, { role: "tool", content: "", toolName: tn, toolParams: evt.toolParams, state: "waiting", sandboxOutput: tn === "run_command" ? "" : undefined, tokenCount: fcTokenCount });
           // For run_in_terminal: store refs so permission_required and terminal bridge can find the card
@@ -1131,7 +1207,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
         }
 
         if (evt.type === "tool_end") {
-          const DESTRUCTIVE = ["write_file", "edit_file", "delete_file", "rename_file"];
+          const DESTRUCTIVE = ["edit_file"];
           // Update the last tool card (the one most recently started)
           const id = toolIds[toolIds.length - 1];
           if (id) {
@@ -1160,7 +1236,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
             setMessages((prev) => {
               const idx = prev.findIndex((m) => m.id === id);
               if (idx < 0) return prev;
-              const fc: FileChange = { path: p, name, status: "done", changeType: "write", originalContent: orig };
+              const fc: FileChange = { path: p, name, status: "done", changeType: "write", originalContent: orig, deferred: true };
               let fcContent = "";
               let tkn = 0;
               if (tn === "write_file") {
@@ -1187,8 +1263,8 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
               onRefreshFs?.();
               return next;
             });
-            // Apply diff decorations in Monaco for file tools
-            if ((tn === "write_file" || tn === "edit_file") && applyAgentFileChanges && orig != null) {
+            // Open file in editor for write_file / edit_file (with diff decorations if editing existing)
+            if ((tn === "write_file" || tn === "edit_file") && applyAgentFileChanges) {
               const root = (getFsBasePath?.() || "").replace(/[/\\]$/, "");
               let resolved = p;
               if (root && !/^[a-zA-Z]:/.test(resolved) && !resolved.startsWith("/")) {
@@ -1196,7 +1272,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
               }
               const content = tn === "write_file"
                 ? String(params.content || "")
-                : orig.split(String(params.old_string || "")).join(String(params.new_string || ""));
+                : (orig || "").split(String(params.old_string || "")).join(String(params.new_string || ""));
               applyAgentFileChanges([{ name: p.split(/[/\\]/).pop() || p, content, fsPath: resolved, originalContent: orig }]);
               openEditorFile?.(resolved);
             }
@@ -1238,6 +1314,14 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
           } else if (evt.reply) {
             push({ role: "assistant", content: evt.reply, thought: currentThought });
           }
+          // Clear stale state indicators on all assistant/tool messages
+          setMessages((prev) =>
+            prev.map((m) =>
+              (m.role === "assistant" || m.role === "tool") && m.state
+                ? { ...m, state: undefined }
+                : m
+            )
+          );
           setAgentStatus("completed");
           if (evt.usage) setAgentUsage(evt.usage);
           onRefreshFs?.();
@@ -1316,7 +1400,11 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
       try {
         await consumeSSE("/api/chat/agent/stream/continue", body, handleContinueEvent);
       } catch (err: any) {
-        if (err?.name !== "AbortError") push({ role: "system", content: `Error: ${String(err)}` });
+        if (err?.name !== "AbortError") {
+          push({ role: "system", content: `Error: ${String(err)}` });
+          setLoading(false);
+          setAgentStatus("stopped");
+        }
       }
     };
     continueDeferredRef.current = async (accepted: boolean, sid: string, tcid: string) => {
@@ -1678,6 +1766,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
   const feedback = useCallback((v: "up" | "down") => setThumbsFeedback(v), []);
   const [diffPanelOpen, setDiffPanelOpen] = useState(false);
   const [expandedDiffPath, setExpandedDiffPath] = useState<string | null>(null);
+  const diffHostRef = useRef<HTMLButtonElement>(null);
 
   // ── Simple line-by-line diff (LCS-based unified diff) ──
   const computeUnifiedDiff = useCallback((original: string, current: string, contextLines = 3): string => {
@@ -1759,7 +1848,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
     for (const m of messages) {
       if (m.fileChanges) {
         for (const fc of m.fileChanges) {
-          if (!fc.accepted && !fc.rejected) result.push({ path: fc.path, name: fc.name, msgId: m.id });
+          if (!fc.accepted && !fc.rejected && fc.deferred) result.push({ path: fc.path, name: fc.name, msgId: m.id });
         }
       }
     }
@@ -1775,7 +1864,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
     for (const m of messages) {
       if (m.fileChanges) {
         for (const fc of m.fileChanges) {
-          if (!fc.accepted && !fc.rejected) pathsToAccept.push(fc.path);
+          if (!fc.accepted && !fc.rejected && fc.deferred) pathsToAccept.push(fc.path);
         }
       }
     }
@@ -1805,6 +1894,15 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
 
   // Clear diff panel when messages change
   useEffect(() => { setDiffPanelOpen(false); setExpandedDiffPath(null); }, [messages.length]);
+
+  // Compute position of the diff host button for the portal
+  const diffHostRect = useMemo(() => {
+    if (!diffPanelOpen) return null;
+    const btn = diffHostRef.current;
+    if (!btn) return null;
+    const r = btn.getBoundingClientRect();
+    return { bottom: window.innerHeight - r.top + 4, right: window.innerWidth - r.right };
+  }, [diffPanelOpen, changedFiles]);
 
   // ── Accept/reject pending diff ──
 
@@ -1837,6 +1935,11 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
       if (nFc === nDt || nDt.endsWith("/" + fc.name) || nDt.endsWith("\\" + fc.name)) {
         acceptEditorChange?.(resolvePath(dt.filePath));
         onRefreshFs?.();
+        if (fc.changeType === "rename" && fc.content) {
+          renameEditorFile?.(resolvePath(fc.path), resolvePath(fc.content));
+        } else if (fc.changeType === "delete") {
+          closeEditorFile?.(resolvePath(dt.filePath));
+        }
         setMessages((prev) => {
           const next = [...prev];
           const idx = next.findIndex((m) => m.id === msgId);
@@ -1864,8 +1967,11 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ path: resolved }),
       }).then((r) => { if (r.ok) onRefreshFs?.(); }).catch(() => {});
+      // Close the editor tab for the deleted file
+      closeEditorFile?.(resolvePath(fc.path));
     } else if (fc.changeType === "rename" && fc.content) {
       onRefreshFs?.();
+      renameEditorFile?.(resolvePath(fc.path), resolvePath(fc.content));
     }
     if (fc.changeType !== "delete") onRefreshFs?.();
     acceptEditorChange?.(resolvePath(fc.path));
@@ -1877,7 +1983,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
       }
       return next;
     });
-  }, [acceptEditorChange, applyEditorFiles, onRefreshFs, getFsBasePath, resolvePath]);
+  }, [acceptEditorChange, applyEditorFiles, onRefreshFs, getFsBasePath, resolvePath, closeEditorFile, renameEditorFile]);
 
   const rejectFile = useCallback((fc: FileChange, msgId: string) => {
     // If this is a deferred tool, skip local revert and just resume agent stream
@@ -1888,6 +1994,16 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
       const nFc = norm(fc.path);
       if (nFc === nDt || nDt.endsWith("/" + fc.name) || nDt.endsWith("\\" + fc.name)) {
         rejectEditorChange?.(resolvePath(dt.filePath));
+        // For new files (write with no original), close tab and delete from disk
+        if (fc.changeType === "write" && fc.originalContent === null) {
+          closeEditorFile?.(resolvePath(fc.path));
+          fetch("/api/fs/delete", {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: resolvePath(fc.path) }),
+          }).catch(() => {});
+        }
+        onRefreshFs?.();
         setMessages((prev) => {
           const next = [...prev];
           const idx = next.findIndex((m) => m.id === msgId);
@@ -1951,7 +2067,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
         console.error("Reject revert failed:", err);
       }
     })();
-  }, [rejectEditorChange, getFsBasePath, onRefreshFs, resolvePath]);
+  }, [rejectEditorChange, getFsBasePath, onRefreshFs, resolvePath, closeEditorFile]);
 
   // Helper: find the file-change entry (and its parent msg id) for a given file path
   const findFcByPath = useCallback((fp: string): { fc: FileChange; msgId: string } | null => {
@@ -2128,7 +2244,7 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
       )}
 
       {/* ── Messages ── */}
-      <div className="console-list">
+      <div className="console-list" ref={consoleListRef}>
         {safeMessages.length === 0 && (
           <div className="agent-empty">Ask the agent to do anything — write code, run tests, browse the web, manage files...</div>
         )}
@@ -2200,8 +2316,8 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
                   {msg.state === "waiting" ? <span className="agent-spinner" /> : <i className="codicon codicon-check" />}
                   <i className={`codicon codicon-${msg.toolName.startsWith("browser_") ? "globe" : msg.toolName === "run_in_terminal" ? "terminal" : msg.toolName === "read_file" ? "file-code" : msg.toolName === "grep" ? "search" : msg.toolName === "list_files" || msg.toolName === "search_files" ? "folder-opened" : "tools"}`} />
                   {(() => {
-                    const FILE_TOOLS = ["write_file", "edit_file", "delete_file", "rename_file"];
-                    if (FILE_TOOLS.includes(msg.toolName)) {
+                    const FILE_CARD_TOOLS = ["write_file", "edit_file", "delete_file", "rename_file"];
+                    if (FILE_CARD_TOOLS.includes(msg.toolName)) {
                       const fp = String(msg.toolParams?.path || msg.toolParams?.oldPath || "");
                       const tkn = msg.tokenCount ?? 0;
                       return (
@@ -2232,7 +2348,7 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
                 </div>
                 {/* ── Accept/reject for file tools ── */}
                 {(() => {
-                  const FILE_TOOLS = ["write_file", "edit_file", "delete_file", "rename_file"];
+                  const FILE_TOOLS = ["edit_file"];
                   if (!FILE_TOOLS.includes(msg.toolName) || msg.state === "waiting") return null;
                   const fp = String(msg.toolParams?.path || msg.toolParams?.oldPath || "");
                   // Check if already resolved
@@ -2251,11 +2367,7 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
                     }
                   }
                   if (isResolved) {
-                    const label = msg.toolName === "delete_file"
-                      ? (isAccepted ? "Deleted" : "Kept")
-                      : msg.toolName === "rename_file"
-                      ? (isAccepted ? "Renamed" : "Kept")
-                      : isAccepted ? "Applied" : "Dismissed";
+                    const label = isAccepted ? "Applied" : "Dismissed";
                     return (
                       <div className="agent-tool-card-actions">
                         <span className="agent-tool-card-action-label">{label}</span>
@@ -2391,7 +2503,7 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
           </div>
         )}
         {/* ── Completion footer ── */}
-        {!loading && (agentStatus === "completed" || agentStatus === "stopped") && (
+        {!loading && safeMessages.length > 0 && (
           <div className="agent-footer">
             <div className="agent-footer-status">
               {agentStatus === "completed" ? (
@@ -2418,11 +2530,11 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
             <div className="agent-footer-actions">
               {changedFiles.length > 0 && (
                 <div className="agent-diff-host">
-                  <button className="agent-footer-btn" title="View changes" onClick={() => setDiffPanelOpen((v) => !v)}>
+                  <button className="agent-footer-btn" ref={diffHostRef} title="View changes" onClick={() => setDiffPanelOpen((v) => !v)}>
                     <i className="codicon codicon-diff" /> {changedFiles.length} diff{changedFiles.length > 1 ? "s" : ""}
                   </button>
-                  {diffPanelOpen && (
-                    <div className="agent-diff-panel">
+                  {diffPanelOpen && diffHostRect && createPortal(
+                    <div className="agent-diff-panel" style={{ position: "fixed", bottom: diffHostRect.bottom, right: diffHostRect.right }}>
                       <div className="agent-diff-panel-header">Changed files</div>
                       {changedFiles.map((f) => (
                         <div key={f.path} className={`agent-diff-file${expandedDiffPath === f.path ? " expanded" : ""}`}>
@@ -2441,6 +2553,7 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
                         </div>
                       ))}
                     </div>
+                  , document.body
                   )}
                 </div>
               )}

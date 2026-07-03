@@ -1285,13 +1285,14 @@ You have access to tools that let you read/write files, run commands, interact w
 ### Rules
 1. Break the user's request into steps. Use \`write_todos\` to plan and track progress.
 2. Use tools one at a time. After each tool call, read the result before deciding the next step.
-3. When you are done, call \`task_complete\` with a summary.
+3. When you are done, call \`task_complete\` with a brief summary of everything you did, any files changed, and any issues found. ALWAYS call task_complete — never end without it.
 4. If you encounter an error, explain what happened and suggest how to fix it.
 5. Keep responses concise — one sentence of reasoning, one tool call.
 6. Do NOT guess browser DOM indices — call \`browser_get_dom\` first.
 7. **Before interacting with a web app in the browser, you MUST start the server first.** Use \`run_in_terminal\` to start the server, wait for the user to Allow the command. Then CHECK THE TERMINAL OUTPUT for runtime errors BEFORE navigating to the browser. Only call \`browser_info\` after confirming the terminal output shows no errors.
 8. After starting a server, do NOT guess the URL or port. Call \`browser_info\` to check if a tab opened. If none, ask the user for the URL.
 9. Only use tools from the registry. NEVER invent tools — use \`read_file\` (not cat/head/tail), \`list_files\` (not ls/dir), \`search_files\` (not find/locate), \`grep\` (the tool, not the shell command), \`edit_file\` (not sed/awk), \`write_file\` (not echo>/cp), \`run_command\` for short commands, \`run_in_terminal\` for servers.
+10. At the end of every turn, ALWAYS call \`task_complete\` with a brief summary. Never end with plain text — always use the tool.
 
 ### File conventions
 - All file paths are relative to the project root.
@@ -2020,7 +2021,7 @@ export async function* agentLoopStream(
       }
 
       // ── File tools: auto-execute, yield diff for Accept/Reject in UI ──
-      const FILE_TOOLS = ["write_file", "edit_file", "delete_file", "rename_file"];
+      const FILE_TOOLS = ["edit_file"];
       if (FILE_TOOLS.includes(fnName)) {
         const fp = String(params.path || params.oldPath || "");
         // Push all tool calls as assistant messages; only this one gets executed
@@ -2081,10 +2082,10 @@ export async function* agentLoopStream(
         continue;
       }
 
-      // ── Read-only filesystem tools: auto-execute ──
-      // write_file, edit_file, delete_file, and rename_file are handled above with deferred Accept/Reject.
+      // ── Read-only + auto-execute filesystem tools (no Accept/Reject prompt) ──
       const isFsTool = [
         "read_file", "list_files", "search_files", "grep", "create_directory", "write_todos", "read_command_output",
+        "write_file", "delete_file", "rename_file",
       ].includes(fnName);
 
       if (isFsTool) {
@@ -2106,6 +2107,7 @@ export async function* agentLoopStream(
             type: "tool_end",
             toolName: fnName,
             toolResult: storedResult.slice(0, 2000),
+            toolParams: params,
             executedTools: [{ name: fnName, result: storedResult.slice(0, 500) }],
           };
           executedTools.push({ name: fnName, result: storedResult.slice(0, 1000) });
