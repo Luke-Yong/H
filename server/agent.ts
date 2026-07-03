@@ -40,6 +40,8 @@ export interface AgentState {
   messages: AgentMessage[];
   iteration: number;
   projectRoot: string;
+  /** Rolling summary of older resolved plain-text turns trimmed out of messages. */
+  historySummary?: string;
   pendingPermission?: { toolCallId: string; command: string; background?: boolean; toolName?: string; params?: Record<string, unknown> };
   /** Deferred destructive file tool — executed on Allow, result held until Accept/Reject in UI. */
   deferredTool?: { toolCallId: string; toolName: string; params: Record<string, unknown>; result: string; originalContent: string | null; filePath: string };
@@ -846,18 +848,6 @@ function detectProjectBuild(root: string): string | null {
   return null;
 }
 
-// Handler for read_problems — detects the project and runs the compile/lint command.
-async function runReadProblems(root: string): Promise<string> {
-  const cmd = detectProjectBuild(root);
-  if (!cmd) {
-    return "No build system detected. Try a specific command with run_command (e.g. npx tsc --noEmit, python -m compileall ., go vet ./...).";
-  }
-  const result = await runCommand(cmd, root);
-  // Strip the [cmd #N] prefix so it doesn't confuse the agent.
-  const stripped = result.replace(/^\[cmd #\d+\]\s*/, "");
-  return `Build check (${cmd}):\n${stripped}`;
-}
-
 export async function runFsTool(name: string, params: Record<string, unknown>, root: string): Promise<string | null> {
   const resolve = (p: string) => path.resolve(root, p);
 
@@ -1068,6 +1058,211 @@ export async function runFsTool(name: string, params: Record<string, unknown>, r
 // ── Agent loop ──
 
 const MAX_ITERATIONS = 50;
+const HISTORY_COMPACTION_TRIGGER_MESSAGES = 24;
+const HISTORY_COMPACTION_TRIGGER_TOKENS = 10_000;
+const HISTORY_PLAIN_MESSAGES_TO_KEEP = 6;
+const HISTORY_SUMMARY_LINE_LIMIT = 12;
+const HISTORY_SUMMARY_CHAR_BUDGET = 2_400;
+const TOOL_RESULT_SUMMARY_LINE_LIMIT = 8;
+const TOOL_RESULT_SUMMARY_CHAR_BUDGET = 1_200;
+const IMPORTANT_OUTPUT_RE = /(error|warning|failed|failure|exception|traceback|cannot|not found|undefined|invalid|timeout|timed out|listening on|running on|localhost:|127\.0\.0\.1|compiled successfully|build succeeded|tests? passed|tests? failed)/i;
+
+type ModelMessage = {
+  role: string;
+  content: string | null;
+  tool_call_id?: string;
+  tool_calls?: any[];
+  reasoning_content?: string;
+};
+
+function clipText(text: string, maxChars: number): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxChars) return normalized;
+  return normalized.slice(0, Math.max(0, maxChars - 3)).trimEnd() + "...";
+}
+
+function dedupeStrings(items: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of items) {
+    const normalized = item.trim();
+    if (!normalized) continue;
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(normalized);
+  }
+  return out;
+}
+
+function estimateStateTokens(state: Pick<AgentState, "messages" | "historySummary">): number {
+  const totalChars = state.messages.reduce((sum, m) =>
+    sum + (m.content?.length || 0) + (m.tool_call_id?.length || 0) + (m.name?.length || 0) + (m.reasoning_content?.length || 0), 0)
+    + (state.historySummary?.length || 0);
+  return Math.round(totalChars / 4);
+}
+
+function isPlainConversationMessage(message: AgentMessage): boolean {
+  return message.role === "user" || (message.role === "assistant" && !message.name);
+}
+
+function mergeHistorySummary(existingSummary: string | undefined, compactedMessages: AgentMessage[]): string {
+  const lines: string[] = [];
+  if (existingSummary) {
+    const previous = clipText(existingSummary.replace(/\n+/g, " "), 320);
+    if (previous) lines.push(`Earlier summary: ${previous}`);
+  }
+  for (const message of compactedMessages) {
+    const content = clipText(message.content || "", 220);
+    if (!content) continue;
+    lines.push(`${message.role === "user" ? "User" : "Assistant"}: ${content}`);
+  }
+  const deduped = dedupeStrings(lines).slice(-HISTORY_SUMMARY_LINE_LIMIT);
+  const summaryLines: string[] = [];
+  let totalChars = 0;
+  for (let i = deduped.length - 1; i >= 0; i--) {
+    const candidate = `- ${deduped[i]}`;
+    const nextChars = totalChars + candidate.length + (summaryLines.length ? 1 : 0);
+    if (nextChars > HISTORY_SUMMARY_CHAR_BUDGET && summaryLines.length > 0) break;
+    summaryLines.unshift(candidate);
+    totalChars = nextChars;
+  }
+  return summaryLines.join("\n");
+}
+
+function compactAgentHistory(state: AgentState): void {
+  const plainIndexes = state.messages
+    .map((message, index) => ({ message, index }))
+    .filter(({ message }) => isPlainConversationMessage(message))
+    .map(({ index }) => index);
+  if (plainIndexes.length <= HISTORY_PLAIN_MESSAGES_TO_KEEP) return;
+
+  const overMessageLimit = state.messages.length >= HISTORY_COMPACTION_TRIGGER_MESSAGES;
+  const overTokenLimit = estimateStateTokens(state) >= HISTORY_COMPACTION_TRIGGER_TOKENS;
+  if (!overMessageLimit && !overTokenLimit) return;
+
+  const indexesToCompact = new Set(plainIndexes.slice(0, -HISTORY_PLAIN_MESSAGES_TO_KEEP));
+  if (indexesToCompact.size === 0) return;
+
+  const compactedMessages = state.messages.filter((_, index) => indexesToCompact.has(index));
+  if (compactedMessages.length === 0) return;
+
+  state.historySummary = mergeHistorySummary(state.historySummary, compactedMessages);
+  state.messages = state.messages.filter((_, index) => !indexesToCompact.has(index));
+}
+
+function extractCommandId(text: string): number | null {
+  const match = text.match(/\[cmd #(\d+)\]/);
+  return match ? Number(match[1]) : null;
+}
+
+function summarizeCommandResult(raw: string, label: string): string {
+  const commandId = extractCommandId(raw);
+  const exitMatch = raw.match(/^Exit code (\d+):/);
+  const timedOut = /\[Command timed out after \d+s\]/.test(raw);
+  const normalized = raw.replace(/^Exit code \d+:\s*/, "");
+  const lines = normalized
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^\[cmd #\d+\]\s*/, "").trim())
+    .filter(Boolean);
+
+  const prioritized = dedupeStrings(lines.filter((line) => IMPORTANT_OUTPUT_RE.test(line)));
+  const fallback = dedupeStrings(lines);
+  const chosen = (prioritized.length > 0 ? prioritized : fallback)
+    .slice(0, TOOL_RESULT_SUMMARY_LINE_LIMIT)
+    .map((line) => `- ${clipText(line, 220)}`);
+
+  const headerParts = [label];
+  if (exitMatch) headerParts.push(`Exit code ${exitMatch[1]}.`);
+  if (timedOut) headerParts.push("Timed out.");
+  if (commandId != null) headerParts.push(`Full output is cached as cmd #${commandId}; call read_command_output for more.`);
+
+  let summary = headerParts.join(" ");
+  if (chosen.length > 0) {
+    summary += `\nKey lines:\n${chosen.join("\n")}`;
+  } else {
+    summary += "\nKey lines:\n- (command completed with no output)";
+  }
+  if (summary.length > TOOL_RESULT_SUMMARY_CHAR_BUDGET) {
+    summary = clipText(summary, TOOL_RESULT_SUMMARY_CHAR_BUDGET);
+  }
+  return summary;
+}
+
+async function runReadProblems(root: string): Promise<{ raw: string; summary: string }> {
+  const cmd = detectProjectBuild(root);
+  if (!cmd) {
+    const summary = "No build system detected. Try a specific command with run_command (e.g. npx tsc --noEmit, python -m compileall ., go vet ./...).";
+    return { raw: summary, summary };
+  }
+  const raw = await runCommand(cmd, root);
+  return {
+    raw,
+    summary: summarizeCommandResult(raw, `Build check (${cmd})`),
+  };
+}
+
+function getStoredToolResult(name: string, rawResult: string): string {
+  if (name === "run_command") return summarizeCommandResult(rawResult, "Command finished.");
+  return rawResult;
+}
+
+function buildOpenAiMessages(state: AgentState, context: string): ModelMessage[] {
+  compactAgentHistory(state);
+  const promptMessages = state.historySummary
+    ? [{ role: "assistant", content: state.historySummary } as AgentMessage, ...state.messages]
+    : state.messages;
+  const systemMsg = buildSystemPrompt(promptMessages, context)
+    + (state.historySummary ? `\n\n### Earlier conversation summary\n${state.historySummary}` : "");
+
+  const msgs: ModelMessage[] = [{ role: "system", content: systemMsg }];
+  const pendingIds = new Set<string>();
+
+  for (const message of state.messages) {
+    if (message.role === "tool") {
+      const toolId = message.tool_call_id;
+      if (toolId && pendingIds.has(toolId)) {
+        pendingIds.delete(toolId);
+        msgs.push({ role: "tool", content: message.content, tool_call_id: toolId });
+      }
+      continue;
+    }
+
+    if (message.role === "assistant" && message.name) {
+      for (const id of pendingIds) {
+        msgs.push({ role: "tool", content: "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_get_dom, browser_select, or any other browser_* tool) on your next turn to get the actual result.", tool_call_id: id });
+      }
+      pendingIds.clear();
+
+      try {
+        const calls: Array<{ id?: string }> = JSON.parse(message.content);
+        const ids = calls.map((call) => call.id).filter(Boolean) as string[];
+        for (const id of ids) pendingIds.add(id);
+        msgs.push({
+          role: "assistant",
+          content: null,
+          tool_calls: calls,
+          ...(message.reasoning_content || state.isReasoningModel ? { reasoning_content: message.reasoning_content || "" } : {}),
+        });
+      } catch {
+        msgs.push({
+          role: "assistant",
+          content: message.content,
+          ...(message.reasoning_content || state.isReasoningModel ? { reasoning_content: message.reasoning_content || "" } : {}),
+        });
+      }
+      continue;
+    }
+
+    msgs.push(message);
+  }
+
+  for (const id of pendingIds) {
+    msgs.push({ role: "tool", content: "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_get_dom, browser_select, or any other browser_* tool) on your next turn to get the actual result.", tool_call_id: id });
+  }
+
+  return msgs;
+}
 
 // ── Dynamic Instruction Retrieval (ITR) ──
 // The system prompt is broken into themed chunks. At each agent turn,
@@ -1567,52 +1762,7 @@ export async function agentLoop(
     (reasoning || state.isReasoningModel) ? { reasoning_content: reasoning || "" } : {};
 
   // Dynamic instruction retrieval — only include relevant prompt chunks
-  const systemMsg = buildSystemPrompt(state.messages, context);
-
-  const openaiMessages: Array<{ role: string; content: string | null; tool_call_id?: string; tool_calls?: any[]; reasoning_content?: string }> = [];
-  // Push a system message
-  openaiMessages.push({ role: "system", content: systemMsg });
-  const pendingIds = new Set<string>(); // track all tool_call_ids waiting for a response
-
-  for (const m of state.messages) {
-    if (m.role === "tool") {
-      const tid = m.tool_call_id;
-      if (tid && pendingIds.has(tid)) {
-        pendingIds.delete(tid);
-        openaiMessages.push({ role: "tool", content: m.content, tool_call_id: tid });
-      }
-      // else: orphaned tool message (no matching assistant with tool_calls) — skip
-    } else if (m.role === "assistant" && m.name) {
-      // Flush any pending tool_call_ids before pushing a new assistant with tool_calls.
-      // This maintains valid API ordering: assistant(tool_calls) → tool(response).
-      for (const id of pendingIds) {
-        openaiMessages.push({ role: "tool", content: "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_get_dom, browser_select, or any other browser_* tool) on your next turn to get the actual result.", tool_call_id: id });
-      }
-      pendingIds.clear();
-
-      // assistant message with tool_calls (reconstruct from stored JSON)
-      try {
-        const calls: Array<{ id?: string }> = JSON.parse(m.content);
-        const ids = calls.map((c) => c.id).filter(Boolean) as string[];
-        for (const id of ids) pendingIds.add(id);
-        openaiMessages.push({
-          role: "assistant",
-          content: null,
-          tool_calls: calls,
-          ...(m.reasoning_content || state.isReasoningModel ? { reasoning_content: m.reasoning_content || "" } : {}),
-        });
-      } catch {
-        openaiMessages.push({ role: "assistant", content: m.content, ...(m.reasoning_content || state.isReasoningModel ? { reasoning_content: m.reasoning_content || "" } : {}) });
-      }
-    } else {
-      openaiMessages.push(m);
-    }
-  }
-  // Auto-complete any tool_call_ids still waiting for a response.
-  // This ensures the message sequence is always valid for the API.
-  for (const id of pendingIds) {
-    openaiMessages.push({ role: "tool", content: "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_get_dom, browser_select, or any other browser_* tool) on your next turn to get the actual result.", tool_call_id: id });
-  }
+  const openaiMessages = buildOpenAiMessages(state, context);
 
   const { text, toolCalls, reasoningContent } = await chatDeepSeekTool(openaiMessages, TOOLS, { model: modelOpts?.model, apiKey });
   if (reasoningContent != null) state.isReasoningModel = true;
@@ -1637,9 +1787,10 @@ export async function agentLoop(
       // Check if this is a filesystem tool the server can execute directly.
       const fsResult = await runFsTool(fnName, params, projectRoot);
       if (fsResult !== null) {
+        const storedResult = getStoredToolResult(fnName, fsResult);
         state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc2(reasoningContent) });
-        state.messages.push({ role: "tool", content: fsResult, tool_call_id: tc.id });
-        executedTools.push({ name: fnName, result: fsResult.slice(0, 1000) });
+        state.messages.push({ role: "tool", content: storedResult, tool_call_id: tc.id });
+        executedTools.push({ name: fnName, result: storedResult.slice(0, 1000) });
         continue;
       }
 
@@ -1647,8 +1798,8 @@ export async function agentLoop(
       if (fnName === "read_problems") {
         state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc2(reasoningContent) });
         const diagResult = await runReadProblems(projectRoot);
-        state.messages.push({ role: "tool", content: diagResult, tool_call_id: tc.id });
-        executedTools.push({ name: fnName, result: diagResult.slice(0, 1000) });
+        state.messages.push({ role: "tool", content: diagResult.summary, tool_call_id: tc.id });
+        executedTools.push({ name: fnName, result: diagResult.summary.slice(0, 1000) });
         continue;
       }
 
@@ -1709,43 +1860,7 @@ export async function* agentLoopStream(
 
   // Dynamic instruction retrieval — rebuilt each iteration as conversation evolves
   const buildMessages = () => {
-    const msgs: Array<{ role: string; content: string | null; tool_call_id?: string; tool_calls?: any[]; reasoning_content?: string }> = [];
-    msgs.push({ role: "system", content: buildSystemPrompt(state.messages, context) });
-    const pendingIds = new Set<string>(); // track all tool_call_ids waiting for a response
-    for (const m of state.messages) {
-      if (m.role === "tool") {
-        const tid = m.tool_call_id;
-        if (tid && pendingIds.has(tid)) {
-          pendingIds.delete(tid);
-          msgs.push({ role: "tool", content: m.content, tool_call_id: tid });
-        }
-        // else: orphaned tool message — skip
-      } else if (m.role === "assistant" && m.name) {
-        // Flush any pending tool_call_ids before pushing a new assistant with tool_calls.
-        // This maintains valid API ordering: assistant(tool_calls) → tool(response).
-        for (const id of pendingIds) {
-          msgs.push({ role: "tool", content: "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_get_dom, browser_select, or any other browser_* tool) on your next turn to get the actual result.", tool_call_id: id });
-        }
-        pendingIds.clear();
-
-        try {
-          const calls: Array<{ id?: string }> = JSON.parse(m.content);
-          const ids = calls.map((c) => c.id).filter(Boolean) as string[];
-          for (const id of ids) pendingIds.add(id);
-          msgs.push({ role: "assistant", content: null, tool_calls: calls, ...(m.reasoning_content || state.isReasoningModel ? { reasoning_content: m.reasoning_content || "" } : {}) });
-        } catch {
-          msgs.push({ role: "assistant", content: m.content, ...(m.reasoning_content || state.isReasoningModel ? { reasoning_content: m.reasoning_content || "" } : {}) });
-        }
-      } else {
-        msgs.push(m);
-      }
-    }
-    // Auto-complete any tool_call_ids still waiting for a response.
-    // This ensures the message sequence is always valid for the API.
-    for (const id of pendingIds) {
-      msgs.push({ role: "tool", content: "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_get_dom, browser_select, or any other browser_* tool) on your next turn to get the actual result.", tool_call_id: id });
-    }
-    return msgs;
+    return buildOpenAiMessages(state, context);
   };
 
   // Track whether we've already warned about history length
@@ -1769,8 +1884,7 @@ export async function* agentLoopStream(
 
     // ── Heuristic warnings ──
     // Estimate token count: ~4 chars per token for English text.
-    const totalChars = state.messages.reduce((sum, m) => sum + (m.content?.length || 0) + (m.tool_call_id?.length || 0) + (m.name?.length || 0), 0);
-    const estTokens = Math.round(totalChars / 4);
+    const estTokens = estimateStateTokens(state);
     finalEstTokens = estTokens;
 
     // Warn when approaching the iteration limit.
@@ -1836,16 +1950,17 @@ export async function* agentLoopStream(
         yield { type: "tool_start", toolName: fnName, toolParams: params };
         // Then run the command (client sees "Wait a moment..." while this runs)
         const fsResult = await runFsTool(fnName, params, projectRoot);
+        const storedResult = getStoredToolResult(fnName, fsResult || "");
         state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
-        state.messages.push({ role: "tool", content: fsResult || "", tool_call_id: tc.id });
+        state.messages.push({ role: "tool", content: storedResult, tool_call_id: tc.id });
         yield {
           type: "tool_end",
           toolName: fnName,
-          toolResult: "Command completed",
+          toolResult: storedResult,
           toolSandbox: fsResult || "",
-          executedTools: [{ name: fnName, result: (fsResult || "").slice(0, 500) }],
+          executedTools: [{ name: fnName, result: storedResult.slice(0, 500) }],
         };
-        executedTools.push({ name: fnName, result: (fsResult || "").slice(0, 1000) });
+        executedTools.push({ name: fnName, result: storedResult.slice(0, 1000) });
         continue;
       }
 
@@ -1954,15 +2069,15 @@ export async function* agentLoopStream(
         yield { type: "tool_start", toolName: fnName, toolParams: params };
         const diagResult = await runReadProblems(projectRoot);
         state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
-        state.messages.push({ role: "tool", content: diagResult, tool_call_id: tc.id });
+        state.messages.push({ role: "tool", content: diagResult.summary, tool_call_id: tc.id });
         yield {
           type: "tool_end",
           toolName: fnName,
-          toolResult: diagResult.slice(0, 2000),
-          toolSandbox: diagResult,
-          executedTools: [{ name: fnName, result: diagResult.slice(0, 500) }],
+          toolResult: diagResult.summary,
+          toolSandbox: diagResult.raw,
+          executedTools: [{ name: fnName, result: diagResult.summary.slice(0, 500) }],
         };
-        executedTools.push({ name: fnName, result: diagResult.slice(0, 1000) });
+        executedTools.push({ name: fnName, result: diagResult.summary.slice(0, 1000) });
         continue;
       }
 
@@ -1984,15 +2099,16 @@ export async function* agentLoopStream(
         };
         const fsResult = await runFsTool(fnName, params, projectRoot);
         if (fsResult !== null) {
+          const storedResult = getStoredToolResult(fnName, fsResult);
           state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
-          state.messages.push({ role: "tool", content: fsResult, tool_call_id: tc.id });
+          state.messages.push({ role: "tool", content: storedResult, tool_call_id: tc.id });
           yield {
             type: "tool_end",
             toolName: fnName,
-            toolResult: fsResult.slice(0, 2000),
-            executedTools: [{ name: fnName, result: fsResult.slice(0, 500) }],
+            toolResult: storedResult.slice(0, 2000),
+            executedTools: [{ name: fnName, result: storedResult.slice(0, 500) }],
           };
-          executedTools.push({ name: fnName, result: fsResult.slice(0, 1000) });
+          executedTools.push({ name: fnName, result: storedResult.slice(0, 1000) });
         }
         continue;
       }

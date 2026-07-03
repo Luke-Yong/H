@@ -996,7 +996,7 @@ app.get("/api/git/diff", (req, res) => {
 });
 
 // ── LSP (Language Server) endpoints ──
-import { getCompletions, getFileDiagnostics } from "./lsp";
+import { getCompletions, getFileDiagnostics, getLspStatus } from "./lsp";
 
 app.post("/api/lsp/complete", (req, res) => {
   try {
@@ -1014,17 +1014,39 @@ app.post("/api/lsp/complete", (req, res) => {
 
 // Continuous diagnostics: push latest file text to the language server and
 // return any errors/warnings it reports (Monaco marker shape).
+// Also returns an `error` field when LSP is unavailable.
 app.post("/api/lsp/diagnostics", (req, res) => {
   try {
     const { rootPath, language, filePath, text } = req.body || {};
+    console.log(`[diag] request language=${language} file=${filePath}`);
     if (!rootPath || !language || !filePath) {
-      return res.json({ ok: false, markers: [] });
+      console.log(`[diag] missing params`);
+      return res.json({ ok: false, markers: [], error: "Missing required parameters (rootPath, language, filePath)" });
     }
     getFileDiagnostics(rootPath, language, filePath, text || "")
-      .then((markers) => res.json({ ok: true, markers }))
-      .catch(() => res.json({ ok: false, markers: [] }));
-  } catch {
-    res.json({ ok: false, markers: [] });
+      .then(({ markers, error }) => {
+        console.log(`[diag] response markers=${markers.length}${error ? ` error="${error}"` : ""}`);
+        res.json({ ok: true, markers, error });
+      })
+      .catch((err) => {
+        const msg = `[diag] error: ${err instanceof Error ? err.message : String(err)}`;
+        console.error(msg);
+        res.json({ ok: false, markers: [], error: msg });
+      });
+  } catch (err) {
+    const msg = `[diag] fatal: ${err instanceof Error ? err.message : String(err)}`;
+    console.error(msg);
+    res.json({ ok: false, markers: [], error: msg });
+  }
+});
+
+// ── LSP status – current error state for all languages ──
+app.get("/api/lsp/status", (_req, res) => {
+  try {
+    const status = getLspStatus();
+    res.json({ ok: true, sessions: status });
+  } catch (err) {
+    res.json({ ok: false, error: err instanceof Error ? err.message : String(err) });
   }
 });
 

@@ -87,6 +87,7 @@ export default function App() {
   const [statusBar, setStatusBar] = useState<StatusBarState>({
     cursorLine: 1, cursorColumn: 1,
     language: "plaintext", encoding: "UTF-8", fsBasePath: "", hasFsRoot: false, hasEditor: false,
+    lspError: undefined,
   });
 
   const promptName = useCallback((title: string, defaultValue: string | undefined, onOk: (value: string) => void) => {
@@ -646,6 +647,7 @@ export default function App() {
         fsBasePath={statusBar.fsBasePath}
         hasFsRoot={statusBar.hasFsRoot}
         hasEditor={statusBar.hasEditor}
+        lspError={statusBar.lspError}
         onSelectLanguage={(lang) => editorRef.current?.setLanguage(lang)}
         onGoToLine={(line) => editorRef.current?.goToLine(line)}
         onGoToBracket={() => editorRef.current?.goToBracket()}

@@ -1270,8 +1270,9 @@ export default function TerminalPane({
 
   if (!visible) return null;
 
+  const totalProblemCount = problemEntries.length;
   const categories: { key: Category; label: string }[] = [
-    { key: "problems", label: "Problems" },
+    { key: "problems", label: totalProblemCount > 0 ? `Problems ${totalProblemCount}` : "Problems" },
     { key: "output", label: "Output" },
     { key: "debugConsole", label: "Debug Console" },
     { key: "browserConsole", label: "Browser Console" },

@@ -47,6 +47,7 @@ interface Props {
   fsBasePath: string;
   hasFsRoot: boolean;
   hasEditor: boolean;
+  lspError?: string;
   onSelectLanguage: (lang: string) => void;
   onGoToLine?: (line: number) => void;
   onGoToBracket?: () => void;
@@ -506,7 +507,7 @@ function ResourceMonitor() {
 }
 
 export default function StatusBar({
-  cursorLine, cursorColumn, language, encoding, fsBasePath, hasFsRoot, hasEditor,
+  cursorLine, cursorColumn, language, encoding, fsBasePath, hasFsRoot, hasEditor, lspError,
   onSelectLanguage, onGoToLine, onGoToBracket, onIndentChange, onLineEndingChange, onEncodingChange,
 }: Props) {
   const [langOpen, setLangOpen] = useState(false);
@@ -553,6 +554,11 @@ export default function StatusBar({
               <path d="M5 6.5V9.5M6.5 8H9.5" stroke="currentColor" strokeWidth="1.2"/>
             </svg>
             main
+          </span>
+        )}
+        {lspError && (
+          <span className="status-item" title={lspError} style={{ color: "#e2b714", cursor: "help" }}>
+            ⚠ LSP: {lspError.length > 40 ? lspError.slice(0, 40) + "..." : lspError}
           </span>
         )}
       </div>

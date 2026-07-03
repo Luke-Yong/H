@@ -2735,6 +2735,14 @@ details[open] .agent-code-collapse-summary::before { transform: rotate(90deg); }
 }
 .error-glyph { background: #f85149; width: 4px !important; margin-left: 5px; border-radius: 0; }
 .warning-glyph { background: #d29922; width: 4px !important; margin-left: 5px; border-radius: 0; }
+.editor-problem-range-error {
+  background: rgba(248, 81, 73, 0.14);
+  border-bottom: 2px solid rgba(248, 81, 73, 0.9);
+}
+.editor-problem-range-warning {
+  background: rgba(210, 153, 34, 0.14);
+  border-bottom: 2px solid rgba(210, 153, 34, 0.9);
+}
 
 /* Ensure Monaco glyph margin is wide enough */
 .monaco-editor .glyph-margin { width: 18px !important; }

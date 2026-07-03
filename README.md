@@ -377,9 +377,9 @@ The agent works with a fixed tool registry. To prevent it from inventing tools t
 - **Checking diagnostics** → use `read_problems` (not `tsc`, `eslint`, or `pylint` directly — those go through `run_command`)
 - **Starting servers** → use `run_in_terminal` only (never `run_command` for `python app.py`, `npm start`, etc.)
 
-## Token Optimization (ITR + Context Caching)
+## Token Optimization (ITR + Context Caching + Live Compaction)
 
-Harness uses two techniques to reduce token usage and API costs when talking to DeepSeek:
+Harness uses four layers to reduce token usage and API costs when talking to DeepSeek:
 
 ### 1. Instruction-Tool Retrieval (ITR)
 
@@ -410,27 +410,70 @@ Harness leverages this in two ways:
 
 No extra API parameters are needed — DeepSeek handles prefix caching transparently on the server side.
 
+### 3. Rolling History Compaction
+
+Long-running agent sessions now compact older plain-text turns on the server before building the next model request.
+
+- Only older **plain chat turns** are compacted: `user` messages and non-tool `assistant` replies.
+- The most recent plain turns stay verbatim so the model still sees the latest local context.
+- Older plain turns are merged into a bounded **history summary** stored in the in-memory agent session.
+- Tool-call ordering is preserved: assistant tool calls, tool results, pending permission state, and deferred file-accept/reject state are kept as structured messages.
+
+This means the live prompt no longer grows linearly with every user/assistant exchange in long sessions.
+
+Current defaults in `server/agent.ts`:
+
+| Setting | Value | Effect |
+|---|---|---|
+| `HISTORY_COMPACTION_TRIGGER_MESSAGES` | `24` | Start compacting when the in-memory session grows beyond this many messages |
+| `HISTORY_COMPACTION_TRIGGER_TOKENS` | `10000` | Also compact when the rough token estimate crosses this threshold |
+| `HISTORY_PLAIN_MESSAGES_TO_KEEP` | `6` | Keep the latest plain turns verbatim |
+| `HISTORY_SUMMARY_CHAR_BUDGET` | `2400` | Bound the rolling summary size |
+
+### 4. Tool Result Distillation
+
+Some tool outputs are much larger than what the model usually needs on the next turn.
+
+Harness now distills bulky command/build output before storing it back into the agent transcript:
+
+- `run_command` stores a compact summary instead of the full raw output
+- `read_problems` stores a compact build-check summary instead of the full compiler/linter dump
+- The summary keeps the most important lines (errors, warnings, failures, URLs, success markers)
+- The **full raw command output is still cached** in the command-output store and can be re-read later with `read_command_output`
+
+This cuts repeated replay of large terminal/compiler logs while keeping the raw output available on demand.
+
 ### Architecture
 
 ```
                 ┌─────────────────────────────┐
-                │    buildSystemPrompt()       │
-                │  scans messages + context    │
-                │  selects relevant chunks     │
+                │    buildSystemPrompt()      │
+                │  scans messages + context   │
+                │  selects relevant chunks    │
                 └──────────────┬──────────────┘
                                │
                     ┌──────────▼──────────┐
-                    │   Mini system prompt │
-                    │   (only ~3-5 chunks)  │
+                    │ Rolling compaction   │
+                    │ + history summary    │
                     └──────────┬──────────┘
                                │
                     ┌──────────▼──────────┐
-                    │  deepseekFetch()     │
-                    │  + cacheContextId    │
-                    │  → DeepSeek API     │
+                    │ Tool result          │
+                    │ distillation         │
+                    └──────────┬──────────┘
+                               │
+                    ┌──────────▼──────────┐
+                    │ Mini system prompt   │
+                    │ + compact transcript │
+                    └──────────┬──────────┘
+                               │
+                    ┌──────────▼──────────┐
+                    │ deepseekFetch()      │
+                    │ + cacheContextId     │
+                    │ → DeepSeek API       │
                     └─────────────────────┘
 ```
 
 Files:
-- `server/agent.ts` — `buildSystemPrompt()`, `PROMPT_CHUNKS[]`, chunk definitions
+- `server/agent.ts` — `buildSystemPrompt()`, rolling history compaction, tool-result distillation, prompt assembly
 - `server/deepseek.ts` — `deepseekFetch()` with `cacheContextId` parameter, cache metrics logging

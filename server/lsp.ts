@@ -1,5 +1,6 @@
 import { spawn, spawnSync, ChildProcess } from "child_process";
 import path from "path";
+import { pathToFileURL } from "url";
 
 interface LspRequest {
   id: number;
@@ -31,6 +32,15 @@ interface LspSession {
 
 const sessions = new Map<string, LspSession>();
 
+// Commands that failed to start / initialise — never retried (per process lifetime).
+const failedCommands = new Set<string>();
+
+// sessionKey → last error message for diagnostics & status reporting.
+const sessionErrors = new Map<string, string>();
+
+// language → last error message (for languages that never got a session).
+const languageErrors = new Map<string, string>();
+
 // uri → latest published diagnostics (already in Monaco shape)
 const diagnosticsByUri = new Map<string, MonacoMarker[]>();
 
@@ -60,49 +70,70 @@ function makeKey(rootPath: string, language: string): string {
   return `${rootPath.replace(/\\/g, "/")}::${language}`;
 }
 
-// language id → { bin: executable to detect on PATH, cmd/args: how to launch over stdio }.
-// Covers the common VS Code language servers. Aliases share the same entry.
-// Entries are only used if `bin` is actually installed (see commandExists) —
-// otherwise diagnostics are skipped silently with no failing process spawn.
+function toFileUri(p: string, isDir: boolean): string {
+  const abs = path.resolve(p);
+  const finalPath = isDir ? (abs.endsWith(path.sep) ? abs : abs + path.sep) : abs;
+  return pathToFileURL(finalPath).toString();
+}
+
+// Normalize a file:// URI for consistent map key lookups.
+// Different LSP servers encode drive letters differently (e.g. pyright uses
+// d%3A while Node's pathToFileURL uses D:), so we decode and lowercase.
+function normalizeUri(uri: string): string {
+  try {
+    return decodeURIComponent(uri).toLowerCase();
+  } catch {
+    return uri.toLowerCase();
+  }
+}
+
+// language id → ordered list of LSP servers to try (first installed one wins).
+// Each server is only used if its `bin` is found on PATH (see commandExists).
+// Order matters: put servers with tolerant parsers (multi-error) first.
 interface ServerSpec { bin: string; cmd: string; args: string[]; }
 
-const SERVER_SPECS: Record<string, ServerSpec> = (() => {
+const SERVER_SPECS: Record<string, ServerSpec[]> = (() => {
   const s = (bin: string, args: string[] = [], cmd?: string): ServerSpec => ({ bin, cmd: cmd || bin, args });
-  const tsServer = s("typescript-language-server", ["--stdio"]);
-  const cssServer = s("vscode-css-language-server", ["--stdio"]);
+  const tsServer: ServerSpec[] = [s("typescript-language-server", ["--stdio"])];
+  const cssServer: ServerSpec[] = [s("vscode-css-language-server", ["--stdio"])];
   return {
-    python: s("pylsp", ["--check-parent-process"]),
+    // pyright has a fault-tolerant parser → reports ALL errors (not just the first).
+    // Fall back to pylsp if pyright isn't installed.
+    python: [
+      s("pyright-langserver", ["--stdio"]),
+      s("pylsp", ["--check-parent-process"]),
+    ],
     typescript: tsServer, javascript: tsServer,
     typescriptreact: tsServer, javascriptreact: tsServer,
-    go: s("gopls"),
-    rust: s("rust-analyzer"),
-    c: s("clangd"), cpp: s("clangd"), "objective-c": s("clangd"),
-    java: s("jdtls"),
-    swift: s("sourcekit-lsp"),
-    ruby: s("solargraph", ["stdio"]),
-    php: s("intelephense", ["--stdio"]),
-    markdown: s("marksman", ["server"]),
-    sql: s("sqls"),
-    json: s("vscode-json-languageserver", ["--stdio"]), jsonc: s("vscode-json-languageserver", ["--stdio"]),
-    html: s("vscode-html-language-server", ["--stdio"]),
+    go: [s("gopls")],
+    rust: [s("rust-analyzer")],
+    c: [s("clangd")], cpp: [s("clangd")], "objective-c": [s("clangd")],
+    java: [s("jdtls")],
+    swift: [s("sourcekit-lsp")],
+    ruby: [s("solargraph", ["stdio"])],
+    php: [s("intelephense", ["--stdio"])],
+    markdown: [s("marksman", ["server"])],
+    sql: [s("sqls")],
+    json: [s("vscode-json-languageserver", ["--stdio"])], jsonc: [s("vscode-json-languageserver", ["--stdio"])],
+    html: [s("vscode-html-language-server", ["--stdio"])],
     css: cssServer, scss: cssServer, less: cssServer,
-    yaml: s("yaml-language-server", ["--stdio"]),
-    shell: s("bash-language-server", ["start"]), shellscript: s("bash-language-server", ["start"]),
-    lua: s("lua-language-server"),
-    dockerfile: s("docker-langserver", ["--stdio"]),
-    vue: s("vue-language-server", ["--stdio"]),
-    svelte: s("svelteserver", ["--stdio"]),
-    dart: s("dart", ["language-server"]),
-    kotlin: s("kotlin-language-server"),
-    csharp: s("omnisharp", ["-lsp"]),
-    elixir: s("elixir-ls"),
-    haskell: s("haskell-language-server-wrapper", ["--lsp"]),
-    terraform: s("terraform-ls", ["serve"]),
-    clojure: s("clojure-lsp"),
-    ocaml: s("ocamllsp"),
-    zig: s("zls"),
-    scala: s("metals"),
-    toml: s("taplo", ["lsp", "stdio"]),
+    yaml: [s("yaml-language-server", ["--stdio"])],
+    shell: [s("bash-language-server", ["start"])], shellscript: [s("bash-language-server", ["start"])],
+    lua: [s("lua-language-server")],
+    dockerfile: [s("docker-langserver", ["--stdio"])],
+    vue: [s("vue-language-server", ["--stdio"])],
+    svelte: [s("svelteserver", ["--stdio"])],
+    dart: [s("dart", ["language-server"])],
+    kotlin: [s("kotlin-language-server")],
+    csharp: [s("omnisharp", ["-lsp"])],
+    elixir: [s("elixir-ls")],
+    haskell: [s("haskell-language-server-wrapper", ["--lsp"])],
+    terraform: [s("terraform-ls", ["serve"])],
+    clojure: [s("clojure-lsp")],
+    ocaml: [s("ocamllsp")],
+    zig: [s("zls")],
+    scala: [s("metals")],
+    toml: [s("taplo", ["lsp", "stdio"])],
   };
 })();
 
@@ -121,19 +152,25 @@ function commandExists(bin: string): boolean {
 }
 
 function getLspCmd(language: string, _rootPath: string): { cmd: string; args: string[] } | null {
-  const spec = SERVER_SPECS[language];
-  if (!spec) return null;
-  // Graceful skip: don't spawn a server that isn't installed.
-  if (!commandExists(spec.bin)) return null;
-  return { cmd: spec.cmd, args: spec.args };
+  const specs = SERVER_SPECS[language];
+  if (!specs) return null;
+  // Return the first server whose binary is found on PATH.
+  for (const spec of specs) {
+    if (commandExists(spec.bin)) return { cmd: spec.cmd, args: spec.args };
+  }
+  return null;
 }
 
 export function startLsp(rootPath: string, language: string): string | null {
-  const key = makeKey(rootPath, language);
-  if (sessions.has(key)) return key;
-
   const cmdInfo = getLspCmd(language, rootPath);
   if (!cmdInfo) return null;
+  return startLspWithSpec(rootPath, language, { bin: cmdInfo.cmd, cmd: cmdInfo.cmd, args: cmdInfo.args });
+}
+
+function startLspWithSpec(rootPath: string, language: string, spec: ServerSpec): string | null {
+  const cmdInfo = spec;
+  const key = makeKey(rootPath, language) + "|" + cmdInfo.cmd;
+  if (sessions.has(key)) return key;
 
   const proc = spawn(cmdInfo.cmd, cmdInfo.args, {
     cwd: rootPath,
@@ -148,7 +185,7 @@ export function startLsp(rootPath: string, language: string): string | null {
     pending: new Map(),
     nextId: 1,
     language,
-    rootUri: `file:///${rootPath.replace(/\\/g, "/")}`,
+    rootUri: toFileUri(rootPath, true),
     initialized: false,
     queue: [],
     openedUris: new Set(),
@@ -178,7 +215,10 @@ export function startLsp(rootPath: string, language: string): string | null {
             session.buffer = lines.slice(end + 1).join("\n");
             handleMessage(session, msg);
             continue;
-          } catch { /* incomplete */ break; }
+          } catch (e) {
+            console.error(`[LSP:${session.language}:${spec.cmd}] bare JSON parse error: ${(e as Error).message}`);
+            break;
+          }
         }
         break;
       }
@@ -191,17 +231,24 @@ export function startLsp(rootPath: string, language: string): string | null {
       try {
         const msg = JSON.parse(body) as LspResponse;
         handleMessage(session, msg);
-      } catch { /* malformed */ }
+      } catch (e) {
+        console.error(`[LSP:${session.language}:${spec.cmd}] Content-Length message parse error: ${(e as Error).message}`);
+      }
     }
   });
 
-  proc.stderr!.on("data", (d) => { /* LSP stderr — ignore */ });
+  proc.stderr!.on("data", (d) => {
+    console.error(`[LSP:${language}:${cmdInfo.cmd}] ${String(d)}`);
+  });
   proc.on("close", (code) => {
     sessions.delete(key);
-    console.log(`LSP ${language} exited with code ${code}`);
+    sessionErrors.set(key, `LSP "${spec.cmd}" exited with code ${code}`);
+    console.log(`LSP ${language} (${spec.cmd}) exited with code ${code}`);
   });
-  proc.on("error", () => {
+  proc.on("error", (err) => {
     sessions.delete(key);
+    sessionErrors.set(key, `LSP "${spec.cmd}" spawn error: ${err.message}`);
+    console.error(`LSP ${language} (${spec.cmd}) spawn error: ${err.message}`);
   });
 
   sessions.set(key, session);
@@ -210,28 +257,50 @@ export function startLsp(rootPath: string, language: string): string | null {
   sendRequest(session, "initialize", {
     processId: process.pid,
     rootUri: session.rootUri,
+    workspaceFolders: [{ uri: session.rootUri, name: path.basename(rootPath) }],
     capabilities: {
       textDocument: {
         completion: { completionItem: { snippetSupport: false } },
         publishDiagnostics: { relatedInformation: true },
         hover: { contentFormat: ["plaintext", "markdown"] },
       },
+      workspace: {
+        workspaceFolders: true,
+        didChangeConfiguration: { dynamicRegistration: true },
+      },
     },
   }).then(() => {
     sendNotification(session, "initialized", {});
-    // Push per-language configuration to tame noisy linters (fewer false positives).
-    const settings = INIT_SETTINGS[language];
-    if (settings) {
-      sendNotification(session, "workspace/didChangeConfiguration", { settings });
+    // Send per-language settings to the language server.
+    if (cmdInfo.cmd === "pylsp") {
+      const settings = INIT_SETTINGS_PYLSP[language];
+      if (settings) {
+        sendNotification(session, "workspace/didChangeConfiguration", { settings });
+      }
+    } else if (cmdInfo.cmd === "pyright-langserver") {
+      sendNotification(session, "workspace/didChangeConfiguration", {
+        settings: {
+          python: {
+            analysis: {
+              typeCheckingMode: "basic",
+              diagnosticMode: "openFilesOnly",
+              autoSearchPaths: true,
+              useLibraryCodeForTypes: true,
+            },
+          },
+        },
+      });
     }
     session.initialized = true;
-  }).catch(() => { /* */ });
+  }).catch((err) => {
+    console.error(`LSP ${language} (${cmdInfo.cmd}) init failed: ${err instanceof Error ? err.message : String(err)}`);
+  });
 
   return key;
 }
 
 // Per-language LSP settings to reduce false-positive noise.
-const INIT_SETTINGS: Record<string, any> = {
+const INIT_SETTINGS_PYLSP: Record<string, any> = {
   python: {
     pylsp: {
       plugins: {
@@ -259,8 +328,12 @@ function handleMessage(session: LspSession, msg: LspResponse) {
   }
   // Capture diagnostics pushed by the server
   if (msg.method === "textDocument/publishDiagnostics" && msg.params?.uri) {
-    const uri: string = msg.params.uri;
+    const uri = normalizeUri(msg.params.uri as string);
     const diags: any[] = msg.params.diagnostics || [];
+    console.log(`[diag] publishDiagnostics from=${session.language} uri=${msg.params.uri} count=${diags.length}`);
+    if (diags.length > 0) {
+      console.log(`[diag]   first: ${diags[0].message} (line ${(diags[0].range?.start?.line ?? 0) + 1})`);
+    }
     diagnosticsByUri.set(uri, diags.map((d) => ({
       message: d.message,
       severity: mapSeverity(d.severity),
@@ -307,7 +380,7 @@ export async function getCompletions(
   if (!session || !session.initialized) return [];
 
   try {
-    const uri = `file:///${filePath.replace(/\\/g, "/")}`;
+    const uri = toFileUri(filePath, false);
 
     // Open document first
     await sendRequest(session, "textDocument/didOpen", {
@@ -348,43 +421,141 @@ function delay(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+export interface FileDiagnosticsResult {
+  markers: MonacoMarker[];
+  error?: string;
+}
+
 // Send the latest file text to the language server and return its diagnostics.
 // Used for continuous (debounced) error/warning checking while editing.
+// Iterates through SERVER_SPECS in priority order; if the first server fails
+// to initialise, it automatically falls back to the next one.
+// Returns an `error` field when LSP is unavailable so the client can show feedback.
 export async function getFileDiagnostics(
   rootPath: string, language: string, filePath: string, text: string
-): Promise<MonacoMarker[]> {
-  const key = startLsp(rootPath, language);
-  if (!key) return [];
-  const session = sessions.get(key);
-  if (!session) return [];
-
-  // Wait (best effort) for the server to finish initializing.
-  for (let i = 0; i < 20 && !session.initialized; i++) await delay(100);
-  if (!session.initialized) return [];
-
-  const uri = `file:///${filePath.replace(/\\/g, "/")}`;
-  // Clear the cache so we can detect a *fresh* publish for this exact text.
-  diagnosticsByUri.delete(uri);
-  if (!session.openedUris.has(uri)) {
-    session.openedUris.add(uri);
-    session.docVersions.set(uri, 1);
-    sendNotification(session, "textDocument/didOpen", {
-      textDocument: { uri, languageId: language, version: 1, text },
-    });
-  } else {
-    const v = (session.docVersions.get(uri) || 1) + 1;
-    session.docVersions.set(uri, v);
-    sendNotification(session, "textDocument/didChange", {
-      textDocument: { uri, version: v },
-      contentChanges: [{ text }],
-    });
+): Promise<FileDiagnosticsResult> {
+  const specs = SERVER_SPECS[language];
+  if (!specs) {
+    const err = `No LSP server configured for language "${language}"`;
+    console.log(`[diag] ${err}`);
+    return { markers: [], error: err };
   }
 
-  // Poll for the server to publish diagnostics (cold starts can be slow).
-  // Returns as soon as a publish lands (even an empty list = clean file).
-  for (let i = 0; i < 15; i++) {
-    await delay(200);
-    if (diagnosticsByUri.has(uri)) return diagnosticsByUri.get(uri)!;
+  let anyInstalled = false;
+  let lastError: string | undefined;
+
+  for (const spec of specs) {
+    const exists = commandExists(spec.bin);
+    if (exists) anyInstalled = true;
+    const failed = failedCommands.has(spec.cmd);
+    console.log(`[diag] try ${spec.cmd} exists=${exists} failed=${failed}`);
+    if (!exists || failed) {
+      if (!exists) lastError = `LSP binary "${spec.bin}" not found on PATH`;
+      else lastError = `LSP "${spec.cmd}" previously failed to initialise`;
+      languageErrors.set(language, lastError);
+      continue;
+    }
+
+    const key = startLspWithSpec(rootPath, language, spec);
+    console.log(`[diag] startLsp key=${key}`);
+    if (!key) {
+      lastError = `Failed to start LSP "${spec.cmd}"`;
+      languageErrors.set(language, lastError);
+      continue;
+    }
+    // Check for a previously recorded session error (crash, etc.)
+    if (sessionErrors.has(key)) {
+      lastError = sessionErrors.get(key);
+    }
+    const session = sessions.get(key);
+    if (!session) {
+      lastError = `LSP session for "${spec.cmd}" disappeared`;
+      languageErrors.set(language, lastError!);
+      console.log(`[diag] session null for ${spec.cmd}`);
+      continue;
+    }
+
+    // Wait (best effort) for the server to finish initializing.
+    for (let i = 0; i < 50 && !session.initialized; i++) await delay(100);
+    if (!session.initialized) {
+      // Server never initialised — kill it, remember the failure, try next.
+      const errMsg = `LSP "${spec.cmd}" init timeout`;
+      console.error(errMsg);
+      failedCommands.add(spec.cmd);
+      sessionErrors.set(key, errMsg);
+      languageErrors.set(language, errMsg);
+      try { session.proc.kill(); } catch {}
+      sessions.delete(key);
+      lastError = errMsg;
+      continue;
+    }
+    console.log(`[diag] ${spec.cmd} ready`);
+    // Pyright needs a moment to process workspace/didChangeConfiguration
+    // before it will publish diagnostics for didOpen.
+    if (spec.cmd === "pyright-langserver") await delay(500);
+
+    const uri = toFileUri(filePath, false);
+    const normUri = normalizeUri(uri);
+    diagnosticsByUri.delete(normUri);
+    if (!session.openedUris.has(uri)) {
+      session.openedUris.add(uri);
+      session.docVersions.set(uri, 1);
+      sendNotification(session, "textDocument/didOpen", {
+        textDocument: { uri, languageId: language, version: 1, text },
+      });
+    } else {
+      const v = (session.docVersions.get(uri) || 1) + 1;
+      session.docVersions.set(uri, v);
+      sendNotification(session, "textDocument/didChange", {
+        textDocument: { uri, version: v },
+        contentChanges: [{ text }],
+      });
+    }
+
+    // Phase 1 – wait for publish (up to 5 s).
+    const PHASE1_MS = 5000;
+    const tick = 200;
+    for (let elapsed = 0; elapsed < PHASE1_MS; elapsed += tick) {
+      await delay(tick);
+      if (diagnosticsByUri.has(normUri)) break;
+    }
+
+    // Phase 2 – buffer window for late-arriving diagnostics.
+    const PHASE2_MS = 800;
+    for (let elapsed = 0; elapsed < PHASE2_MS; elapsed += tick) {
+      await delay(tick);
+    }
+
+    const markers = diagnosticsByUri.get(normUri);
+    // Clear the language-level error on a successful diagnostics fetch.
+    languageErrors.delete(language);
+    return { markers: markers || [] };
   }
-  return diagnosticsByUri.get(uri) || [];
+
+  if (!anyInstalled) {
+    const bins = specs.map(s => `"${s.bin}"`).join(", ");
+    const err = `No LSP binary installed for "${language}". Install one of: ${bins}`;
+    languageErrors.set(language, err);
+    return { markers: [], error: err };
+  }
+
+  languageErrors.set(language, lastError || `All LSP servers for "${language}" failed`);
+  return { markers: [], error: lastError || `All LSP servers for "${language}" failed` };
+}
+
+// Return current LSP error state for status reporting.
+export function getLspStatus(): Record<string, { language: string; error?: string }> {
+  const result: Record<string, { language: string; error?: string }> = {};
+  // Active session errors
+  for (const [key, error] of sessionErrors) {
+    const parts = key.split("|");
+    result[key] = { language: parts[0] || "", error };
+  }
+  // Language-level errors (no binary, no spec, etc.)
+  for (const [lang, error] of languageErrors) {
+    if (!Object.values(result).some(r => r.language === lang && r.error === error)) {
+      result[`lang:${lang}`] = { language: lang, error };
+    }
+  }
+  return result;
 }

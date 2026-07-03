@@ -146,6 +146,8 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const actionClickLockRef = useRef(0);
   const permissionResolveRef = useRef<((granted: boolean) => void) | null>(null);
+  const pendingPermissionMsgIdRef = useRef<string | null>(null);
+  const queuedPermissionDecisionRef = useRef<boolean | null>(null);
   const agentDoneRef = useRef(false);
   // Agent completion footer state
   const [agentStatus, setAgentStatus] = useState<"idle" | "completed" | "stopped">("idle");
@@ -335,6 +337,20 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
     }
     return p;
   }, [getFsBasePath]);
+
+  const handlePermissionResponse = useCallback((msgId: string, granted: boolean) => {
+    const activeMsgId = pendingPermissionMsgIdRef.current;
+    if (activeMsgId && activeMsgId !== msgId) return;
+    queuedPermissionDecisionRef.current = granted;
+    const resolve = permissionResolveRef.current;
+    if (resolve) {
+      permissionResolveRef.current = null;
+      pendingPermissionMsgIdRef.current = null;
+      const decision = queuedPermissionDecisionRef.current ?? granted;
+      queuedPermissionDecisionRef.current = null;
+      resolve(decision);
+    }
+  }, []);
 
   const handleBannerFileAction = useCallback((fcPath: string, accepted: boolean) => {
     const norm = (s: string) => s.replace(/\\/g, "/");
@@ -1283,11 +1299,20 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
     // If permission is needed, wait for user response then continue
     if (isPermission) {
       if (signal.aborted) { setLoading(false); return; }
-      const granted = await new Promise<boolean>((resolve) => {
-        permissionResolveRef.current = resolve;
-      });
-      permissionResolveRef.current = null;
       const permMsgId = agentTermMsgIdRef.current || toolIds[toolIds.length - 1];
+      pendingPermissionMsgIdRef.current = permMsgId || null;
+      const queuedDecision = queuedPermissionDecisionRef.current;
+      const granted = queuedDecision != null
+        ? queuedDecision
+        : await new Promise<boolean>((resolve) => {
+            permissionResolveRef.current = (decision: boolean) => {
+              pendingPermissionMsgIdRef.current = null;
+              resolve(decision);
+            };
+          });
+      queuedPermissionDecisionRef.current = null;
+      permissionResolveRef.current = null;
+      pendingPermissionMsgIdRef.current = null;
       const permTool = permMsgId ? streamToolRef.current.get(permMsgId) : undefined;
 
       if (!granted && permMsgId) {
@@ -1580,6 +1605,8 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
     }
     return result;
   }, [messages]);
+
+  const hasPendingFileActions = unconfirmedFileChanges.length > 0;
 
   const acceptAllChanges = useCallback(() => {
     setMessages((prev) => {
@@ -2010,8 +2037,8 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
                 <i className="codicon codicon-warning" />
                 <span>{msg.permissionPrompt}</span>
                 <div className="agent-perms-actions">
-                  <button className="agent-btn agent-btn-accept" onClick={() => permissionResolveRef.current?.(true)}>Allow</button>
-                  <button className="agent-btn agent-btn-reject" onClick={() => permissionResolveRef.current?.(false)}>Deny</button>
+                  <button className="agent-btn agent-btn-accept" onClick={(e) => { e.stopPropagation(); handlePermissionResponse(msg.id, true); }}>Allow</button>
+                  <button className="agent-btn agent-btn-reject" onClick={(e) => { e.stopPropagation(); handlePermissionResponse(msg.id, false); }}>Deny</button>
                 </div>
               </div>
             )}
@@ -2172,8 +2199,8 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
                         <i className="codicon codicon-warning" />
                         <span>{msg.permissionPrompt}</span>
                         <div className="agent-perms-actions">
-                          <button className="agent-btn agent-btn-accept" onClick={() => permissionResolveRef.current?.(true)}>Allow</button>
-                          <button className="agent-btn agent-btn-reject" onClick={() => permissionResolveRef.current?.(false)}>Deny</button>
+                          <button className="agent-btn agent-btn-accept" onClick={(e) => { e.stopPropagation(); handlePermissionResponse(msg.id, true); }}>Allow</button>
+                          <button className="agent-btn agent-btn-reject" onClick={(e) => { e.stopPropagation(); handlePermissionResponse(msg.id, false); }}>Deny</button>
                         </div>
                       </div>
                     )}
@@ -2305,7 +2332,7 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
       </div>
 
       {/* ── Pending todos / changes banner ── */}
-      {(pendingTodos.length > 0 || unconfirmedFileChanges.length > 1) && (
+      {(pendingTodos.length > 0 || hasPendingFileActions) && (
         <div className="agent-pending-banner">
           {pendingTodos.length > 0 && (
             <details className="agent-pending-todos" open={showPendingBanner} onToggle={(e) => setShowPendingBanner((e.target as HTMLDetailsElement).open)}>
@@ -2322,9 +2349,9 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
               </div>
             </details>
           )}
-          {unconfirmedFileChanges.length > 1 && (
+          {hasPendingFileActions && (
             <button className="agent-pending-accept-all" onClick={acceptAllChanges}>
-              <i className="codicon codicon-check-all" /> Accept all ({unconfirmedFileChanges.length} changes)
+              <i className="codicon codicon-check-all" /> {unconfirmedFileChanges.length === 1 ? "Accept change" : `Accept all (${unconfirmedFileChanges.length} changes)`}
             </button>
           )}
         </div>

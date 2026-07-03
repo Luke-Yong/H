@@ -56,6 +56,15 @@ export interface StatusBarState {
   fsBasePath: string;
   hasFsRoot: boolean;
   hasEditor: boolean;
+  /** Active file's LSP error message (e.g. binary not found, init timeout) */
+  lspError?: string;
+}
+
+interface PendingProblemSelection {
+  fileId?: string;
+  filePath?: string;
+  line: number;
+  column: number;
 }
 
 interface Props {
@@ -135,6 +144,7 @@ interface EditorViewHandle {
   setPosition: (position: { lineNumber: number; column: number }) => void;
   revealPositionInCenter: (position: { lineNumber: number; column: number }) => void;
   onDidChangeCursorPosition: (cb: (e: { position: { lineNumber: number; column: number } }) => void) => { dispose: () => void };
+  getModel?: () => any;
 }
 
 // Module-level: track which languages have LSP completion providers registered
@@ -148,6 +158,8 @@ const LSP_SKIP_LANGS = new Set<string>([
   "plaintext", "xml", "bat", "ini",
 ]);
 
+
+
 const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   { fsRoot, fsBasePath, terminalVenvDir, terminalActivateScript, browserTabs, activeBrowserTabId,
     onActiveBrowserTabChange, onCloseBrowser, onBrowserTabClose, onAddBrowserTab,
@@ -158,10 +170,17 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
 ) {
   const [files, setFiles] = useState<VFile[]>([]);
   const [markersByFileId, setMarkersByFileId] = useState<Record<string, MarkerSnapshot[]>>({});
+  const [markersByFsPath, setMarkersByFsPath] = useState<Record<string, { fsPath: string; markers: MarkerSnapshot[] }>>({});
   const [activeFileId, setActiveFileId] = useState<string>("");
   const activeFileIdRef = useRef(activeFileId);
+  const fsPathByFileIdRef = useRef<Record<string, string>>({});
+  const lspDiagTimeoutsRef = useRef<Record<string, number>>({});
+  const lspDiagRequestSeqRef = useRef<Record<string, number>>({});
+  const lspDiagFingerprintRef = useRef<Record<string, string>>({});
+  // Per-language LSP error messages surfaced from diagnostics responses.
+  const lspErrorsRef = useRef<Record<string, string>>({});
   const editorByFileIdRef = useRef<Record<string, EditorViewHandle | null>>({});
-  const pendingProblemSelectionRef = useRef<{ fileId: string; line: number; column: number } | null>(null);
+  const pendingProblemSelectionRef = useRef<PendingProblemSelection | null>(null);
   const { size: filePanelW, onMouseDown: onFilePanelDrag } = useResizable(200, 120, 500);
   const { size: termH, onMouseDown: onTermDrag } = useResizable(220, 80, 600, true);
   const [sidebarPanel, setSidebarPanel] = useState<string>("");
@@ -200,6 +219,72 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     welcomeClickLockRef.current = now;
     fn();
   }, []);
+
+  useEffect(() => {
+    const map: Record<string, string> = {};
+    for (const f of files) {
+      if (f._fsPath) map[f.id] = f._fsPath;
+    }
+    fsPathByFileIdRef.current = map;
+  }, [files]);
+
+  const syncProblemMarkersForFile = useCallback((fileId: string, modelOrEditor?: any) => {
+    try {
+      const monaco = (window as any).monaco;
+      const model = modelOrEditor?.getModel ? modelOrEditor.getModel() : modelOrEditor || editorByFileIdRef.current[fileId]?.getModel?.();
+      if (!monaco || !model?.uri) return;
+      const seen = new Set<string>();
+      const markers = (monaco.editor.getModelMarkers({ resource: model.uri }) as MarkerSnapshot[])
+        .filter((marker) => {
+          const code = typeof marker.code === "string" ? marker.code : marker.code?.value || "";
+          const key = [
+            marker.startLineNumber,
+            marker.startColumn,
+            marker.endLineNumber,
+            marker.endColumn,
+            marker.severity,
+            marker.source || "",
+            code,
+            marker.message,
+          ].join("|");
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+      setMarkersByFileId((prev) => ({ ...prev, [fileId]: markers }));
+      const fsPath = fsPathByFileIdRef.current[fileId];
+      if (fsPath) {
+        const key = normPath(fsPath);
+        setMarkersByFsPath((prev) => {
+          const next = { ...prev };
+          if (markers.length > 0) next[key] = { fsPath, markers };
+          else delete next[key];
+          return next;
+        });
+      }
+    } catch { /* ignore marker sync issues */ }
+  }, []);
+
+  const clearScheduledLspDiagnostics = useCallback((fileId: string) => {
+    const handle = lspDiagTimeoutsRef.current[fileId];
+    if (handle !== undefined) {
+      window.clearTimeout(handle);
+      delete lspDiagTimeoutsRef.current[fileId];
+    }
+  }, []);
+
+  const clearLspMarkersForFile = useCallback((fileId: string) => {
+    try {
+      const monaco = (window as any).monaco;
+      const model = editorByFileIdRef.current[fileId]?.getModel?.();
+      if (monaco && model) {
+        monaco.editor.setModelMarkers(model, "lsp", []);
+        syncProblemMarkersForFile(fileId, model);
+      } else {
+        setMarkersByFileId((prev) => ({ ...prev, [fileId]: [] }));
+      }
+    } catch { /* ignore marker clear issues */ }
+  }, [syncProblemMarkersForFile]);
 
   function applyDecorations(editor: any, fileId: string, diffText: string | undefined, markers: MarkerSnapshot[] | undefined) {
     try {
@@ -303,6 +388,20 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
         // Group diagnostics by line so the click-popup can show all of them.
         for (const m of markers) {
           if (m.startLineNumber > lineCount) continue;
+          const isErrorRange = (m.severity || 0) === 8;
+          const isWarningRange = (m.severity || 0) === 4;
+          if (isErrorRange || isWarningRange) {
+            const startLine = Math.max(1, Math.min(m.startLineNumber, lineCount));
+            const endLine = Math.max(startLine, Math.min(m.endLineNumber || m.startLineNumber, lineCount));
+            const startColumn = Math.max(1, m.startColumn || 1);
+            const endColumn = Math.max(startColumn + (startLine === endLine ? 0 : 0), m.endColumn || startColumn + 1);
+            newDecorations.push({
+              range: new monaco.Range(startLine, startColumn, endLine, endColumn),
+              options: {
+                inlineClassName: isErrorRange ? "editor-problem-range-error" : "editor-problem-range-warning",
+              },
+            });
+          }
           const arr = lineMarkers.get(m.startLineNumber) || [];
           arr.push(m);
           lineMarkers.set(m.startLineNumber, arr);
@@ -579,34 +678,91 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     if (editor) applyDecorations(editor, activeFileId, diffText, markers);
   }, [activeFileId, gitDiffs, markersByFileId]);
 
-  // Continuous error/warning checking via language servers, for any language
-  // Monaco doesn't validate itself. The server gracefully returns no markers
-  // when no language server is installed for that language.
+  // Continuously refresh diagnostics for every opened tab that depends on the
+  // LSP endpoint instead of Monaco's built-in validators.
   useEffect(() => {
-    const f = files.find((x) => x.id === activeFileId);
-    if (!f || !f._fsPath || !fsBasePath) return;
-    const lang = f.language;
-    if (LSP_SKIP_LANGS.has(lang)) return;
-    const handle = setTimeout(async () => {
-      try {
-        const res = await fetch("/api/lsp/diagnostics", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ rootPath: fsBasePath, language: lang, filePath: f._fsPath, text: f.content }),
-        });
-        const data = await res.json();
-        if (!data.ok) return;
-        const markers: MarkerSnapshot[] = data.markers || [];
-        setMarkersByFileId((prev) => ({ ...prev, [f.id]: markers }));
-        const monaco = (window as any).monaco;
-        const editor = editorByFileIdRef.current[f.id] as any;
-        const model = editor?.getModel?.();
-        if (monaco && model) {
-          monaco.editor.setModelMarkers(model, "lsp", markers);
+    const openIds = new Set(files.map((file) => file.id));
+    for (const id of Object.keys(lspDiagTimeoutsRef.current)) {
+      if (!openIds.has(id)) clearScheduledLspDiagnostics(id);
+    }
+    for (const id of Object.keys(lspDiagRequestSeqRef.current)) {
+      if (!openIds.has(id)) delete lspDiagRequestSeqRef.current[id];
+    }
+    for (const id of Object.keys(lspDiagFingerprintRef.current)) {
+      if (!openIds.has(id)) delete lspDiagFingerprintRef.current[id];
+    }
+
+    for (const file of files) {
+      const hasLspState = lspDiagFingerprintRef.current[file.id] !== undefined || lspDiagRequestSeqRef.current[file.id] !== undefined;
+      if (!fsBasePath || !file._fsPath || LSP_SKIP_LANGS.has(file.language)) {
+        clearScheduledLspDiagnostics(file.id);
+        if (hasLspState) {
+          delete lspDiagRequestSeqRef.current[file.id];
+          delete lspDiagFingerprintRef.current[file.id];
+          clearLspMarkersForFile(file.id);
         }
-      } catch { /* LSP server unavailable — ignore */ }
-    }, 700);
-    return () => clearTimeout(handle);
-  }, [activeFileId, files, fsBasePath]);
+        continue;
+      }
+
+      const fingerprint = [normPath(file._fsPath), file.language, file.content].join("\u0000");
+      if (lspDiagFingerprintRef.current[file.id] === fingerprint) continue;
+
+      lspDiagFingerprintRef.current[file.id] = fingerprint;
+      clearScheduledLspDiagnostics(file.id);
+      const requestSeq = (lspDiagRequestSeqRef.current[file.id] || 0) + 1;
+      lspDiagRequestSeqRef.current[file.id] = requestSeq;
+      const delay = file.id === activeFileId ? 250 : 700;
+      lspDiagTimeoutsRef.current[file.id] = window.setTimeout(async () => {
+        try {
+          const res = await fetch("/api/lsp/diagnostics", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              rootPath: fsBasePath,
+              language: file.language,
+              filePath: file._fsPath,
+              text: file.content,
+            }),
+          });
+          const data = await res.json();
+          if (!data.ok || lspDiagRequestSeqRef.current[file.id] !== requestSeq) return;
+          const markers: MarkerSnapshot[] = data.markers || [];
+          // Track LSP error state for this language.
+          if (data.error) {
+            lspErrorsRef.current[file.language] = data.error;
+          } else {
+            delete lspErrorsRef.current[file.language];
+          }
+          const monaco = (window as any).monaco;
+          const editor = editorByFileIdRef.current[file.id] as any;
+          const model = editor?.getModel?.();
+          if (monaco && model) {
+            monaco.editor.setModelMarkers(model, "lsp", markers);
+            syncProblemMarkersForFile(file.id, model);
+          } else {
+            setMarkersByFileId((prev) => ({ ...prev, [file.id]: markers }));
+          }
+        } catch {
+          // LSP server unavailable — record the error so the user knows.
+          lspErrorsRef.current[file.language] = "LSP server unreachable";
+        }
+      }, delay);
+    }
+  }, [activeFileId, clearLspMarkersForFile, clearScheduledLspDiagnostics, files, fsBasePath, syncProblemMarkersForFile]);
+
+  useEffect(() => () => {
+    for (const handle of Object.values(lspDiagTimeoutsRef.current)) {
+      window.clearTimeout(handle);
+    }
+  }, []);
+
+  // Clean up LSP error state for languages that no longer have open files.
+  useEffect(() => {
+    const openLanguages = new Set(files.map(f => f.language));
+    for (const lang of Object.keys(lspErrorsRef.current)) {
+      if (!openLanguages.has(lang)) delete lspErrorsRef.current[lang];
+    }
+  }, [files]);
 
   const handleBrowserConsoleEntry = useCallback((entryTabId: string, entry: BrowserConsoleEntry) => {
     setBrowserConsoleMap((prev) => {
@@ -704,8 +860,9 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
       fsBasePath,
       hasFsRoot,
       hasEditor,
+      lspError: lspErrorsRef.current[activeLanguage],
     });
-  }, [cursorPos.line, cursorPos.column, activeLanguage, activeEncoding, fsBasePath, hasFsRoot, hasEditor, onStatusChange]);
+  }, [cursorPos.line, cursorPos.column, activeLanguage, activeEncoding, fsBasePath, hasFsRoot, hasEditor, lspErrorsRef, onStatusChange]);
 
   const handleGoToLine = useCallback((line: number) => {
     const editor = editorByFileIdRef.current[activeFileId];
@@ -750,24 +907,54 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
       2: "info",
       1: "hint",
     };
-    return files.flatMap((file) => {
+    const openPathKeys = new Set<string>();
+    for (const file of files) {
+      if (file._fsPath) openPathKeys.add(normPath(file._fsPath));
+    }
+    const entries: ProblemEntry[] = [];
+    for (const file of files) {
       const markers = markersByFileId[file.id] || [];
-      return markers.map((marker, index) => ({
-        id: `${file.id}-${index}-${marker.startLineNumber}-${marker.startColumn}-${marker.message}`,
-        fileId: file.id,
-        fileName: file.name,
-        filePath: file._fsPath,
-        severity: severityMap[marker.severity] || "info",
-        message: marker.message,
-        line: marker.startLineNumber,
-        column: marker.startColumn,
-        endLine: marker.endLineNumber,
-        endColumn: marker.endColumn,
-        source: marker.source,
-        code: typeof marker.code === "string" ? marker.code : marker.code?.value,
-      }));
-    });
-  }, [files, markersByFileId]);
+      for (let index = 0; index < markers.length; index++) {
+        const marker = markers[index];
+        entries.push({
+          id: `${file.id}-${index}-${marker.startLineNumber}-${marker.startColumn}-${marker.message}`,
+          fileId: file.id,
+          fileName: file.name,
+          filePath: file._fsPath,
+          severity: severityMap[marker.severity] || "info",
+          message: marker.message,
+          line: marker.startLineNumber,
+          column: marker.startColumn,
+          endLine: marker.endLineNumber,
+          endColumn: marker.endColumn,
+          source: marker.source,
+          code: typeof marker.code === "string" ? marker.code : marker.code?.value,
+        });
+      }
+    }
+    for (const [pathKey, snap] of Object.entries(markersByFsPath)) {
+      if (openPathKeys.has(pathKey)) continue;
+      const name = snap.fsPath.split(/[/\\]/).pop() || snap.fsPath;
+      for (let index = 0; index < snap.markers.length; index++) {
+        const marker = snap.markers[index];
+        entries.push({
+          id: `${pathKey}-${index}-${marker.startLineNumber}-${marker.startColumn}-${marker.message}`,
+          fileId: `fs:${pathKey}`,
+          fileName: name,
+          filePath: snap.fsPath,
+          severity: severityMap[marker.severity] || "info",
+          message: marker.message,
+          line: marker.startLineNumber,
+          column: marker.startColumn,
+          endLine: marker.endLineNumber,
+          endColumn: marker.endColumn,
+          source: marker.source,
+          code: typeof marker.code === "string" ? marker.code : marker.code?.value,
+        });
+      }
+    }
+    return entries;
+  }, [files, markersByFileId, markersByFsPath]);
 
   // Diagnostic error/warning maps for file tree rendering
   const diagnosticErrors = useMemo(() => {
@@ -796,8 +983,12 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
 
   useEffect(() => {
     const pending = pendingProblemSelectionRef.current;
-    if (!pending || pending.fileId !== activeFileId) return;
-    const editor = editorByFileIdRef.current[pending.fileId];
+    if (!pending) return;
+    const resolvedFileId = pending.fileId
+      || files.find((f) => f._fsPath && pending.filePath && normPath(f._fsPath) === normPath(pending.filePath))?.id;
+    if (!resolvedFileId || resolvedFileId !== activeFileId) return;
+    pending.fileId = resolvedFileId;
+    const editor = editorByFileIdRef.current[resolvedFileId];
     if (!editor) return;
     const position = { lineNumber: pending.line, column: pending.column };
     requestAnimationFrame(() => {
@@ -806,7 +997,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
       editor.focus();
       pendingProblemSelectionRef.current = null;
     });
-  }, [activeFileId]);
+  }, [activeFileId, files]);
 
   // Keep browser pages under one top-level editor tab and focus it when a child tab is added.
   const prevBrowserCount = useRef(0);
@@ -1473,20 +1664,39 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     return () => window.removeEventListener("keydown", handler);
   }, [activeFileId, saveFile]);
 
-  const updateProblemMarkers = useCallback((fileId: string, markers: readonly MarkerSnapshot[]) => {
-    setMarkersByFileId((prev) => ({
-      ...prev,
-      [fileId]: [...markers],
-    }));
-  }, []);
+  const updateProblemMarkers = useCallback((fileId: string, _markers: readonly MarkerSnapshot[]) => {
+    syncProblemMarkersForFile(fileId);
+  }, [syncProblemMarkersForFile]);
 
-  const handleSelectProblem = useCallback((problem: ProblemEntry) => {
+  const handleSelectProblem = useCallback(async (problem: ProblemEntry) => {
+    const existing = files.find((f) => f.id === problem.fileId)
+      || files.find((f) => f._fsPath && problem.filePath && normPath(f._fsPath) === normPath(problem.filePath));
     pendingProblemSelectionRef.current = {
-      fileId: problem.fileId,
+      fileId: existing?.id,
+      filePath: problem.filePath,
       line: problem.line,
       column: problem.column,
     };
-    setActiveFileId(problem.fileId);
+
+    if (existing) {
+      setActiveFileId(existing.id);
+      const editor = editorByFileIdRef.current[existing.id];
+      if (editor && activeFileIdRef.current === existing.id) {
+        const position = { lineNumber: problem.line, column: problem.column };
+        requestAnimationFrame(() => {
+          editor.revealPositionInCenter(position);
+          editor.setPosition(position);
+          editor.focus();
+          pendingProblemSelectionRef.current = null;
+        });
+      }
+      return;
+    }
+
+    if (problem.filePath) {
+      await openFsFile(problem.filePath);
+      return;
+    }
 
     const editor = editorByFileIdRef.current[problem.fileId];
     if (editor && activeFileIdRef.current === problem.fileId) {
@@ -1498,7 +1708,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
         pendingProblemSelectionRef.current = null;
       });
     }
-  }, []);
+  }, [files, openFsFile]);
 
   const addFile = useCallback(async (parentDir?: string) => {
     const targetDir = parentDir || fsBasePath || "";
@@ -1583,6 +1793,9 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
       if (activeFileIdRef.current === id) setActiveFileId(files[0]?.id || "");
       return;
     }
+    clearScheduledLspDiagnostics(id);
+    delete lspDiagRequestSeqRef.current[id];
+    delete lspDiagFingerprintRef.current[id];
     setMarkersByFileId((prev) => {
       const next = { ...prev };
       delete next[id];
@@ -1607,7 +1820,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
       }
       return remaining;
     });
-  }, [files, onCloseBrowser]);
+  }, [clearScheduledLspDiagnostics, files, onCloseBrowser]);
 
   const renameFile = useCallback((id: string) => {
     const f = files.find((x) => x.id === id);
@@ -1994,6 +2207,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
                     // Apply decorations immediately with whatever is available
                     applyDecorations(ed, f.id, gitDiffs[f.id], markersByFileId[f.id]);
                     applyAgentDiffDecorations(ed, f.id, agentDiffs[f.id]);
+                    syncProblemMarkersForFile(f.id, ed);
 
                     // Click a glyph (git change or error/warning) to open the inline popup.
                     (editor as any).onMouseDown?.((e: any) => {

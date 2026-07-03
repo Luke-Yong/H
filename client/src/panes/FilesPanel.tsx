@@ -177,6 +177,21 @@ function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth, gitChanges, 
     }
   }, [isSelected, children]);
 
+  const dirDiagLevel = useMemo(() => {
+    if (!entry.isDirectory) return null;
+    return hasDescendantDiagnostics(entry.path, diagnosticErrors, diagnosticWarnings);
+  }, [entry, diagnosticErrors, diagnosticWarnings]);
+
+  // Auto-expand the first time a directory gains descendant diagnostics so the
+  // exact problem file stays visible in the tree instead of only the folder tint.
+  useEffect(() => {
+    if (dirDiagLevel && entry.isDirectory && children === null) {
+      setExpanded(true);
+      setLoading(true);
+      fetchChildren();
+    }
+  }, [dirDiagLevel, children]);
+
   // Re-fetch children on refresh (after file/folder create/delete/rename)
   useEffect(() => {
     if (expanded && children !== null) {
@@ -219,11 +234,6 @@ function FsNode({ entry, basePath, onOpenFile, onOpenFolder, depth, gitChanges, 
     if (entry.isDirectory) return 0;
     return diagnosticWarnings.get(normPath(entry.path)) || 0;
   }, [entry, diagnosticWarnings]);
-
-  const dirDiagLevel = useMemo(() => {
-    if (!entry.isDirectory) return null;
-    return hasDescendantDiagnostics(entry.path, diagnosticErrors, diagnosticWarnings);
-  }, [entry, diagnosticErrors, diagnosticWarnings]);
 
   const diagCount = diagErrorCount > 0
     ? `${diagErrorCount} error${diagErrorCount > 1 ? 's' : ''}`
