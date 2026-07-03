@@ -32,6 +32,92 @@ npm run dev
 
 This starts both the backend (port 3001) and frontend (port 5173). Open `http://localhost:5173`.
 
+## Architecture
+
+Harness is a client-server application with an optional Electron desktop shell.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Electron Shell (desktop mode)                              │
+│  ┌──────────────────────────┐  ┌──────────────────────────┐ │
+│  │  Client (React + Vite)   │  │  Server (Express + WS)   │ │
+│  │                          │  │                          │ │
+│  │  Monaco Editor           │  │  Agent loop (tool-call)  │ │
+│  │  xterm.js terminals      │  │  LSP stdio bridge        │ │
+│  │  Agent console (SSE)     │  │  Terminal manager (PTY)  │ │
+│  │  File tree / SCM panel   │  │  Browser reverse proxy   │ │
+│  │  Browser webview         │  │  Git / FS / System APIs  │ │
+│  └──────────┬───────────────┘  └────────────┬─────────────┘ │
+│             │  HTTP + SSE + WebSocket       │               │
+│             └───────────────────────────────┘               │
+└─────────────────────────────────────────────────────────────┘
+                           │
+                    ┌──────▼──────┐
+                    │  DeepSeek   │
+                    │  API (HTTPS)│
+                    └─────────────┘
+```
+
+### Server (`server/`)
+
+The Node.js Express server on **port 3001** is the backbone. It owns all backend logic and never runs in the browser.
+
+| Layer | File | Role |
+|---|---|---|
+| HTTP API | `server/index.ts` | REST endpoints for filesystem CRUD, git status/commit/diff, project detection, system stats, and agent chat (blocking + SSE streaming) |
+| Agent loop | `server/agent.ts` | Tool-calling orchestration: receives user messages, sends tool definitions to DeepSeek, executes filesystem/terminal tools, manages browser tool handoff, compacts conversation history |
+| DeepSeek bridge | `server/deepseek.ts` | Raw DeepSeek API calls — chat, tool-calling, and SSE streaming — with prefix-cache tracking |
+| LSP bridge | `server/lsp.ts` | Spawns language servers over stdio, forwards diagnostics to the client, handles completions and hover |
+| Terminal manager | `server/terminalManager.ts` | Creates per-session shell processes (PTY via `node-pty` or pipe fallback), routes I/O between client WebSocket messages and child process stdio, auto-detects localhost URLs in terminal output |
+| Browser proxy | `server/index.ts` (`/_browser`) | Reverse-proxies external URLs through the server so the client iframe stays same-origin, strips `X-Frame-Options` headers, injects a restrictive CSP |
+
+**3 transport channels to the client:**
+
+- **HTTP** — Standard REST for file reads/writes, git operations, LSP diagnostics, agent chat init
+- **SSE (Server-Sent Events)** — One-way streaming for agent thinking/text/tool events during an agent turn
+- **WebSocket** — Bidirectional for terminal I/O (`term:create`, `term:write`, `term:resize`, `term:kill`) and server-to-client broadcasts (logs, errors, browser URL detection)
+
+### Client (`client/`)
+
+The React + Vite frontend runs on **port 5173** in development. In desktop/production mode, the Express server serves the built static files directly from `client/dist/`.
+
+| Pane | File | Role |
+|---|---|---|
+| Editor | `EditorPane.tsx` | Monaco Editor with tabs, file tree, SCM panel, built-in browser webview, and terminal tabs — the main workspace |
+| Agent console | `AgentConsole.tsx` | Chat interface for the AI agent. Sends user goals to `/api/chat/agent/stream`, consumes the SSE event stream, renders tool calls with spinners/results, prompts user for permission on `run_in_terminal`/`browser_eval`, and shows Accept/Reject diffs for file edits |
+| Files panel | `FilesPanel.tsx` | File explorer tree with create/rename/delete, right-click context menu, and folder expansion state persistence |
+| Terminal | `TerminalPane.tsx` | xterm.js terminal tabs, connected via WebSocket to the server's terminal manager |
+| SCM panel | `ScmPanel.tsx` | Git staging area, commit history, diff viewer |
+| Status bar | `StatusBar.tsx` | Language selector, encoding, indentation, cursor position, go-to-line |
+| Menu bar | `MenuBar.tsx` | File/Edit/View/Terminal/Help menus |
+
+The client **never calls DeepSeek directly**. All AI interaction flows through the server's agent loop, which owns the API key and tool execution.
+
+### Data flow (agent turn)
+
+```
+User types goal → AgentConsole
+  → POST /api/chat/agent/stream (message, context, projectRoot)
+  → Server builds dynamic system prompt (ITR), compacts history, calls DeepSeek
+  → DeepSeek returns text/tool_calls via SSE stream
+  → Server executes filesystem tools (read_file, write_file, etc.) directly
+  → Browser tools (browser_click, browser_type, etc.) yield SSE "browser_tool" event
+  → AgentConsole sends browser command to EditorPane's webview
+  → WebView executes the action, returns result
+  → AgentConsole calls POST /api/chat/agent/stream/continue (toolCallId, result)
+  → Loop continues until task_complete
+```
+
+### Desktop vs web mode
+
+| Feature | Web (browser) | Desktop (Electron) |
+|---|---|---|
+| Server | External process (`npm run dev:server`) | Embedded via `tsx` require in the Electron main process |
+| Client | Vite dev server (port 5173) or served by Express (production) | Vite dev server in dev, served by Express in production |
+| Terminal | WebSocket to server, pipe-fallback PTY | WebSocket to server, `node-pty` with ConPTY on Windows |
+| File access | Browser File System Access API or server FS APIs | Server FS APIs + native Electron `dialog` for folder/file pickers |
+| Built-in browser | iframe + reverse proxy (`/_browser`) | Electron `webview` with geolocation, permissions, popup interception |
+
 ## Desktop (Electron)
 
 Harness can also run as a desktop app (closer to VS Code) with an embedded server and a PTY-backed terminal.
