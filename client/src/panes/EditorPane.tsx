@@ -159,7 +159,7 @@ const lspRegistered = new Set<string>();
 //  - or they have no meaningful diagnostics
 const LSP_SKIP_LANGS = new Set<string>([
   "javascript", "typescript", "json", "jsonc", "css", "scss", "less", "html",
-  "plaintext", "xml", "bat", "ini",
+  "plaintext", "xml", "bat", "ini", "markdown",
 ]);
 
 
@@ -179,9 +179,11 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   const activeFileIdRef = useRef(activeFileId);
   const fsPathByFileIdRef = useRef<Record<string, string>>({});
   const lspDiagTimeoutsRef = useRef<Record<string, number>>({});
-  const lspDiagRequestSeqRef = useRef<Record<string, number>>({});
-  const lspDiagFingerprintRef = useRef<Record<string, string>>({});
-  // Per-language LSP error messages surfaced from diagnostics responses.
+  // SSE connections: one EventSource per language
+  const lspSseRef = useRef<Record<string, { es: EventSource; files: Set<string> }>>({});
+  // Last content sent to LSP per file id (debounce)
+  const lspContentRef = useRef<Record<string, string>>({});
+  // Per-language LSP error messages.
   const lspErrorsRef = useRef<Record<string, string>>({});
   const editorByFileIdRef = useRef<Record<string, EditorViewHandle | null>>({});
   const pendingProblemSelectionRef = useRef<PendingProblemSelection | null>(null);
@@ -684,81 +686,116 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     if (editor) applyDecorations(editor, activeFileId, diffText, markers);
   }, [activeFileId, gitDiffs, markersByFileId]);
 
-  // Continuously refresh diagnostics for every opened tab that depends on the
-  // LSP endpoint instead of Monaco's built-in validators.
+  // ── SSE-based real-time diagnostics (VS Code style) ──
+  // One persistent SSE connection per language receives publishDiagnostics
+  // as the LSP server emits them — no polling, no fingerprinting.
+
+  // Return a unique key for an SSE connection: rootPath + language.
+  const sseKey = useCallback((language: string) => {
+    return `${fsBasePath || ""}::${language}`;
+  }, [fsBasePath]);
+
+  // Open/close SSE connections as files open/close per language.
   useEffect(() => {
-    const openIds = new Set(files.map((file) => file.id));
+    if (!fsBasePath) return;
+    const wanted: Record<string, Set<string>> = {}; // sseKey → Set<fileId>
+    for (const f of files) {
+      if (!f._fsPath || LSP_SKIP_LANGS.has(f.language)) continue;
+      const k = sseKey(f.language);
+      if (!wanted[k]) wanted[k] = new Set();
+      wanted[k].add(f.id);
+    }
+    // Close connections for languages that no longer have files.
+    for (const k of Object.keys(lspSseRef.current)) {
+      if (!wanted[k]) {
+        lspSseRef.current[k].es.close();
+        delete lspSseRef.current[k];
+      }
+    }
+    // Open/update connections for each language.
+    for (const [k, fileIds] of Object.entries(wanted)) {
+      const lang = k.split("::")[1];
+      if (lspSseRef.current[k]) {
+        lspSseRef.current[k].files = fileIds;
+      } else {
+        const es = new EventSource(`/api/lsp/watch?rootPath=${encodeURIComponent(fsBasePath)}&language=${encodeURIComponent(lang)}`);
+        lspSseRef.current[k] = { es, files: fileIds };
+      }
+      // Always refresh onmessage so it sees the latest files (not a stale closure).
+      const entry = lspSseRef.current[k];
+      entry.es.onmessage = (e) => {
+        try {
+          const { uri, markers } = JSON.parse(e.data);
+          const normUri = uri.toLowerCase().replace(/\\/g, "/");
+          for (const f of files) {
+            if (!f._fsPath) continue;
+            const fNorm = normPath(f._fsPath).toLowerCase().replace(/\\/g, "/");
+            if (normUri.includes(fNorm) || fNorm.includes(normUri.replace("file:///", ""))) {
+              const editor = editorByFileIdRef.current[f.id] as any;
+              const model = editor?.getModel?.();
+              const monaco = (window as any).monaco;
+              if (monaco && model) {
+                monaco.editor.setModelMarkers(model, "lsp", markers);
+                syncProblemMarkersForFile(f.id, model);
+              } else {
+                setMarkersByFileId((prev) => ({ ...prev, [f.id]: markers }));
+              }
+              break;
+            }
+          }
+        } catch { /* ignore parse errors */ }
+      };
+
+      if (!entry.es.onerror) {
+        entry.es.onerror = () => {
+          lspErrorsRef.current[lang] = "LSP connection lost";
+        };
+      }
+    }
+  }, [files, fsBasePath, sseKey, syncProblemMarkersForFile]);
+
+  // Send didChange notifications to LSP on content change (fire-and-forget).
+  // Debounced per file: 250ms for active, 700ms for background.
+  useEffect(() => {
+    if (!fsBasePath) return;
+    const openIds = new Set(files.map(f => f.id));
+    // Clear timeouts for closed files
     for (const id of Object.keys(lspDiagTimeoutsRef.current)) {
       if (!openIds.has(id)) clearScheduledLspDiagnostics(id);
     }
-    for (const id of Object.keys(lspDiagRequestSeqRef.current)) {
-      if (!openIds.has(id)) delete lspDiagRequestSeqRef.current[id];
+    for (const id of Object.keys(lspContentRef.current)) {
+      if (!openIds.has(id)) delete lspContentRef.current[id];
     }
-    for (const id of Object.keys(lspDiagFingerprintRef.current)) {
-      if (!openIds.has(id)) delete lspDiagFingerprintRef.current[id];
-    }
-
-    for (const file of files) {
-      const hasLspState = lspDiagFingerprintRef.current[file.id] !== undefined || lspDiagRequestSeqRef.current[file.id] !== undefined;
-      if (!fsBasePath || !file._fsPath || LSP_SKIP_LANGS.has(file.language)) {
-        clearScheduledLspDiagnostics(file.id);
-        if (hasLspState) {
-          delete lspDiagRequestSeqRef.current[file.id];
-          delete lspDiagFingerprintRef.current[file.id];
-          clearLspMarkersForFile(file.id);
-        }
-        continue;
-      }
-
-      const fingerprint = [normPath(file._fsPath), file.language, file.content].join("\u0000");
-      if (lspDiagFingerprintRef.current[file.id] === fingerprint) continue;
-
-      lspDiagFingerprintRef.current[file.id] = fingerprint;
-      clearScheduledLspDiagnostics(file.id);
-      const requestSeq = (lspDiagRequestSeqRef.current[file.id] || 0) + 1;
-      lspDiagRequestSeqRef.current[file.id] = requestSeq;
-      const delay = file.id === activeFileId ? 250 : 700;
-      lspDiagTimeoutsRef.current[file.id] = window.setTimeout(async () => {
-        try {
-          const res = await fetch("/api/lsp/diagnostics", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              rootPath: fsBasePath,
-              language: file.language,
-              filePath: file._fsPath,
-              text: file.content,
-            }),
-          });
-          const data = await res.json();
-          if (!data.ok || lspDiagRequestSeqRef.current[file.id] !== requestSeq) return;
-          const markers: MarkerSnapshot[] = data.markers || [];
-          // Track LSP error state for this language.
-          if (data.error) {
-            lspErrorsRef.current[file.language] = data.error;
-          } else {
-            delete lspErrorsRef.current[file.language];
-          }
-          const monaco = (window as any).monaco;
-          const editor = editorByFileIdRef.current[file.id] as any;
-          const model = editor?.getModel?.();
-          if (monaco && model) {
-            monaco.editor.setModelMarkers(model, "lsp", markers);
-            syncProblemMarkersForFile(file.id, model);
-          } else {
-            setMarkersByFileId((prev) => ({ ...prev, [file.id]: markers }));
-          }
-        } catch {
-          // LSP server unavailable — record the error so the user knows.
-          lspErrorsRef.current[file.language] = "LSP server unreachable";
-        }
+    for (const f of files) {
+      if (!f._fsPath || LSP_SKIP_LANGS.has(f.language)) continue;
+      if (lspContentRef.current[f.id] === f.content) continue;
+      lspContentRef.current[f.id] = f.content;
+      clearScheduledLspDiagnostics(f.id);
+      const delay = f.id === activeFileId ? 250 : 700;
+      lspDiagTimeoutsRef.current[f.id] = window.setTimeout(() => {
+        fetch("/api/lsp/diagnostics", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            rootPath: fsBasePath,
+            language: f.language,
+            filePath: f._fsPath,
+            text: f.content,
+          }),
+        }).catch(() => {
+          lspErrorsRef.current[f.language] = "LSP server unreachable";
+        });
       }, delay);
     }
-  }, [activeFileId, clearLspMarkersForFile, clearScheduledLspDiagnostics, files, fsBasePath, syncProblemMarkersForFile]);
+  }, [files, activeFileId, fsBasePath, clearScheduledLspDiagnostics]);
 
+  // Cleanup on unmount
   useEffect(() => () => {
     for (const handle of Object.values(lspDiagTimeoutsRef.current)) {
       window.clearTimeout(handle);
+    }
+    for (const entry of Object.values(lspSseRef.current)) {
+      entry.es.close();
     }
   }, []);
 
@@ -1800,8 +1837,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
       return;
     }
     clearScheduledLspDiagnostics(id);
-    delete lspDiagRequestSeqRef.current[id];
-    delete lspDiagFingerprintRef.current[id];
+    delete lspContentRef.current[id];
     setMarkersByFileId((prev) => {
       const next = { ...prev };
       delete next[id];

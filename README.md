@@ -176,15 +176,79 @@ Harness provides editor intelligence — continuous error/warning checking, comp
 - JavaScript / TypeScript (JSX/TSX)
 - JSON, CSS / SCSS / LESS, HTML
 
-**2. Language Server (LSP):** For everything else, Harness talks to a standard language server over stdio (`server/lsp.ts`). Diagnostics are pushed to `/api/lsp/diagnostics` (debounced while editing) and surfaced in the editor tab, the left glyph column, the overview ruler, and the Problems panel.
+**2. Language Server (LSP):** For everything else, Harness talks to a standard language server over stdio (`server/lsp.ts`). The architecture follows the VS Code model — push-based, real-time diagnostics via Server-Sent Events (SSE).
+
+### Architecture (VS Code-style push model)
+
+```
+┌─ Client (EditorPane.tsx) ─────────────────────────────────────┐
+│                                                                │
+│  User types in editor                                          │
+│       │                                                        │
+│       ▼ (250ms debounce)                                       │
+│  POST /api/lsp/diagnostics  ─── fire-and-forget didChange     │
+│       │                                                        │
+│       │                              ┌──────────────────┐     │
+│       │   GET /api/lsp/watch ─── SSE │  EventSource per │     │
+│       │   (persistent connection)     │  language        │     │
+│       │                              └──────┬───────────┘     │
+│       │                                     │                  │
+│       │    publishDiagnostics event ◄───────┘                 │
+│       ▼                                                        │
+│  monaco.editor.setModelMarkers() ── squiggles appear          │
+└────────────────────────────────────────────────────────────────┘
+                               │
+┌─ Server (lsp.ts) ────────────▼────────────────────────────────┐
+│                                                                │
+│  notifyFileChange()                                            │
+│       │                                                        │
+│       ▼                                                        │
+│  sendNotification("textDocument/didChange") ──► LSP process   │
+│       │                                            │           │
+│       │         textDocument/publishDiagnostics ◄──┘           │
+│       ▼                                                        │
+│  handleMessage() ── broadcasts to all SSE clients              │
+│       │                                                        │
+│       ▼                                                        │
+│  client.write("data: {uri, markers}\n\n") ──► SSE stream      │
+└────────────────────────────────────────────────────────────────┘
+```
+
+**Key differences from polling-based approaches:**
+
+| Aspect | Old (polling) | New (VS Code-style) |
+|---|---|---|
+| Diagnostics delivery | Client polls `/api/lsp/diagnostics` every 250ms | LSP server pushes via SSE — instant |
+| Cross-file analysis | Only the changed file was polled | All files receive diagnostics from any change |
+| URI handling | Polling used module-level Map with manual key normalization | SSE streams normalized URIs directly to matching file |
+| Connection | One HTTP request per file change | One persistent SSE connection per language |
+
+**How it works:**
+
+1. **SSE connection** — When a file is opened, the client establishes a persistent `GET /api/lsp/watch?rootPath=...&language=...` SSE connection per language. The server holds the connection open and registers it in `session.sseClients`.
+
+2. **File change notification** — On content change (250ms debounce), the client fires a `POST /api/lsp/diagnostics` with the file text. The server sends `textDocument/didOpen` or `textDocument/didChange` to the LSP process and returns immediately (fire-and-forget).
+
+3. **Diagnostics push** — When the LSP server emits `textDocument/publishDiagnostics`, `handleMessage()` broadcasts the markers to ALL connected SSE clients for that language. The client receives the event, matches the URI to an open file, and calls `monaco.editor.setModelMarkers()` to render squiggles.
+
+4. **Cross-file analysis** — Because pyright (and other LSP servers) scan the entire workspace on any change, diagnostics for ALL files arrive via SSE and are applied simultaneously. Opening file2 immediately shows errors that pyright published during file1's analysis.
 
 A language server is only used **if its executable is found on your `PATH`**. If it isn't installed, that language is simply skipped — no errors, no setup required.
+
+### URI normalization
+
+Different LSP servers encode file URIs differently — pyright uses `%3A` for drive letters and `%5C` for backslashes, pylsp uses bare characters, some double-encode. The `normalizeUri()` function in `server/lsp.ts` handles all variants:
+
+- Progressive `decodeURIComponent` (handles double-encoding like `%2520`)
+- Per-character fallback for mixed raw/encoded URIs
+- Backslash → forward slash normalization
+- Case-insensitive matching (lowercase)
 
 ### Supported languages and their servers
 
 | Language        | Server binary                  | Install (example)                                      |
 | --------------- | ------------------------------ | ------------------------------------------------------ |
-| Python          | `pylsp`                        | `pip install python-lsp-server pyflakes`               |
+| Python          | `pyright-langserver` (preferred)<br>`pylsp` (fallback) | `npm i -g pyright`<br>`pip install python-lsp-server pyflakes` |
 | JavaScript / TS | *(Monaco built-in)*            | —                                                      |
 | HTML / CSS / JSON | *(Monaco built-in)*          | —                                                      |
 | Java            | `jdtls`                        | install Eclipse JDT Language Server                    |

@@ -1604,7 +1604,6 @@ body.resizing iframe { pointer-events: none; }
   font-size: 14px; cursor: pointer; padding: 0 2px; line-height: 1;
 }
 .agent-diff-panel-close:hover { color: var(--text); }
-}
 
 .agent-diff-file { border-bottom: 1px solid #3c3c3c; }
 .agent-diff-file:last-child { border-bottom: none; }

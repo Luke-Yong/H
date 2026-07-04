@@ -998,7 +998,7 @@ app.get("/api/git/diff", (req, res) => {
 });
 
 // ── LSP (Language Server) endpoints ──
-import { getCompletions, getFileDiagnostics, getLspStatus } from "./lsp";
+import { getCompletions, getFileDiagnostics, getLspStatus, watchDiagnostics, notifyFileChange } from "./lsp";
 
 app.post("/api/lsp/complete", (req, res) => {
   try {
@@ -1014,9 +1014,36 @@ app.post("/api/lsp/complete", (req, res) => {
   }
 });
 
-// Continuous diagnostics: push latest file text to the language server and
-// return any errors/warnings it reports (Monaco marker shape).
-// Also returns an `error` field when LSP is unavailable.
+// Push-based real-time diagnostics via SSE (VS Code style).
+// The client opens one persistent connection per language and receives
+// publishDiagnostics events as the LSP server emits them.
+app.get("/api/lsp/watch", (req, res) => {
+  const rootPath = String(req.query.rootPath || "");
+  const language = String(req.query.language || "");
+  if (!rootPath || !language) {
+    return res.status(400).json({ ok: false, error: "Missing rootPath or language" });
+  }
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+  res.write(":\n\n"); // SSE comment to flush headers
+
+  const result = watchDiagnostics(rootPath, language, res);
+  if (!result.ok) {
+    res.write(`event: error\ndata: ${JSON.stringify({ error: result.error })}\n\n`);
+    res.end();
+    return;
+  }
+  // Connection stays open — watchDiagnostics registered the response
+  // in session.sseClients, so publishDiagnostics broadcasts to it.
+  req.on("close", () => { /* cleanup handled in watchDiagnostics */ });
+});
+
+// Legacy polling endpoint (kept for backward compatibility).
+// Prefer GET /api/lsp/watch + POST didChange via notifyFileChange.
 app.post("/api/lsp/diagnostics", (req, res) => {
   try {
     const { rootPath, language, filePath, text } = req.body || {};
