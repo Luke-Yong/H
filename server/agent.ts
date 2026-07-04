@@ -216,6 +216,7 @@ export const TOOLS: ToolDef[] = [
       + "The terminal output is your tool result. "
       + "Use for: starting servers (python app.py, npm start, flask run), watching builds, interactive shells. "
       + "For short commands (tests, git, install, lint) use run_command instead. "
+      + "On Windows, the terminal is PowerShell. Do NOT use bash syntax: \`&&\` does NOT work (use \`;\` to chain commands), \`2>&1\` does NOT work (stderr is captured automatically). "
       + "CRITICAL — after receiving the terminal output, follow these steps IN ORDER: "
       + "1) CHECK THE OUTPUT for errors. Look for these patterns: "
       + "   - \`Traceback (most recent call last)\` → Python runtime error, read the stack trace "
@@ -1156,7 +1157,7 @@ function extractCommandId(text: string): number | null {
   return match ? Number(match[1]) : null;
 }
 
-function summarizeCommandResult(raw: string, label: string): string {
+export function summarizeCommandResult(raw: string, label: string): string {
   const commandId = extractCommandId(raw);
   const exitMatch = raw.match(/^Exit code (\d+):/);
   const timedOut = /\[Command timed out after \d+s\]/.test(raw);
@@ -1283,7 +1284,7 @@ const CORE_RULES = `You are an expert software developer agent running inside a 
 You have access to tools that let you read/write files, run commands, interact with a browser preview, and inspect the current page.
 
 ### Rules
-1. Break the user's request into steps. Use \`write_todos\` to plan and track progress.
+1. Break the user's request into steps. Use \`write_todos\` to plan and track progress — mark each item \`completed\` as you finish it, and ensure all items are \`completed\` before calling \`task_complete\`.
 2. Use tools one at a time. After each tool call, read the result before deciding the next step.
 3. When you are done, call \`task_complete\` with a brief summary of everything you did, any files changed, and any issues found. ALWAYS call task_complete — never end without it.
 4. If you encounter an error, explain what happened and suggest how to fix it.
@@ -1869,9 +1870,19 @@ export async function* agentLoopStream(
   let turnsWarned = false;
   let finalEstTokens = 0;
 
+  const modelContextLimit = (() => {
+    const m = (modelOpts?.model || "").toLowerCase();
+    // Known DeepSeek model context windows (tokens).
+    // V3 / R1: 128K.  V4 Pro / Flash: 1M.
+    if (m.includes("v4") || m.includes("flash") || m.includes("pro")) return 1_000_000;
+    if (m.includes("reasoner")) return 128_000; // R1
+    if (m.includes("chat")) return 128_000;     // V3, default
+    return 128_000; // unknown model — assume 128K
+  })();
+
   const makeUsage = (turns: number) => ({
     estimatedTokens: finalEstTokens,
-    contextLimit: 1_000_000,
+    contextLimit: modelContextLimit,
     turns,
   });
 
@@ -1967,14 +1978,24 @@ export async function* agentLoopStream(
 
       // run_in_terminal: requires user permission (opens real terminal tab)
       if (fnName === "run_in_terminal") {
-        const cmd = String(params.command || "");
+        let cmd = String(params.command || "");
+        // Sanitize bash-isms that break in PowerShell on Windows
+        if (process.platform === "win32") {
+          // Strip 2>&1 — PowerShell captures stderr by default, and this syntax fails
+          cmd = cmd.replace(/\s*2>\s*&1\s*/g, " ");
+          // Convert && (bash "and") to ; (PowerShell separator)
+          cmd = cmd.replace(/\s*&&\s*/g, "; ");
+          cmd = cmd.trim();
+        }
+        // Update params so the client receives the sanitized command in tool_start
+        (params as Record<string, unknown>).command = cmd;
         // Push individual assistant+tool messages for each tool call.
         // run_in_terminal pauses for permission — push "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_get_dom, browser_select, or any other browser_* tool) on your next turn to get the actual result." for all
         // other tools so they don't block. The actual run_in_terminal result
         // will be pushed by /stream/continue.
         for (let i = 0; i < finalToolCalls.length; i++) {
           const t = finalToolCalls[i];
-          state.messages.push({ role: "assistant", content: JSON.stringify([{ id: t.id, type: "function", function: { name: t.function.name, arguments: t.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
+          state.messages.push({ role: "assistant", content: JSON.stringify([{ id: t.id, type: "function", function: { name: t.function.name, arguments: t.function.arguments } }]), name: t.function.name, ...rc(finalReasoning) });
           if (i > 0) {
             state.messages.push({ role: "tool", content: "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_get_dom, browser_select, or any other browser_* tool) on your next turn to get the actual result.", tool_call_id: t.id });
           }
@@ -2002,7 +2023,7 @@ export async function* agentLoopStream(
         // pushed by /stream/continue.
         for (let i = 0; i < finalToolCalls.length; i++) {
           const t = finalToolCalls[i];
-          state.messages.push({ role: "assistant", content: JSON.stringify([{ id: t.id, type: "function", function: { name: t.function.name, arguments: t.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
+          state.messages.push({ role: "assistant", content: JSON.stringify([{ id: t.id, type: "function", function: { name: t.function.name, arguments: t.function.arguments } }]), name: t.function.name, ...rc(finalReasoning) });
           if (i > 0) {
             state.messages.push({ role: "tool", content: "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_get_dom, browser_select, or any other browser_* tool) on your next turn to get the actual result.", tool_call_id: t.id });
           }
@@ -2027,7 +2048,7 @@ export async function* agentLoopStream(
         // Push all tool calls as assistant messages; only this one gets executed
         for (let j = 0; j < finalToolCalls.length; j++) {
           const t = finalToolCalls[j];
-          state.messages.push({ role: "assistant", content: JSON.stringify([{ id: t.id, type: "function", function: { name: t.function.name, arguments: t.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
+          state.messages.push({ role: "assistant", content: JSON.stringify([{ id: t.id, type: "function", function: { name: t.function.name, arguments: t.function.arguments } }]), name: t.function.name, ...rc(finalReasoning) });
           if (j !== i) {
             state.messages.push({ role: "tool", content: "NOT_EXECUTED: This tool was not run because it was batched with other tools. Do NOT interpret this as a real result. Call this tool BY ITSELF on your next turn to get the actual result.", tool_call_id: t.id });
           }
@@ -2042,7 +2063,6 @@ export async function* agentLoopStream(
           ...(originalContent !== null ? { originalContent } : {}),
         };
         const fsResult = await runFsTool(fnName, params, projectRoot);
-        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
         // Defer the result — user must Accept/Reject before agent continues
         state.deferredTool = {
           toolCallId: tc.id,
@@ -2181,6 +2201,22 @@ const commandOutputStore = new Map<number, { command: string; output: string; to
 
 export function getCommandOutput(seq: number) {
   return commandOutputStore.get(seq);
+}
+
+export function storeCommandOutput(command: string, output: string, exitCode?: number | null, timedOut?: boolean): number {
+  const seq = ++cmdSeq;
+  commandOutputStore.set(seq, {
+    command,
+    output,
+    totalChars: output.length,
+    exitCode: exitCode ?? null,
+    timedOut: timedOut ?? false,
+  });
+  if (commandOutputStore.size > 50) {
+    const oldest = Math.min(...commandOutputStore.keys());
+    commandOutputStore.delete(oldest);
+  }
+  return seq;
 }
 
 export function clearCommandOutputs() {

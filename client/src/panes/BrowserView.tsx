@@ -1757,8 +1757,8 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   }, [activeTab, onUrlChange]);
 
   const getInfo = useCallback((): string => {
-    if (!activeTab || !currentUrl) return "No browser tab open.";
-    return `URL: ${currentUrl} | Loaded: ${loading ? "loading" : "yes"} | Tabs: ${tabs.length}`;
+    if (!activeTab || !currentUrl) return "No browser tab open. Use browser_navigate to open a URL first.";
+    return `URL: ${currentUrl} | Title: ${activeTab.label || "(no title)"} | Loaded: ${loading ? "loading" : "yes"} | Tabs: ${tabs.length}`;
   }, [activeTab, currentUrl, loading, tabs]);
 
   const clearElement = useCallback(async (index: number): Promise<string> => {

@@ -53,7 +53,7 @@ app.post("/api/chat", async (req, res) => {
 });
 
 // ── Agentic chat (tool-calling loop) ──
-import { createAgentSession, getAgentSession, addToolResult, addToolResultStream, deleteAgentSession, agentLoop, agentLoopStream, runFsTool, type AgentState, type AgentResponse, type AgentSseEvent } from "./agent";
+import { createAgentSession, getAgentSession, addToolResult, addToolResultStream, deleteAgentSession, agentLoop, agentLoopStream, runFsTool, storeCommandOutput, summarizeCommandResult, type AgentState, type AgentResponse, type AgentSseEvent } from "./agent";
 
 app.post("/api/chat/agent", async (req, res) => {
   const { message, context, projectRoot, apiKey, model } = req.body || {};
@@ -128,7 +128,7 @@ app.post("/api/chat/agent/continue", async (req, res) => {
 
 app.post("/api/chat/agent/stream", async (req, res) => {
   const { message, context, projectRoot, model, apiKey, thinking } = req.body || {};
-  const effectiveModel = model || (thinking ? "deepseek-reasoner" : "deepseek-chat");
+  const effectiveModel = model || "deepseek-chat";
   if (!message) return res.status(400).json({ error: "Missing message" });
 
   try {
@@ -169,7 +169,7 @@ app.post("/api/chat/agent/stream", async (req, res) => {
 
 app.post("/api/chat/agent/stream/continue", async (req, res) => {
   const { sessionId, toolCallId, toolResult, permissionGranted, apiKey, model, thinking, consoleContext } = req.body || {};
-  const effectiveModel = model || (thinking ? "deepseek-reasoner" : "deepseek-chat");
+  const effectiveModel = model || "deepseek-chat";
   if (!sessionId || !toolCallId) {
     return res.status(400).json({ error: "Missing sessionId or toolCallId" });
   }
@@ -184,6 +184,7 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
     let cmdResult: string | null = null;
     let permissionToolName: string | undefined = undefined;
     let permissionToolParams: Record<string, unknown> | undefined;
+    let statePushed = false; // skip generic push when already pushed (e.g. summarized terminal output)
     if (state.deferredTool && state.deferredTool.toolCallId === toolCallId) {
       const dt = state.deferredTool;
       state.deferredTool = undefined;
@@ -214,12 +215,22 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
         } else {
           // run_in_terminal: use frontend-provided terminal output as tool result if available
           const termOut = typeof toolResult === "string" && toolResult.trim() ? toolResult : null;
-          cmdResult = termOut || `${pp.command} is starting in a terminal tab. The terminal may auto-detect a URL and open a browser tab shortly. Call browser_info to check if a tab opened — do NOT guess the port.`;
+          if (termOut) {
+            const seq = storeCommandOutput(pp.command, termOut);
+            const rawResult = `[cmd #${seq}] ${termOut}`;
+            // Push summarized version to model context (save tokens on long logs);
+            // the full output is in commandOutputStore for read_command_output.
+            state.messages.push({ role: "tool", content: summarizeCommandResult(rawResult, "Terminal output"), tool_call_id: pp.toolCallId });
+            cmdResult = rawResult; // full output for SSE tool_end display
+            statePushed = true;
+          } else {
+            cmdResult = `${pp.command} is starting in a terminal tab. The terminal may auto-detect a URL and open a browser tab shortly. Call browser_info to check if a tab opened — do NOT guess the port.`;
+          }
         }
       } else {
         cmdResult = "Permission denied by user.";
       }
-      if (cmdResult !== null) {
+      if (cmdResult !== null && !statePushed) {
         state.messages.push({ role: "tool", content: cmdResult, tool_call_id: pp.toolCallId });
       }
     } else {

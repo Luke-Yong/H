@@ -1520,11 +1520,26 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
         if (tabId) onBrowserTabUpdateUrl?.(tabId, url);
       }
       setActiveFileId(BROWSER_EDITOR_TAB_ID);
-      return `Navigating to ${url}...`;
+      // Wait for React to mount the BrowserView so subsequent tools work.
+      // Poll browserViewRef for up to 2s after tab creation.
+      const start = Date.now();
+      while (!browserViewRef.current && Date.now() - start < 2000) {
+        await new Promise(r => setTimeout(r, 100));
+      }
+      if (browserViewRef.current) {
+        return `Navigating to ${url}. Browser ready.`;
+      }
+      return `Navigating to ${url} (browser view still initializing — call browser_info to confirm).`;
     }
 
-    const bv = browserViewRef.current;
-    if (!bv) return "Browser not available (no page loaded).";
+    // For tools that need a loaded page, wait briefly for browser view to be ready
+    const bv = (() => {
+      if (browserViewRef.current) return browserViewRef.current;
+      // Browser view may not be mounted yet — often happens after a tab
+      // was just created by browser_navigate. Return clear guidance.
+      return null;
+    })();
+    if (!bv) return "Browser not available. Use browser_navigate first to open a URL, then retry this tool.";
     switch (toolName) {
       case "browser_screenshot": return bv.getPageSnapshot();
       case "browser_get_dom": return bv.getIndexedDom();

@@ -332,7 +332,7 @@ Harness gives the AI agent access to your filesystem, terminal, and browser. The
 | `browser_navigate` | **URL validation** | `javascript:`, `data:`, `file:` protocols. Only `http://` and `https://` allowed. |
 | `browser_eval` | **Pattern block** + **User permission** | `document.cookie`, `fetch()`, `XMLHttpRequest`, `window.open`, `window.location`, `WebSocket`, `import()`, `sendBeacon`. User must Allow each execution. |
 | `run_command` | **Env sanitization** | Any env var whose name contains `KEY`, `SECRET`, `TOKEN`, `PASSWORD`, `CREDENTIAL`, or starts with `npm_` is stripped before the child process starts. Only `PATH`, `HOME`, `USER`, `TEMP`, `SHELL`, `SYSTEMROOT`, `LANG` are forwarded. |
-| `run_in_terminal` | **User permission** | User must explicitly Allow each command before it runs in a terminal tab. |
+| `run_in_terminal` | **User permission** + **Command sanitization** | User must explicitly Allow each command before it runs. On Windows, bash syntax (`2>&1`, `&&`) is auto-corrected to PowerShell equivalents. |
 | `read_file` / `grep` / `list_files` / `write_file` / `edit_file` / `delete_file` / `rename_file` / `search_files` | **Secret-file block** | All filesystem tools refuse access to files matching `.env`, `.env.*`, `credentials.*`, `secret.*`, `.pem`, `.key`, `.p12`, `.pfx`, and `config/*secret*` / `config/*key*` paths. These files are also hidden from directory listings and search results. |
 
 ### Browser Sandbox
@@ -377,15 +377,42 @@ The AI agent has access to these tools when working on your project:
 
 | Tool | Type | Description |
 |------|------|-------------|
-| `run_command` | **Sandbox** | Run a shell command with inline output. Fast, no permission needed. Use for: tests, lint, git, pip, npm, builds, grep. Output appears directly in the tool card. |
-| `run_in_terminal` | **Real terminal** | Run a long-running command in a dedicated terminal tab. User must Allow each command. Use for: `python app.py`, `npm start`, flask, watch mode, interactive shells. Command runs in background — agent continues immediately. Output streams to both the terminal tab and the agent tool card via a bridge. |
+| `run_command` | **Sandbox** | Run a shell command with inline output. Fast, no permission needed. Use for: tests, lint, git, pip, npm, builds, grep. Output is summarized to key lines (errors, warnings, URLs); full output is cached for `read_command_output`. |
+| `run_in_terminal` | **Real terminal** | Run a long-running command in a dedicated terminal tab. User must Allow each command. Use for: `python app.py`, `npm start`, flask, watch mode, interactive shells. The agent **waits for the command to exit or produce recognizable output** (traceback, server-started message, etc.) before receiving the result. Terminal output is captured in full for the UI tool card, and a summarized version (key error/success lines) is sent to the model to save tokens. |
+
+#### `run_in_terminal` lifecycle
+
+```
+Agent calls run_in_terminal
+  → Command sanitized (Windows: strip 2>&1, && → ;)
+  → User Allow/Deny prompt
+  → Command runs in terminal tab
+  → Agent waits for:
+       - Process exit (onFinish)
+       - Server started pattern (e.g. "listening on :3000")
+       - Error detected (traceback, ModuleNotFoundError, npm ERR!, etc.) → 500ms flush delay
+       - 120s timeout fallback
+  → Full terminal output sent to UI tool card
+  → Summarized output (key lines, 8 lines / 1200 chars max) pushed to model context
+  → Full output cached in commandOutputStore for read_command_output with [cmd #N] key
+  → Agent reads result and acts on errors or proceeds to browser
+```
+
+**Windows/PowerShell compatibility:** On Windows, the terminal runs PowerShell. Bash-isms that would fail silently are auto-corrected:
+
+| Bash syntax | Problem | Auto-fix |
+|-------------|---------|----------|
+| `2>&1` | PowerShell doesn't understand stderr redirect; causes parse error | Stripped (PowerShell captures stderr natively) |
+| `&&` (chain on success) | PowerShell uses `;` for command chaining | Converted to `;` |
+
+**Output handling for long logs:** If the terminal outputs thousands of lines (e.g. verbose app startup), only a summarized view reaches the model — error lines, warnings, and success markers from the full output, limited to 8 lines / 1200 characters. The full output is always available via `read_command_output cmd_id=N` with pagination (`offset`, `limit`) and regex filtering (`filter`).
 
 ### Browser
 
 | Tool | Description |
 |------|-------------|
-| `browser_navigate` | Navigate to a URL (http/https only) |
-| `browser_info` | Get current browser tab URL and load status |
+| `browser_navigate` | Navigate to a URL (http/https only). Creates a new browser tab if none exists, or navigates the active tab. Waits for the browser view to mount before returning (up to 2s), so subsequent tools like `browser_info` / `browser_screenshot` work immediately. Returns `"Navigating to {url}. Browser ready."` on success. |
+| `browser_info` | Get current browser tab state: URL, page title, load status, and open tab count. Use before other browser tools to confirm the page is loaded. |
 | `browser_screenshot` | Get a text snapshot of the current page (URL, title, visible text, form fields, buttons, errors) — DeepSeek is text-only, returns readable text not an image |
 | `browser_get_dom` | Get indexed clickable/typable elements with pixel coordinates (`(x:NNN y:NNN WWWxHHH)`) and viewport size |
 | `browser_click` | Click by DOM index or pixel coordinates (x,y). Dispatches full pointer/mouse event sequence. Index mode auto-computes center from bounding rect. Use before `browser_type`/`browser_clear`/`browser_select` to activate inputs for reactive frameworks |
@@ -780,6 +807,7 @@ Some tool outputs are much larger than what the model usually needs on the next 
 Harness now distills bulky command/build output before storing it back into the agent transcript:
 
 - `run_command` stores a compact summary instead of the full raw output
+- `run_in_terminal` stores a compact summary (key error/success lines) instead of the full terminal log — the full output is cached for `read_command_output`
 - `read_problems` stores a compact build-check summary instead of the full compiler/linter dump
 - The summary keeps the most important lines (errors, warnings, failures, URLs, success markers)
 - The **full raw command output is still cached** in the command-output store and can be re-read later with `read_command_output`

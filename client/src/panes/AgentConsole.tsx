@@ -1563,7 +1563,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
                     if (!ended && !earlyDetected && EARLY_PATTERNS.test(agentTermOutputRef.current)) {
                       earlyDetected = true;
                       clearTimeout(timer);
-                      finish(null);
+                      setTimeout(() => finish(null), 500);
                     }
                   });
                 });
@@ -1683,12 +1683,13 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
                 clearTimeout(timer);
                 finish(code);
               });
-              // Short-circuit when server output or error output is detected
+              // Short-circuit when server output or error output is detected.
+              // Wait 500ms after detection to let the rest of the traceback/error flush.
               const unsubOut = agentTerminalBridge.onOutput((_text: string) => {
                 if (!ended && !earlyDetected && EARLY_PATTERNS.test(agentTermOutputRef.current)) {
                   earlyDetected = true;
                   clearTimeout(timer);
-                  finish(null);
+                  setTimeout(() => finish(null), 500);
                 }
               });
             });
@@ -1742,7 +1743,8 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
     }
     }
 
-    setLoading(false);
+    // Keep loading if a file tool (edit/write/delete) is waiting for Accept/Reject
+    setLoading(deferredToolRef.current != null);
   }, [getConsoleContext, executeBrowserAction, push, getFsBasePath, applyEditorFiles, onRefreshFs]);
 
   // helper: push a message with explicit id

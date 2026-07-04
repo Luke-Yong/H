@@ -31,6 +31,7 @@ interface TermInstance {
   commandRunning: boolean;
   commandSawError: boolean;
   commandEchoSeen: boolean;
+  isAgentTerminal: boolean;
   currentPromptMarker?: IMarker;
   lastCommandMarker?: IMarker;
   promptMarkers: Array<{ id: number; marker: IMarker; kind: "idle" | "success" | "error" }>;
@@ -124,6 +125,18 @@ function PromptIcon() {
     <svg viewBox="0 0 16 16" aria-hidden="true" className="terminal-icon terminal-icon-prompt">
       <path d="M3 4l4 4-4 4" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
       <path d="M9 12h4" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function AgentIcon() {
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true" className="terminal-icon terminal-icon-agent">
+      <rect x="3" y="2" width="10" height="9" rx="2" fill="none" stroke="currentColor" strokeWidth="1.2" />
+      <circle cx="6.5" cy="6" r="1" fill="currentColor" />
+      <circle cx="9.5" cy="6" r="1" fill="currentColor" />
+      <rect x="7" y="8" width="2" height="1.5" rx="0.5" fill="currentColor" />
+      <path d="M5 2v-1M11 2v-1" fill="none" stroke="currentColor" strokeWidth="1" strokeLinecap="round" />
     </svg>
   );
 }
@@ -805,6 +818,7 @@ export default function TerminalPane({
       commandRunning: false,
       commandSawError: false,
       commandEchoSeen: false,
+      isAgentTerminal: false,
       promptMarkers: [],
       commandMarkerIds: [],
       commandNavIndex: -1,
@@ -972,6 +986,7 @@ export default function TerminalPane({
             inst.commandRunning = true;
             inst.commandSawError = false;
             inst.commandEchoSeen = false;
+            inst.isAgentTerminal = true;
             const label = getCommandLabel(ac.command);
             if (label) setLabelById((prev) => ({ ...prev, [id]: label }));
           };
@@ -1175,12 +1190,35 @@ export default function TerminalPane({
       if (!wsConnected) return;
       const cmd = (agentTerminalBridge as AgentTerminalBridgeInternal)._consumeCommand();
       if (!cmd) return;
-      // Ensure terminal pane is visible — agent commands need real terminals
-      agentCmdRef.current = { command: cmd.command, toolCallId: cmd.id };
-      requestTerminal(-1);
+      // Try to reuse an idle agent terminal before creating a new one
+      let reused = false;
+      for (const [id, inst] of termsRef.current) {
+        if (inst.isAgentTerminal && !inst.commandRunning) {
+          const gi = terminalGroupsRef.current.findIndex((g) => g.includes(id));
+          if (gi < 0) continue;
+          // Reuse this idle agent terminal
+          setActiveGroupIndex(gi);
+          setActiveId(id);
+          setActiveCategory("terminal");
+          agentTermIdRef.current = id;
+          sendToServer(id, `${cmd.command}\r\n`);
+          inst.commandRunning = true;
+          inst.commandSawError = false;
+          inst.commandEchoSeen = false;
+          const label = getCommandLabel(cmd.command);
+          if (label) setLabelById((prev) => ({ ...prev, [id]: label }));
+          reused = true;
+          break;
+        }
+      }
+      if (!reused) {
+        // No idle agent terminal available — create a new one
+        agentCmdRef.current = { command: cmd.command, toolCallId: cmd.id };
+        requestTerminal(-1);
+      }
     }, 100);
     return () => clearInterval(interval);
-  }, [agentTerminalBridge, wsConnected, requestTerminal]);
+  }, [agentTerminalBridge, wsConnected, requestTerminal, sendToServer]);
 
   useEffect(() => {
     if (!activeGroupMembers.length) return;
@@ -1492,6 +1530,11 @@ export default function TerminalPane({
                     {!sidebarCollapsed && (
                       <span className="terminal-instance-label">
                         {labelById[id] || `${defaultShellLabel} ${rank + 1}`}
+                      </span>
+                    )}
+                    {termsRef.current.get(id)?.isAgentTerminal && (
+                      <span className="terminal-instance-agent-badge" title="Opened by run_in_terminal">
+                        <AgentIcon />
                       </span>
                     )}
                   </span>
