@@ -12,7 +12,10 @@
     "desktop:pack": "npm run desktop:build && electron-builder --win",
     "install:all": "npm install && cd client && npm install",
     "rebuild:pty": "electron-rebuild -f -w node-pty",
-    "postinstall": "node -e \"const { spawnSync } = require('child_process'); const r = spawnSync('npx', ['electron-rebuild','-f','-w','node-pty'], { stdio: 'inherit', shell: true }); if (r.status !== 0) { console.warn('node-pty rebuild failed; terminal will fall back to pipe mode.'); }\""
+    "postinstall": "node -e \"const { spawnSync } = require('child_process'); const r = spawnSync('npx', ['electron-rebuild','-f','-w','node-pty'], { stdio: 'inherit', shell: true }); if (r.status !== 0) { console.warn('node-pty rebuild failed; terminal will fall back to pipe mode.'); }\"",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "dotenv": "^16.4.0",
@@ -23,11 +26,14 @@
   },
   "devDependencies": {
     "@types/express": "^5.0.0",
+    "@types/supertest": "^7.2.0",
     "@types/ws": "^8.5.13",
     "concurrently": "^9.1.0",
     "electron": "^34.0.0",
     "electron-builder": "^25.1.8",
     "electron-rebuild": "^3.2.9",
-    "typescript": "^5.6.0"
+    "supertest": "^7.2.2",
+    "typescript": "^5.6.0",
+    "vitest": "^4.1.9"
   }
 }

@@ -99,7 +99,7 @@ export interface AgentSseEvent {
 
 // ── Tool registry ──
 
-const TOOLS: ToolDef[] = [
+export const TOOLS: ToolDef[] = [
   {
     name: "read_file",
     description:
@@ -1831,7 +1831,7 @@ export async function agentLoop(
     }
 
     // If we executed filesystem tools but no browser tool, continue the loop.
-    return agentLoop(projectRoot, state, "");
+    return agentLoop(projectRoot, state, "", modelOpts);
   }
 
   // No tool calls — final text reply.

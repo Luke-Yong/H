@@ -351,6 +351,143 @@ The AI agent has access to these tools when working on your project:
 | `write_todos` | Create or update a structured task list to track progress |
 | `task_complete` | Signal completion with a summary of what was done |
 
+## Agent Command Catalog
+
+Every shell command the agent can potentially issue via `run_command` or `run_in_terminal`. These are extracted from the agent's system prompt chunks and the `detectProjectBuild()` auto-detection logic in [server/agent.ts](file:///d:/Work Projects/Harness/server/agent.ts).
+
+### JavaScript / TypeScript
+
+| Command | Usage | Source |
+|---------|-------|--------|
+| `npx tsc --noEmit` | Type-check all files (preferred) | `LANG_JS` + `detectProjectBuild` |
+| `npm run build` | Full build via package.json scripts | `LANG_JS` + `detectProjectBuild` |
+| `npx eslint .` | Lint all files | `LANG_JS` |
+| `npm install` | Install all project dependencies | `LANG_JS` |
+| `npm install <pkg>` | Install a specific package | `LANG_JS` |
+
+### Python
+
+| Command | Usage | Source |
+|---------|-------|--------|
+| `python -m py_compile <file>.py` | Single-file syntax check | `LANG_PYTHON` |
+| `python -m compileall .` | Syntax check all .py files | `LANG_PYTHON` + `detectProjectBuild` |
+| `python -m pytest` | Run tests | `LANG_PYTHON` |
+| `pip install -r requirements.txt` | Install all project dependencies | `LANG_PYTHON` |
+| `pip install <pkg>` | Install a single package | `LANG_PYTHON` + `SERVER_STARTUP` |
+
+### Go
+
+| Command | Usage | Source |
+|---------|-------|--------|
+| `go build ./...` | Compile all packages | `LANG_GO` |
+| `go vet ./...` | Static analysis | `LANG_GO` + `detectProjectBuild` |
+| `go test ./...` | Run all tests | `LANG_GO` |
+
+### Rust
+
+| Command | Usage | Source |
+|---------|-------|--------|
+| `cargo check` | Fast compile check (no binary) | `LANG_RUST` + `detectProjectBuild` |
+| `cargo build` | Full compilation | `LANG_RUST` |
+| `cargo test` | Run tests | `LANG_RUST` |
+| `cargo clippy` | Lint with extra warnings | `LANG_RUST` |
+
+### Java
+
+| Command | Usage | Source |
+|---------|-------|--------|
+| `mvn compile` | Maven build | `LANG_JAVA` + `detectProjectBuild` |
+| `gradle build` | Gradle build | `LANG_JAVA` |
+| `gradle compileJava` | Gradle compile only | `detectProjectBuild` |
+| `javac <File>.java` | Single file (no build tool) | `LANG_JAVA` |
+
+### C / C++
+
+| Command | Usage | Source |
+|---------|-------|--------|
+| `gcc -Wall -Wextra <file>.c -o output` | Single C file with warnings | `LANG_C` |
+| `g++ -Wall -Wextra <file>.cpp -o output` | Single C++ file with warnings | `LANG_C` |
+| `cmake --build build` | CMake projects | `LANG_C` + `detectProjectBuild` |
+| `make` | Makefile projects | `LANG_C` + `detectProjectBuild` |
+
+### Ruby
+
+| Command | Usage | Source |
+|---------|-------|--------|
+| `ruby -c <file>.rb` | Syntax check (safe, no execution) | `LANG_RUBY` + `detectProjectBuild` |
+| `bundle exec rake test` | Run tests via Rake | `LANG_RUBY` |
+| `bundle exec rspec` | Run RSpec tests | `LANG_RUBY` |
+| `bundle install` | Install gem dependencies | `LANG_RUBY` |
+| `gem install <pkg>` | Install a single gem | `LANG_RUBY` |
+
+### PHP
+
+| Command | Usage | Source |
+|---------|-------|--------|
+| `php -l <file>.php` | Single file syntax lint | `LANG_PHP` |
+| `php -l *.php` | Lint all PHP files | `LANG_PHP` + `detectProjectBuild` |
+| `composer install` | Install dependencies | `LANG_PHP` |
+
+### Shell (Bash)
+
+| Command | Usage | Source |
+|---------|-------|--------|
+| `bash -n <script>.sh` | Syntax check without executing | `LANG_SHELL` |
+| `shellcheck <script>.sh` | Static analysis (if installed) | `LANG_SHELL` |
+
+### Cross-language / Generic
+
+| Command | Usage | Source |
+|---------|-------|--------|
+| `git status --porcelain -u` | Staged/unstaged file tracking | Server SCM API |
+| `git log --max-count=20` | Recent commit history | Server SCM API |
+| `git diff -- <file>` | Show unstaged changes for a file | Server SCM API |
+| `git fetch --all` | Fetch from all remotes | Server SCM API |
+| `git pull` | Pull latest changes | Server SCM API |
+| `git push` | Push local commits | Server SCM API |
+
+### Project auto-detection (`read_problems`)
+
+When the agent calls `read_problems`, the server auto-detects the project type and runs:
+
+| Detection signal | Auto-command |
+|------------------|-------------|
+| `Cargo.toml` exists | `cargo check 2>&1` |
+| `go.mod` exists | `go vet ./... 2>&1` |
+| `pom.xml` exists | `mvn compile 2>&1` |
+| `build.gradle` or `build.gradle.kts` exists | `gradle compileJava 2>&1` |
+| `package.json` + `tsconfig.json` | `npx tsc --noEmit 2>&1` |
+| `package.json` with build script | `npm run build 2>&1` |
+| `package.json` (no tsconfig, no build script) | `npx tsc --noEmit 2>&1` |
+| `requirements.txt` / `pyproject.toml` / `setup.py` / `.py` files | `python -m compileall . 2>&1` |
+| `Gemfile` exists | `ruby -c *.rb 2>&1` |
+| `composer.json` exists | `php -l *.php 2>&1` |
+| `Makefile` exists | `make 2>&1` |
+| `CMakeLists.txt` exists | `cmake --build build 2>&1` |
+| None of the above | `npx tsc --noEmit` / `python -m compileall .` / `go vet ./...` (general suggestion) |
+
+### Server-specific (via `run_in_terminal`)
+
+Commands the agent is instructed to launch in a real terminal tab:
+
+| Framework | Typical command | Mentioned in |
+|-----------|----------------|-------------|
+| Python (generic) | `python app.py` / `python server.py` | `run_command` block list |
+| Flask | `flask run` | `run_command` block list |
+| Django | `python manage.py runserver` | `run_command` block list |
+| FastAPI | `uvicorn main:app` | `run_command` block list |
+| Gunicorn | `gunicorn app:app` | `run_command` block list |
+| Node.js (Express) | `node server.js` | `run_command` block list |
+| npm scripts | `npm start` / `npm run dev` | `run_command` block list |
+| Next.js | `next dev` / `next start` | `run_command` block list |
+| Vite | `vite` | `run_command` block list |
+| Go | `go run .` | `run_command` block list |
+| Rust | `cargo run` | `run_command` block list |
+| Webpack | `webpack-dev-server` | `run_command` block list |
+| npx runners | `npx serve`, `npx vite`, `npx next` | `run_command` block list |
+
+> **Note:** These server commands are BLOCKED in `run_command` and redirected to `run_in_terminal`. The agent is explicitly told to use `run_in_terminal` for all server start commands.
+
 ## Troubleshooting by Language
 
 The agent knows how to diagnose and fix errors for each language stack. Below is the guidance it follows — useful to understand what the agent will do when your build fails.
@@ -462,6 +599,62 @@ The agent works with a fixed tool registry. To prevent it from inventing tools t
 - **Running commands** → use `run_command` for short tasks, `run_in_terminal` for servers (never background with `&` or `nohup`)
 - **Checking diagnostics** → use `read_problems` (not `tsc`, `eslint`, or `pylint` directly — those go through `run_command`)
 - **Starting servers** → use `run_in_terminal` only (never `run_command` for `python app.py`, `npm start`, etc.)
+
+## Testing
+
+Harness includes an automated test suite using [Vitest](https://vitest.dev). Tests cover all agent tools, the agent loop (with mocked DeepSeek API), tool schema validation, and API endpoints.
+
+### Running tests
+
+```powershell
+# Run all tests once
+npm test
+
+# Run tests in watch mode (re-run on file changes)
+npm run test:watch
+
+# Run tests with coverage report
+npm run test:coverage
+
+# Run a specific test file
+npx vitest run server/__tests__/agent.fs.test.ts
+```
+
+### Test structure
+
+```
+server/__tests__/
+├── agent.fs.test.ts          # Filesystem tools: read_file, write_file, edit_file,
+│                             #   list_files, search_files, grep, create_directory,
+│                             #   delete_file, rename_file, write_todos (34 tests)
+├── agent.command.test.ts     # Command tools: run_command, run_in_terminal,
+│                             #   read_command_output (19 tests)
+├── agent.loop.test.ts        # Blocking and streaming agent loops with mocked
+│                             #   DeepSeek API responses (14 tests)
+├── agent.tooldefs.test.ts    # Tool schema validation: required fields,
+│                             #   no duplicate names, property integrity (6 tests)
+└── api.test.ts               # Express endpoint integration tests: health,
+│                             #   agent chat, filesystem APIs, project detection,
+│                             #   system stats (12 tests)
+```
+
+### Test layers
+
+| Layer | What's tested | Mock strategy |
+|-------|--------------|---------------|
+| **Tool definitions** | Every tool has valid JSON Schema, no duplicate names, required params have matching properties | None (static validation) |
+| **Filesystem tools** | `runFsTool()` for each filesystem tool with real temp directories | Real filesystem |
+| **Command tools** | `run_command` executes, blocks servers, returns exit codes; `read_command_output` pagination and filtering | Real `spawn` |
+| **Agent loop** | `agentLoop()` and `agentLoopStream()`: tool selection logic, multi-turn loops, browser/permission handoff, iteration limits, reasoning content passthrough | Mocked DeepSeek API |
+| **API endpoints** | Express routes: `/api/chat/agent`, `/api/chat/agent/stream`, `/api/health`, `/api/system/stats`, `/api/project/detect`, filesystem CRUD, session cleanup | Mocked DeepSeek, real supertest |
+
+### Writing new tests
+
+1. Tests use [Vitest](https://vitest.dev) globals (`describe`, `it`, `expect`, `vi`, `beforeEach`, `afterEach`)
+2. For agent loop tests, mock `chatDeepSeekTool` or `chatDeepSeekToolStream` from `server/deepseek.ts` to return controlled responses
+3. Filesystem/command tests use `runFsTool()` with real temp directories created via `fs.mkdtempSync()`
+4. API tests use `supertest` against the exported `app` from `server/index.ts`
+5. Clean up temp directories in `afterEach` hooks
 
 ## Token Optimization (ITR + Context Caching + Live Compaction)
 

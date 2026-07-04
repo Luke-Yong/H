@@ -8,7 +8,8 @@
     "outDir": "dist",
     "rootDir": ".",
     "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true
+    "forceConsistentCasingInFileNames": true,
+    "types": ["vitest/globals"]
   },
   "include": ["server/**/*.ts"],
   "exclude": ["node_modules", "client"]

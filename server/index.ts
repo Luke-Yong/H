@@ -18,6 +18,8 @@ const app = express();
 const server = createServer(app);
 const wss = new WebSocketServer({ server });
 
+export { app };
+
 const PORT = 3001;
 
 app.use(express.json({ limit: "10mb" }));
@@ -1217,9 +1219,11 @@ wss.on("connection", (ws) => {
   });
 });
 
-server.listen(PORT, () => {
-  console.log(`Harness server running on http://localhost:${PORT}`);
-});
+if (process.env.NODE_ENV !== "test") {
+  server.listen(PORT, () => {
+    console.log(`Harness server running on http://localhost:${PORT}`);
+  });
+}
 
 process.on("SIGINT", async () => {
   process.exit();
