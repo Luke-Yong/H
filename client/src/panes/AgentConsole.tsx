@@ -64,6 +64,7 @@ interface ChatThread {
   title: string;
   messages: ConsoleMessage[];
   createdAt: number;
+  usage?: { estimatedTokens: number; contextLimit: number; turns: number };
 }
 
 let _mid = 0;
@@ -432,6 +433,12 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
   const threadKey = useMemo(() => storageKey(projectPath), [projectPath]);
   const [threads, setThreads] = useState<ChatThread[]>(() => loadThreads(threadKey));
   const [activeThreadId, setActiveThreadId] = useState<string>("");
+  // Effective usage: prefer state, fall back to persisted thread usage
+  const effectiveUsage = useMemo(() => {
+    if (agentUsage) return agentUsage;
+    const t = threads.find((t) => t.id === activeThreadId);
+    return t?.usage ?? null;
+  }, [agentUsage, threads, activeThreadId]);
   const [showHistory, setShowHistory] = useState(false);
   const [fileList, setFileList] = useState<string[]>([]);
   const [fileLoading, setFileLoading] = useState(false);
@@ -448,7 +455,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
       syncMid(latest.messages);
       // Loaded saved chats are no longer streaming — show the footer.
       setAgentStatus("completed");
-      setAgentUsage(null);
+      setAgentUsage(latest.usage ?? null);
       setLoading(false);
     } else {
       setActiveThreadId("");
@@ -519,7 +526,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
       preRoundRef.current = [];
       // Loaded saved chats are no longer streaming — show the footer.
       setAgentStatus("completed");
-      setAgentUsage(null);
+      setAgentUsage(t.usage ?? null);
       setLoading(false);
     }
     setShowHistory(false);
@@ -695,9 +702,60 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
     });
   }, []);
 
-  const revertToPreRound = useCallback(() => {
-    setMessages(preRoundRef.current);
-  }, []);
+  const revertToPreRound = useCallback((msgId: string) => {
+    const msgIndex = messages.findIndex((m) => m.id === msgId);
+    if (msgIndex < 0) return;
+    const removed = messages.slice(msgIndex);
+    const kept = messages.slice(0, msgIndex);
+    // Revert file changes on disk for all messages being removed
+    const root = (getFsBasePath?.() || "").replace(/[/\\]$/, "");
+    for (const m of removed) {
+      if (!m.fileChanges) continue;
+      for (const fc of m.fileChanges) {
+        if (fc.accepted || fc.rejected || !fc.path) continue;
+        let resolved = fc.path;
+        if (root && !/^[a-zA-Z]:/.test(resolved) && !resolved.startsWith("/")) {
+          resolved = root + "/" + resolved.replace(/\\/g, "/");
+        }
+        const hasOriginal = fc.originalContent != null;
+        (async () => {
+          try {
+            if (fc.changeType === "rename" && fc.content) {
+              let newResolved = fc.content;
+              if (root && !/^[a-zA-Z]:/.test(newResolved) && !newResolved.startsWith("/")) {
+                newResolved = root + "/" + newResolved.replace(/\\/g, "/");
+              }
+              const res = await fetch("/api/fs/rename", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ oldPath: newResolved, newPath: resolved }),
+              });
+              if (!res.ok) throw new Error(`Rename revert HTTP ${res.status}`);
+              renameEditorFile?.(resolvePath(newResolved), resolvePath(fc.path));
+            } else if (hasOriginal) {
+              const res = await fetch("/api/fs/write", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ path: resolved, content: fc.originalContent }),
+              });
+              if (!res.ok) throw new Error(`Write revert HTTP ${res.status}`);
+            } else {
+              const res = await fetch("/api/fs/delete", {
+                method: "DELETE", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ path: resolved }),
+              });
+              if (!res.ok) throw new Error(`Delete revert HTTP ${res.status}`);
+              closeEditorFile?.(resolvePath(fc.path));
+            }
+            rejectEditorChange?.(resolvePath(fc.path));
+            onRefreshFs?.();
+          } catch (err) {
+            console.error("Revert file change failed:", err);
+          }
+        })();
+      }
+    }
+    setMessages(kept);
+    preRoundRef.current = kept;
+  }, [messages, getFsBasePath, resolvePath, rejectEditorChange, onRefreshFs, closeEditorFile, renameEditorFile]);
 
   const handleActionClick = useCallback((fn: () => void) => {
     const now = Date.now();
@@ -1094,7 +1152,11 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
             push({ role: "assistant", content: evt.reply, thought: currentThought, fileChanges: fileChangesRef.current.length > 0 ? [...fileChangesRef.current] : undefined, todos: todosRef.current.length > 0 ? [...todosRef.current] : undefined });
           }
           setAgentStatus("completed");
-          if (evt.usage) setAgentUsage(evt.usage);
+          if (evt.usage) {
+            setAgentUsage(evt.usage);
+            // Persist usage to thread
+            setThreads((prev) => prev.map((t) => t.id === activeThreadId ? { ...t, usage: evt.usage } : t));
+          }
           onRefreshFs?.();
           setLoading(false);
           return false;
@@ -1113,11 +1175,11 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
       if (err?.name !== "AbortError") {
         push({ role: "system", content: `Error: ${String(err)}` });
       }
+      setAgentStatus("completed");
       setLoading(false);
     }
 
     // ── Shared SSE event handler for continue loops ──
-    // Handles ALL event types consistently (thinking, text, tool_start, tool_end,
     // done, warning, error, browser_tool, permission_required).
     const handleContinueEvent = (evt: any): Promise<boolean> => {
       return (async (): Promise<boolean> => {
@@ -1323,7 +1385,11 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
             )
           );
           setAgentStatus("completed");
-          if (evt.usage) setAgentUsage(evt.usage);
+          if (evt.usage) {
+            setAgentUsage(evt.usage);
+            // Persist usage to thread
+            setThreads((prev) => prev.map((t) => t.id === activeThreadId ? { ...t, usage: evt.usage } : t));
+          }
           onRefreshFs?.();
           setLoading(false);
           agentDoneRef.current = true;
@@ -1715,6 +1781,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
       await runAgent(msg, ctrl.signal);
     } catch (err: any) {
       if (err?.name !== "AbortError") push({ role: "assistant", content: `Error: ${String(err)}` });
+      setAgentStatus("completed");
       setLoading(false);
     }
     abortRef.current = null;
@@ -2475,7 +2542,7 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
                     <div className="agent-msg-actions">
                       <button className="agent-icon-btn" title="Copy" onClick={() => copyText(msg.content)}><i className="codicon codicon-copy" /></button>
                       <button className="agent-icon-btn" title="Delete" onClick={() => handleActionClick(() => removeMessage(msg.id))}><i className="codicon codicon-trash" /></button>
-                      <button className="agent-icon-btn" title="Revert to before this message" onClick={() => handleActionClick(revertToPreRound)}><i className="codicon codicon-discard" /></button>
+                      <button className="agent-icon-btn" title="Revert to before this message" onClick={() => handleActionClick(() => revertToPreRound(msg.id))}><i className="codicon codicon-discard" /></button>
                     </div>
                   )}
                 </div>
@@ -2506,27 +2573,31 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
         {!loading && safeMessages.length > 0 && (
           <div className="agent-footer">
             <div className="agent-footer-status">
-              {agentStatus === "completed" ? (
-                <><i className="codicon codicon-check-all" /> Completed</>
-              ) : agentStatus === "stopped" ? (
-                <><i className="codicon codicon-debug-stop" /> Manually Stopped</>
-              ) : (
-                <><i className="codicon codicon-comment-discussion" /> Conversation</>
-              )}
+              <i className={`codicon codicon-${agentStatus === "stopped" ? "debug-stop" : "check-all"}`} />
+              {agentStatus === "stopped" ? "Manually Stopped" : "Completed"}
             </div>
-            {agentUsage && (
-              <div className="agent-footer-usage">
-                <div className="agent-footer-usage-bar">
-                  <div
-                    className={`agent-footer-usage-fill${agentUsage.estimatedTokens > agentUsage.contextLimit * 0.8 ? " high" : ""}`}
-                    style={{ width: `${Math.min(100, (agentUsage.estimatedTokens / agentUsage.contextLimit) * 100)}%` }}
-                  />
+            {effectiveUsage && (() => {
+              const pct = Math.min(100, (effectiveUsage.estimatedTokens / effectiveUsage.contextLimit) * 100);
+              const radius = 8;
+              const circumference = 2 * Math.PI * radius;
+              const offset = circumference - (pct / 100) * circumference;
+              return (
+                <div className="agent-footer-usage">
+                  <svg className="agent-footer-usage-ring" width="20" height="20" viewBox="0 0 20 20">
+                    <circle className="agent-footer-usage-ring-bg" cx="10" cy="10" r={radius} />
+                    <circle
+                      className={`agent-footer-usage-ring-fill${effectiveUsage.estimatedTokens > effectiveUsage.contextLimit * 0.8 ? " high" : ""}`}
+                      cx="10" cy="10" r={radius}
+                      strokeDasharray={circumference}
+                      strokeDashoffset={offset}
+                    />
+                  </svg>
+                  <span className="agent-footer-usage-text">
+                    ~{effectiveUsage.estimatedTokens} / {effectiveUsage.contextLimit} tokens ({Math.round(pct)}%) &middot; {effectiveUsage.turns} turns
+                  </span>
                 </div>
-                <span className="agent-footer-usage-text">
-                  ~{agentUsage.estimatedTokens} / {agentUsage.contextLimit} tokens ({Math.round((agentUsage.estimatedTokens / agentUsage.contextLimit) * 100)}%) &middot; {agentUsage.turns} turns
-                </span>
-              </div>
-            )}
+              );
+            })()}
             <div className="agent-footer-actions">
               {changedFiles.length > 0 && (
                 <div className="agent-diff-host">
@@ -2535,7 +2606,10 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
                   </button>
                   {diffPanelOpen && diffHostRect && createPortal(
                     <div className="agent-diff-panel" style={{ position: "fixed", bottom: diffHostRect.bottom, right: diffHostRect.right }}>
-                      <div className="agent-diff-panel-header">Changed files</div>
+                      <div className="agent-diff-panel-header">
+                        Changed files
+                        <button className="agent-diff-panel-close" onClick={() => setDiffPanelOpen(false)} title="Close">&times;</button>
+                      </div>
                       {changedFiles.map((f) => (
                         <div key={f.path} className={`agent-diff-file${expandedDiffPath === f.path ? " expanded" : ""}`}>
                           <button className="agent-diff-file-name" onClick={() => setExpandedDiffPath((p) => p === f.path ? null : f.path)}>
