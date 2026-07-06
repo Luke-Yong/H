@@ -8,7 +8,8 @@
 //
 // Conversation state is held in memory keyed by session id.
 
-import { chatDeepSeekTool, chatDeepSeekToolStream } from "./deepseek";
+import { chatDeepSeekTool, chatDeepSeekToolStream, generateEmbedding } from "./deepseek";
+import { getMemoryStore, MemoryStore } from "./memory";
 import fs from "fs";
 import path from "path";
 import { execSync, spawn } from "child_process";
@@ -48,6 +49,56 @@ export interface AgentState {
   /** True once the API has returned reasoning_content in any response. */
   isReasoningModel?: boolean;
 }
+
+// ── Sub-Agent Types ──
+
+export interface SubAgentConfig {
+  name: string;
+  systemPrompt?: string;
+  tools?: string[];
+  maxIterations?: number;
+  headless?: boolean;
+}
+
+export const SUB_AGENT_PROFILES: Record<string, SubAgentConfig> = {
+  "code-search": {
+    name: "Code Search Agent",
+    tools: ["read_file", "list_files", "search_files", "grep"],
+    headless: true,
+    maxIterations: 8,
+    systemPrompt: `You are a code-search specialist running as a sub-agent. Your ONLY job is to find and read relevant code in the project.
+- Never create, edit, or delete files.
+- Use read_file to inspect files, list_files to browse directories, search_files to find files by name, and grep to search file contents.
+- Return a concise report of what you found with exact file paths and line numbers.
+- Call task_complete with your findings as the summary when done.`,
+  },
+  "code-writer": {
+    name: "Code Writer Agent",
+    tools: ["read_file", "write_file", "edit_file", "list_files", "search_files", "grep",
+            "run_command", "read_problems", "read_command_output", "create_directory", "delete_file", "rename_file"],
+    headless: true,
+    maxIterations: 25,
+    systemPrompt: `You are a code-writing specialist running as a sub-agent. Your job is to implement a specific feature or fix a specific bug.
+- Read relevant files first to understand the existing code before making changes.
+- Prefer edit_file for targeted changes; use write_file only for new files.
+- After making changes, run the build/tests with run_command to verify.
+- Fix any errors before completing.
+- Call task_complete with a summary of all changes made (files modified, what was changed, build status).`,
+  },
+  "researcher": {
+    name: "Research Agent",
+    tools: ["read_file", "list_files", "search_files", "grep", "run_command"],
+    headless: true,
+    maxIterations: 10,
+    systemPrompt: `You are a codebase researcher running as a sub-agent. Explore the project to answer the user's question.
+- Use list_files and search_files to understand the project structure.
+- Use read_file to read relevant source files.
+- Use grep to find where functions, classes, or patterns are used.
+- Use run_command for short queries (git log, npm list, etc.) — but NEVER start servers.
+- Report findings with exact file paths, line numbers, and relevant code snippets.
+- Call task_complete with your research findings as the summary when done.`,
+  },
+};
 
 export interface AgentResponse {
   phase: "done" | "tool_needed";
@@ -513,6 +564,58 @@ export const TOOLS: ToolDef[] = [
     },
   },
   {
+    name: "delegate_task",
+    description:
+      "Delegate a sub-task to a specialized sub-agent that runs independently with its own context window. "
+      + "The sub-agent works in isolation — its conversation does not bloat your context. "
+      + "Use this for complex sub-tasks that would take many turns on their own, such as: "
+      + "deep codebase research, implementing a self-contained feature, fixing a bug across multiple files, "
+      + "or exploring an unfamiliar codebase. "
+      + "Available agent types:\n"
+      + "- 'code-search': find and read code, report findings (read-only, no edits)\n"
+      + "- 'code-writer': implement changes, run builds, fix errors\n"
+      + "- 'researcher': explore the codebase and answer questions\n"
+      + "Returns a summarized result. Call this multiple times for independent sub-tasks, "
+      + "or use delegate_parallel to run several at once.",
+    parameters: {
+      type: "object",
+      properties: {
+        task: { type: "string", description: "Clear, self-contained description of what the sub-agent should accomplish. Include specifics like file names, requirements, or questions." },
+        agent_type: { type: "string", enum: ["code-search", "code-writer", "researcher"], description: "Type of sub-agent to spawn." },
+      },
+      required: ["task", "agent_type"],
+    },
+  },
+  {
+    name: "delegate_parallel",
+    description:
+      "Delegate MULTIPLE sub-tasks to specialized sub-agents that run in parallel. "
+      + "Each sub-agent gets its own context window, so results are independent and don't interfere. "
+      + "Use this when you have several independent sub-tasks — for example, researching a codebase "
+      + "while also implementing a feature, or fixing multiple unrelated bugs at once. "
+      + "Available agent types per task: 'code-search', 'code-writer', 'researcher'. "
+      + "Returns combined results from all sub-agents. "
+      + "For a single sub-task, use delegate_task instead.",
+    parameters: {
+      type: "object",
+      properties: {
+        tasks: {
+          type: "array",
+          description: "List of sub-tasks to run in parallel.",
+          items: {
+            type: "object",
+            properties: {
+              task: { type: "string", description: "Description of what this sub-agent should do." },
+              agent_type: { type: "string", enum: ["code-search", "code-writer", "researcher"], description: "Type of sub-agent for this task." },
+            },
+            required: ["task", "agent_type"],
+          },
+        },
+      },
+      required: ["tasks"],
+    },
+  },
+  {
     name: "write_todos",
     description:
       "Create or update a structured task list to track your progress. "
@@ -545,6 +648,55 @@ export const TOOLS: ToolDef[] = [
       + "Returns linter errors, TypeScript errors, etc. Use this after making changes to verify "
       + "that no new errors were introduced and existing problems were resolved.",
     parameters: { type: "object", properties: {}, required: [] },
+  },
+  {
+    name: "remember",
+    description:
+      "Store a key decision, user preference, project convention, or important fact for cross-session recall. "
+      + "Use this proactively when the user makes a decision (e.g. 'let's use Preact instead of React'), "
+      + "states a preference (e.g. 'I prefer tabs over spaces'), establishes a convention, or when you discover "
+      + "an important project detail that will be useful in future sessions. Memories persist across sessions via SQLite. "
+      + "Categories: 'decision', 'preference', 'convention', 'fact', 'pattern', or 'general'. "
+      + "Tags help group related memories (comma-separated, e.g. 'react,styling,architecture').",
+    parameters: {
+      type: "object",
+      properties: {
+        key: { type: "string", description: "Unique key/identifier for this memory (e.g. 'ui-framework', 'indent-style', 'api-auth-method')." },
+        value: { type: "string", description: "The information to remember. Be specific and detailed." },
+        category: { type: "string", enum: ["decision", "preference", "convention", "fact", "pattern", "general"], description: "Category of this memory." },
+        tags: { type: "string", description: "Comma-separated tags for grouping (e.g. 'react,frontend,styling')." },
+      },
+      required: ["key", "value"],
+    },
+  },
+  {
+    name: "recall",
+    description:
+      "Search stored memories by semantic meaning or exact key. Use this at the start of a session or task "
+      + "to recall user preferences, past decisions, and project conventions. "
+      + "Results are ordered by relevance. If no query/key provided, lists all memories.",
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Search query to find relevant memories (semantic search if embeddings available, keyword fallback otherwise)." },
+        key: { type: "string", description: "Exact key to retrieve a specific memory. Overrides query if both provided." },
+        limit: { type: "integer", description: "Max results to return (default: 5, max: 20)." },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "forget",
+    description:
+      "Remove a stored memory by its key. Use this when a decision is reversed, a preference changes, "
+      + "or stored information becomes outdated.",
+    parameters: {
+      type: "object",
+      properties: {
+        key: { type: "string", description: "The key of the memory to remove." },
+      },
+      required: ["key"],
+    },
   },
   {
     name: "read_command_output",
@@ -1056,6 +1208,109 @@ export async function runFsTool(name: string, params: Record<string, unknown>, r
   return null; // not a filesystem tool
 }
 
+// ── Memory tools ──
+// Handles remember, recall, forget — backed by SQLite with optional embeddings.
+
+async function runMemoryTool(
+  name: string,
+  params: Record<string, unknown>,
+  projectRoot: string,
+  apiKey: string,
+): Promise<string> {
+  const store = getMemoryStore(projectRoot);
+
+  if (name === "remember") {
+    const key = String(params.key || "").trim();
+    const value = String(params.value || "");
+    const category = String(params.category || "general");
+    const tagsStr = String(params.tags || "");
+    const tags = tagsStr ? tagsStr.split(",").map((t) => t.trim()).filter(Boolean) : [];
+
+    if (!key) return "Error: 'key' is required for remember.";
+    if (!value) return "Error: 'value' is required for remember.";
+
+    // Try to generate an embedding for semantic search
+    let embedding: Float32Array | undefined;
+    try {
+      const emb = await generateEmbedding(value, apiKey);
+      if (emb) embedding = emb;
+    } catch { /* embedding generation is optional */ }
+
+    store.remember(key, value, category, tags, embedding);
+    const total = store.count();
+    return `Stored memory "${key}" (${category})${embedding ? " with embedding" : ""}. Total memories: ${total}.`;
+  }
+
+  if (name === "recall") {
+    const exactKey = params.key ? String(params.key).trim() : null;
+    const query = params.query ? String(params.query).trim() : null;
+    const limit = Math.min(Math.max(1, Number(params.limit) || 5), 20);
+
+    // Exact key lookup
+    if (exactKey) {
+      const entry = store.recallByKey(exactKey);
+      if (!entry) return `No memory found with key "${exactKey}".`;
+      return formatMemoryEntry(entry);
+    }
+
+    // Semantic / keyword search
+    if (query) {
+      // Try embedding-based search first if available
+      try {
+        const emb = await generateEmbedding(query, apiKey);
+        if (emb && store.hasEmbeddings()) {
+          const results = store.searchByEmbedding(emb, limit);
+          if (results.length > 0) {
+            return formatMemoryResults(results, "semantic");
+          }
+        }
+      } catch { /* fall through to keyword search */ }
+
+      const results = store.searchByKeyword(query, limit);
+      if (results.length === 0) return `No memories found matching "${query}".`;
+      return formatMemoryResults(results, "keyword");
+    }
+
+    // No query or key — list all
+    const all = store.list();
+    if (all.length === 0) return "No memories stored yet. Use remember to store important decisions, preferences, and conventions.";
+    const recent = all.slice(0, limit);
+    return formatMemoryResults(recent, "recent");
+  }
+
+  if (name === "forget") {
+    const key = String(params.key || "").trim();
+    if (!key) return "Error: 'key' is required for forget.";
+    const deleted = store.forget(key);
+    return deleted
+      ? `Deleted memory "${key}".`
+      : `No memory found with key "${key}". Nothing deleted.`;
+  }
+
+  return `Unknown memory tool: ${name}`;
+}
+
+function formatMemoryEntry(e: { key: string; value: string; category: string; tags: string; createdAt: string }): string {
+  const parts = [`Key: ${e.key}`, `Category: ${e.category}`];
+  if (e.tags) parts.push(`Tags: ${e.tags}`);
+  parts.push(`Stored: ${e.createdAt}`);
+  parts.push(`Value: ${e.value}`);
+  return parts.join("\n");
+}
+
+function formatMemoryResults(results: Array<{ key: string; value: string; category: string; tags: string; score?: number; createdAt: string }>, mode: string): string {
+  const total = results.length;
+  const header = total === 1
+    ? `1 memory found (${mode} search):`
+    : `${total} memories found (${mode} search):`;
+  const items = results.map((r, i) => {
+    const score = r.score != null ? ` [score: ${r.score.toFixed(2)}]` : "";
+    const tags = r.tags ? ` [${r.tags}]` : "";
+    return `${i + 1}. ${r.key} (${r.category})${tags}${score}\n   ${r.value.slice(0, 200)}${r.value.length > 200 ? "..." : ""}`;
+  });
+  return [header, ...items].join("\n\n");
+}
+
 // ── Agent loop ──
 
 const MAX_ITERATIONS = 50;
@@ -1294,6 +1549,11 @@ You have access to tools that let you read/write files, run commands, interact w
 8. After starting a server, do NOT guess the URL or port. Call \`browser_info\` to check if a tab opened. If none, ask the user for the URL.
 9. Only use tools from the registry. NEVER invent tools — use \`read_file\` (not cat/head/tail), \`list_files\` (not ls/dir), \`search_files\` (not find/locate), \`grep\` (the tool, not the shell command), \`edit_file\` (not sed/awk), \`write_file\` (not echo>/cp), \`run_command\` for short commands, \`run_in_terminal\` for servers.
 10. At the end of every turn, ALWAYS call \`task_complete\` with a brief summary. Never end with plain text — always use the tool.
+
+### Persistent Memory
+- Use \`remember\` to store important decisions, user preferences, project conventions, and discovered patterns. Memories survive across sessions (SQLite-backed). Be proactive — when the user says "let's use X", "I prefer Y", or establishes a convention, store it.
+- Use \`recall\` at the start of a session or task to retrieve relevant past memories. Search by semantic meaning or exact key.
+- Use \`forget\` to remove outdated or incorrect memories when preferences change.
 
 ### File conventions
 - All file paths are relative to the project root.
@@ -1741,6 +2001,109 @@ function buildSystemPrompt(
 
 let callSeq = 0;
 
+// ── Sub-Agent Runner ──
+
+function buildOpenAiMessagesForSubAgent(
+  state: AgentState,
+  customSystemPrompt: string,
+): ModelMessage[] {
+  const msgs: ModelMessage[] = [{ role: "system", content: customSystemPrompt }];
+  for (const m of state.messages) {
+    if (m.role === "tool") {
+      msgs.push({ role: "tool", content: m.content, tool_call_id: m.tool_call_id });
+      continue;
+    }
+    if (m.role === "assistant" && m.name) {
+      try {
+        const calls = JSON.parse(m.content);
+        msgs.push({ role: "assistant", content: null, tool_calls: calls });
+      } catch {
+        msgs.push({ role: "assistant", content: m.content });
+      }
+      continue;
+    }
+    msgs.push({ role: m.role as "user" | "assistant", content: m.content });
+  }
+  return msgs;
+}
+
+function summarizeSubAgentResult(rawResult: string, agentName: string): string {
+  const lines = rawResult.split("\n").filter(Boolean);
+  const importantLines = lines.filter((l, i) =>
+    i < 3 || /(file|change|error|fix|wrote|edited|created|deleted|found|modified)/i.test(l),
+  );
+  const summary = importantLines.slice(0, 15).join("\n");
+  if (summary.length < rawResult.length) return `${summary}\n... (full: ${lines.length} lines)`;
+  return summary;
+}
+
+async function runSubAgent(
+  parentState: AgentState,
+  task: string,
+  config: SubAgentConfig,
+  modelOpts: { model?: string; apiKey: string },
+): Promise<{ success: boolean; summary: string; iterations: number }> {
+  const maxIter = config.maxIterations || 15;
+
+  const subState: AgentState = {
+    messages: [{ role: "user", content: task }],
+    iteration: 0,
+    projectRoot: parentState.projectRoot,
+  };
+
+  const allowedSet = config.tools ? new Set(config.tools) : null;
+  const subTools = config.headless
+    ? TOOLS.filter((t) => (allowedSet ? allowedSet.has(t.name) : true) && !t.name.startsWith("browser_") && t.name !== "run_in_terminal")
+    : allowedSet ? TOOLS.filter((t) => allowedSet.has(t.name)) : TOOLS;
+
+  const systemPrompt = config.systemPrompt || "";
+  for (let iter = 0; iter < maxIter; iter++) {
+    subState.iteration++;
+    const openaiMessages = buildOpenAiMessagesForSubAgent(subState, systemPrompt);
+    const { text, toolCalls } = await chatDeepSeekTool(openaiMessages, subTools, modelOpts);
+
+    if (!toolCalls || toolCalls.length === 0) {
+      const reply = text || "Done.";
+      subState.messages.push({ role: "assistant", content: reply });
+      const summary = summarizeSubAgentResult(reply, config.name);
+      return { success: true, summary, iterations: iter + 1 };
+    }
+
+    for (const tc of toolCalls) {
+      const fnName = tc.function.name;
+      const params = (() => { try { return JSON.parse(tc.function.arguments); } catch { return {}; } })();
+
+      subState.messages.push({
+        role: "assistant",
+        content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]),
+        name: fnName,
+      });
+
+      const fsResult = await runFsTool(fnName, params, subState.projectRoot);
+      if (fsResult !== null) {
+        const stored = fnName === "run_command" ? summarizeCommandResult(fsResult, "Sub-agent command") : fsResult;
+        subState.messages.push({ role: "tool", content: stored, tool_call_id: tc.id });
+      } else if (fnName === "read_problems") {
+        const diag = await runReadProblems(subState.projectRoot);
+        subState.messages.push({ role: "tool", content: diag.summary, tool_call_id: tc.id });
+      } else if (fnName === "task_complete") {
+        const summary = String(params.summary || "Task completed.");
+        subState.messages.push({ role: "tool", content: "OK", tool_call_id: tc.id });
+        const final = summarizeSubAgentResult(summary, config.name);
+        return { success: true, summary: final, iterations: iter + 1 };
+      } else {
+        subState.messages.push({
+          role: "tool",
+          content: `Tool "${fnName}" is not available to sub-agents.`,
+          tool_call_id: tc.id,
+        });
+      }
+    }
+  }
+
+  return { success: false, summary: `Sub-agent reached max iterations (${maxIter}).`, iterations: maxIter };
+}
+
 export async function agentLoop(
   projectRoot: string,
   state: AgentState,
@@ -1805,12 +2168,50 @@ export async function agentLoop(
         continue;
       }
 
+      // ── Memory tools: remember, recall, forget ──
+      if (fnName === "remember" || fnName === "recall" || fnName === "forget") {
+        const memResult = await runMemoryTool(fnName, params, projectRoot, apiKey);
+        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc2(reasoningContent) });
+        state.messages.push({ role: "tool", content: memResult, tool_call_id: tc.id });
+        executedTools.push({ name: fnName, result: memResult.slice(0, 1000) });
+        continue;
+      }
+
       // task_complete ends the loop.
       if (fnName === "task_complete") {
         const summary = String(params.summary || "Task completed.");
         state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc2(reasoningContent) });
         state.messages.push({ role: "tool", content: "OK", tool_call_id: tc.id });
         return { phase: "done", reply: summary, messages: state.messages, executedTools };
+      }
+
+      // ── Sub-agent delegation ──
+      if (fnName === "delegate_task") {
+        const cfg = SUB_AGENT_PROFILES[String(params.agent_type || "")] || SUB_AGENT_PROFILES["code-search"];
+        const subResult = await runSubAgent(state, String(params.task || ""), cfg, { model: modelOpts?.model, apiKey: apiKey! });
+        const resultText = `[${cfg.name}] Completed in ${subResult.iterations} turns.\n${subResult.summary}`;
+        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc2(reasoningContent) });
+        state.messages.push({ role: "tool", content: resultText, tool_call_id: tc.id });
+        executedTools.push({ name: fnName, result: resultText.slice(0, 1000) });
+        continue;
+      }
+
+      if (fnName === "delegate_parallel") {
+        const tasks = (params.tasks || []) as Array<{ task: string; agent_type: string }>;
+        const results = await Promise.all(
+          tasks.map((t) => {
+            const cfg = SUB_AGENT_PROFILES[t.agent_type] || SUB_AGENT_PROFILES["code-search"];
+            return runSubAgent(state, t.task, cfg, { model: modelOpts?.model, apiKey: apiKey! });
+          }),
+        );
+        const combined = results
+          .map((r, i) => `[${i + 1}] ${r.summary}`)
+          .join("\n");
+        const resultText = `${results.length} sub-agents completed.\n${combined}`;
+        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc2(reasoningContent) });
+        state.messages.push({ role: "tool", content: resultText, tool_call_id: tc.id });
+        executedTools.push({ name: fnName, result: resultText.slice(0, 1000) });
+        continue;
       }
 
       // Browser tool — needs the renderer to execute it.
@@ -2102,6 +2503,22 @@ export async function* agentLoopStream(
         continue;
       }
 
+      // ── Memory tools: remember, recall, forget ──
+      if (fnName === "remember" || fnName === "recall" || fnName === "forget") {
+        yield { type: "tool_start", toolName: fnName, toolParams: params };
+        const memResult = await runMemoryTool(fnName, params, projectRoot, apiKey);
+        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
+        state.messages.push({ role: "tool", content: memResult, tool_call_id: tc.id });
+        yield {
+          type: "tool_end",
+          toolName: fnName,
+          toolResult: memResult.slice(0, 2000),
+          executedTools: [{ name: fnName, result: memResult.slice(0, 500) }],
+        };
+        executedTools.push({ name: fnName, result: memResult.slice(0, 1000) });
+        continue;
+      }
+
       // ── Read-only + auto-execute filesystem tools (no Accept/Reject prompt) ──
       const isFsTool = [
         "read_file", "list_files", "search_files", "grep", "create_directory", "write_todos", "read_command_output",
@@ -2142,6 +2559,49 @@ export async function* agentLoopStream(
         state.messages.push({ role: "tool", content: "OK", tool_call_id: tc.id });
         yield { type: "done", reply: summary, usage: makeUsage(iter + 1) };
         return;
+      }
+
+      // ── Sub-agent delegation (streaming) ──
+      if (fnName === "delegate_task") {
+        yield { type: "tool_start", toolName: fnName, toolParams: params };
+        const cfg = SUB_AGENT_PROFILES[String(params.agent_type || "")] || SUB_AGENT_PROFILES["code-search"];
+        const subResult = await runSubAgent(state, String(params.task || ""), cfg, { model: modelOpts?.model, apiKey: apiKey! });
+        const resultText = `[${cfg.name}] Completed in ${subResult.iterations} turns.\n${subResult.summary}`;
+        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
+        state.messages.push({ role: "tool", content: resultText, tool_call_id: tc.id });
+        yield {
+          type: "tool_end",
+          toolName: fnName,
+          toolResult: resultText.slice(0, 2000),
+          executedTools: [{ name: fnName, result: resultText.slice(0, 500) }],
+        };
+        executedTools.push({ name: fnName, result: resultText.slice(0, 1000) });
+        continue;
+      }
+
+      if (fnName === "delegate_parallel") {
+        yield { type: "tool_start", toolName: fnName, toolParams: params };
+        const tasks = (params.tasks || []) as Array<{ task: string; agent_type: string }>;
+        const results = await Promise.all(
+          tasks.map((t) => {
+            const cfg = SUB_AGENT_PROFILES[t.agent_type] || SUB_AGENT_PROFILES["code-search"];
+            return runSubAgent(state, t.task, cfg, { model: modelOpts?.model, apiKey: apiKey! });
+          }),
+        );
+        const combined = results
+          .map((r, i) => `[${i + 1}] ${r.summary}`)
+          .join("\n");
+        const resultText = `${results.length} sub-agents completed.\n${combined}`;
+        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
+        state.messages.push({ role: "tool", content: resultText, tool_call_id: tc.id });
+        yield {
+          type: "tool_end",
+          toolName: fnName,
+          toolResult: resultText.slice(0, 2000),
+          executedTools: [{ name: fnName, result: resultText.slice(0, 500) }],
+        };
+        executedTools.push({ name: fnName, result: resultText.slice(0, 1000) });
+        continue;
       }
 
       // Browser tool

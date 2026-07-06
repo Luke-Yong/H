@@ -1090,6 +1090,60 @@ app.get("/api/health", (_req, res) => {
   res.json({ status: "ok" });
 });
 
+// ── MCP (Model Context Protocol) endpoints ──
+import { HarnessMcpServer, handleMcpSseRequest } from "./mcp";
+
+const mcpServer = new HarnessMcpServer();
+
+// JSON-RPC over HTTP (POST)
+app.post("/api/mcp", async (req, res) => {
+  try {
+    const body = req.body;
+    if (!body || !body.method) {
+      return res.status(400).json({ error: "Invalid JSON-RPC request" });
+    }
+    // Update project root from request if provided
+    if (body.params?.projectRoot) {
+      mcpServer.setProjectRoot(String(body.params.projectRoot));
+    }
+    const response = await handleMcpSseRequest(mcpServer, body);
+    if (response) {
+      res.json(response);
+    } else {
+      res.status(202).json({ status: "accepted" }); // Notification, no response
+    }
+  } catch (err) {
+    res.status(500).json({
+      jsonrpc: "2.0",
+      id: req.body?.id || null,
+      error: { code: -32603, message: err instanceof Error ? err.message : String(err) },
+    });
+  }
+});
+
+// SSE transport (GET) — opens a persistent SSE connection for streaming MCP messages
+app.get("/api/mcp/sse", (req, res) => {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+
+  // Send initial endpoint event
+  const endpointUrl = "/api/mcp";
+  res.write(`event: endpoint\ndata: ${endpointUrl}\n\n`);
+
+  // Keep connection alive
+  const keepAlive = setInterval(() => {
+    res.write(": keepalive\n\n");
+  }, 15000);
+
+  req.on("close", () => {
+    clearInterval(keepAlive);
+  });
+});
+
 // ── Serve client (desktop / production) ──
 const clientDist = path.resolve(process.cwd(), "client", "dist");
 if (process.env.HARNESS_SERVE_CLIENT === "1" && fs.existsSync(path.join(clientDist, "index.html"))) {

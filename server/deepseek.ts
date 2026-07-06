@@ -3,6 +3,39 @@ import path from "path";
 
 const BASE_URL = "https://api.deepseek.com/v1";
 
+// ── Embeddings ──
+// Used by the memory system for semantic search. Returns a Float32Array
+// or null if the API call fails (caller falls back to keyword search).
+
+export async function generateEmbedding(
+  text: string,
+  apiKey: string,
+): Promise<Float32Array | null> {
+  try {
+    const res = await fetch(`${BASE_URL}/embeddings`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "deepseek-chat",
+        input: text,
+      }),
+    });
+    if (!res.ok) {
+      // DeepSeek may not support embeddings on all tiers; fail gracefully
+      return null;
+    }
+    const data: any = await res.json();
+    const embedding: number[] = data.data?.[0]?.embedding;
+    if (!embedding || embedding.length === 0) return null;
+    return new Float32Array(embedding);
+  } catch {
+    return null;
+  }
+}
+
 // ── Shared fetch helper for DeepSeek API ──
 // DeepSeek supports automatic prefix caching: when the system message (first
 // element) is identical across requests, the KV cache is reused server-side,

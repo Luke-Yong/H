@@ -441,6 +441,135 @@ Agent calls run_in_terminal
 |------|-------------|
 | `write_todos` | Create or update a structured task list to track progress |
 | `task_complete` | Signal completion with a summary of what was done |
+| `delegate_task` | Delegate a sub-task to a specialized sub-agent (code-search, code-writer, researcher) that runs independently with its own context window |
+| `delegate_parallel` | Delegate multiple sub-tasks to run in parallel, each with its own sub-agent. Returns combined results |
+
+### Multi-Agent Delegation
+
+Harness supports **sub-agent delegation** — the main agent can spawn specialized sub-agents to handle complex sub-tasks in isolation. Each sub-agent gets its own context window, so its conversation history does not bloat the parent agent's context.
+
+#### Architecture
+
+```
+┌──────────────────────────────────────────────┐
+│  Parent Agent (Orchestrator)                 │
+│  - Breaks down user request with write_todos │
+│  - Calls delegate_task / delegate_parallel   │
+│  - Synthesizes results, calls task_complete  │
+└──────┬──────────────────┬────────────────────┘
+       ▼                  ▼
+┌──────────────┐  ┌──────────────┐
+│ Sub-Agent #1 │  │ Sub-Agent #2 │
+│ Isolated     │  │ Isolated     │
+│ AgentState   │  │ AgentState   │
+│ Own context  │  │ Own context  │
+│ Own tools    │  │ Own tools    │
+│ Result → sum │  │ Result → sum │
+└──────────────┘  └──────────────┘
+```
+
+#### Agent Profiles
+
+| Profile | Tools | Iterations | Description |
+|---------|-------|-----------|-------------|
+| `code-search` | `read_file`, `list_files`, `search_files`, `grep` | 8 | Read-only code exploration. Finds files, reads code, reports findings. Never edits. |
+| `code-writer` | Full filesystem + `run_command`, `read_problems` | 25 | Implements features or fixes bugs. Reads, edits, builds, and verifies. |
+| `researcher` | `read_file`, `list_files`, `search_files`, `grep`, `run_command` | 10 | Explores codebase to answer questions. Reports with file paths and line numbers. |
+
+#### Key Design
+
+| Feature | Detail |
+|---------|--------|
+| **Context isolation** | Each sub-agent has its own `AgentState` — messages do not pollute the parent's context |
+| **Tool allowlisting** | Sub-agents receive only the tools their profile specifies (e.g. code-search can never write files) |
+| **Headless execution** | Sub-agents cannot use browser tools or `run_in_terminal` — they run entirely server-side |
+| **Result summarization** | Sub-agent results are compressed before returning to the parent, preserving context budget |
+| **Parallelism** | `delegate_parallel` runs multiple sub-agents concurrently via `Promise.all` |
+
+#### Usage
+
+The parent agent uses these tools just like any other:
+
+```
+Agent: write_todos todos=[
+  {id:1 text:"Research existing auth code" status:pending},
+  {id:2 text:"Add login endpoint" status:pending}
+]
+
+Agent: delegate_task task="Find all authentication-related code 
+  in the project. Report file paths, line numbers, and patterns used."
+  agent_type="code-search"
+
+→ [Code Search Agent] Completed in 4 turns.
+  Found auth code in:
+  - server/auth.ts:45-120 (JWT verification, password hashing)
+  - client/src/Login.tsx:1-80 (login form component)
+  ...
+
+Agent: delegate_parallel tasks=[
+  {task:"Implement POST /api/login in server/auth.ts", agent_type:"code-writer"},
+  {task:"Research how existing API routes handle error responses", agent_type:"researcher"}
+]
+
+→ 2 sub-agents completed.
+  [1] Wrote ~500 tokens to server/auth.ts. Build passed.
+  [2] Found error handling pattern in server/middleware.ts:30-55...
+```
+
+#### When to use
+
+- **`delegate_task`**: For a single complex sub-task that would take many turns (deep research, feature implementation, multi-file refactoring)
+- **`delegate_parallel`**: For multiple independent sub-tasks that don't depend on each other (parallel research + implementation, multiple unrelated fixes)
+
+### Persistent Memory
+
+Harness includes a **cross-session memory system** backed by SQLite. The agent can store key decisions, user preferences, project conventions, and discovered patterns — and recall them in future sessions.
+
+#### How it works
+
+```
+Agent detects an important fact
+  → calls remember(key, value, category, tags)
+  → value is optionally embedded via DeepSeek embeddings API
+  → stored in .harness/memory.db (SQLite, per project)
+
+Next session:
+  → Agent calls recall(query: "UI framework")
+  → Semantic search (cosine similarity) if embeddings exist
+  → Falls back to keyword search if embedding API unavailable
+  → Returns ranked results with scores
+```
+
+#### Tools
+
+| Tool | Description |
+|------|-------------|
+| `remember` | Store a key decision, user preference, project convention, or important fact. Persists across sessions in SQLite. Categories: `decision`, `preference`, `convention`, `fact`, `pattern`, `general`. Tags help group related memories. The value is optionally embedded via DeepSeek API for semantic search. |
+| `recall` | Search stored memories by semantic meaning or exact key. If embeddings are available, uses cosine similarity search. Otherwise falls back to keyword matching on key, value, tags, and category. Pass no params to list all memories. |
+| `forget` | Remove a stored memory by its key. Use when a decision is reversed, a preference changes, or stored information becomes outdated. |
+
+#### Storage
+
+| Detail | Value |
+|--------|-------|
+| Database | SQLite (WAL mode) at `.harness/memory.db` per project root |
+| Schema | `id`, `key` (unique), `value`, `category`, `tags`, `embedding` (BLOB), `created_at`, `updated_at` |
+| Embeddings | Generated via DeepSeek `/v1/embeddings` endpoint (optional; graceful fallback to keyword search if unavailable) |
+| Retrieval | Embedding cosine similarity search → keyword `LIKE` fallback → list-all |
+
+#### When the agent uses memory
+
+- **Proactive storage**: When the user says "let's use X", "I prefer Y", or establishes a project convention, the agent calls `remember` without being asked.
+- **Session startup**: The agent is instructed to `recall` relevant memories at the start of a task to pick up past decisions and preferences.
+- **Memory cleanup**: When preferences change or decisions are reversed, the agent can `forget` outdated entries.
+
+#### Files
+
+| File | Role |
+|------|------|
+| `server/memory.ts` | `MemoryStore` class — SQLite CRUD, embedding search, cosine similarity, singleton-per-project |
+| `server/deepseek.ts` | `generateEmbedding()` — calls DeepSeek embeddings API, returns `Float32Array` |
+| `server/agent.ts` | `runMemoryTool()` — tool execution handler; wired in both `agentLoop()` and `agentLoopStream()` |
 
 ## Agent Command Catalog
 
@@ -690,6 +819,145 @@ The agent works with a fixed tool registry. To prevent it from inventing tools t
 - **Running commands** → use `run_command` for short tasks, `run_in_terminal` for servers (never background with `&` or `nohup`)
 - **Checking diagnostics** → use `read_problems` (not `tsc`, `eslint`, or `pylint` directly — those go through `run_command`)
 - **Starting servers** → use `run_in_terminal` only (never `run_command` for `python app.py`, `npm start`, etc.)
+
+## MCP (Model Context Protocol)
+
+Harness can act as an **MCP server**, exposing its filesystem, terminal, git, and system tools to any MCP-compatible client (Claude Desktop, Cursor, VS Code with Copilot, etc.).
+
+### Which transport to use
+
+The configuration depends on how you're running Harness:
+
+| Scenario | Transport | Why |
+|----------|-----------|-----|
+| **Development** (source checkout) | Stdio or SSE | Both work; stdio gives you project isolation |
+| **Electron desktop app** (packaged) | **SSE only** | The Express server already runs inside Electron on port 3001 — no extra process needed |
+
+> **In an Electron app:** the Harness Express server starts inside the Electron main process. The MCP endpoints (`/api/mcp`, `/api/mcp/sse`) are available automatically on `http://localhost:3001`. You do NOT need a separate process or a `cwd` pointing to the source code — just connect via SSE.
+
+### Development mode (source checkout)
+
+When running Harness from source (`npm run dev`), you have both options:
+
+#### Option A: SSE (simplest — no extra config)
+
+Start the server, then point any MCP client at the running endpoint:
+
+```json
+{
+  "mcpServers": {
+    "harness": {
+      "url": "http://localhost:3001/api/mcp/sse"
+    }
+  }
+}
+```
+
+Works with Claude Desktop, Cursor, VS Code, and any SSE-compatible client.
+
+#### Option B: Stdio (project isolation)
+
+Run a separate process per project. The `cwd` points to the Harness source checkout so `tsx` and the server files are found:
+
+```powershell
+npx tsx server/mcp-server.ts "D:\my-project"
+```
+
+Claude Desktop config (`%APPDATA%\Claude\claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "harness": {
+      "command": "npx",
+      "args": ["tsx", "server/mcp-server.ts", "D:\\my-project"],
+      "cwd": "D:\\Work Projects\\Harness"
+    }
+  }
+}
+```
+
+Cursor config (`Settings > MCP > Add Server`):
+
+```json
+{
+  "mcpServers": {
+    "harness": {
+      "command": "npx",
+      "args": ["tsx", "server/mcp-server.ts", "${workspaceFolder}"],
+      "cwd": "D:\\Work Projects\\Harness"
+    }
+  }
+}
+```
+
+### Electron desktop app (packaged)
+
+When Harness is installed as a desktop app, the server is already running at `http://localhost:3001`. Use SSE transport only — no `command`/`cwd` needed:
+
+```json
+{
+  "mcpServers": {
+    "harness": {
+      "url": "http://localhost:3001/api/mcp/sse"
+    }
+  }
+}
+```
+
+The embedded Express server handles all MCP requests. The project root is automatically set to the currently open project folder in the Harness UI, so tools like `read_file`, `grep`, and `run_command` operate on the right project automatically.
+
+**Why stdio mode doesn't work well for packaged Electron apps:**
+
+- There's no `tsx` runtime on the user's machine
+- The source files (`server/mcp-server.ts`) are compiled/bundled, not on disk
+- The Express server is already running inside Electron — spawning a second process is redundant
+
+If you really need stdio from a packaged app, you can compile the MCP entry point to a standalone `.cjs` file and bundle it with the app. But SSE is the intended path.
+
+### MCP tools
+
+The following tools are exposed via MCP:
+
+| Tool | Description |
+|------|-------------|
+| `read_file` | Read a file with line numbers or list a directory |
+| `write_file` | Create or overwrite a file |
+| `edit_file` | Targeted string replacement in a file |
+| `list_files` | List files and directories at a path |
+| `search_files` | Find files/folders by name pattern |
+| `grep` | Search file contents with regex |
+| `run_command` | Execute a shell command (sandboxed, no permission needed) |
+| `create_directory` | Create a directory (and parent dirs) |
+| `delete_file` | Delete a file or directory (recursive) |
+| `rename_file` | Rename or move a file or directory |
+| `git_status` | Get staged and unstaged git changes, current branch |
+| `git_log` | Get recent commit history |
+| `git_diff` | Get the diff for a specific file |
+| `system_info` | Get CPU, memory, disk, OS details |
+
+### Protocol details
+
+Harness implements **MCP protocol version `2024-11-05`** with JSON-RPC 2.0:
+
+1. **Initialize** — Client sends `initialize` → Server returns capabilities and server info
+2. **List tools** — Client sends `tools/list` → Server returns tool definitions with JSON Schema
+3. **Call tool** — Client sends `tools/call` → Server executes the tool and returns `{ content: [{ type: "text", text: "..." }] }`
+
+The server only exposes **tools** capability — no resources or prompts.
+
+### Example MCP exchange
+
+```
+→ {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}
+← {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"harness","version":"1.0.0"}}}
+
+→ {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
+← {"jsonrpc":"2.0","id":2,"result":{"tools":[...]}}
+
+→ {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"server/index.ts","limit":10}}}
+← {"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"   1| import \"dotenv/config\";\n..."}],"isError":false}}
+```
 
 ## Testing
 
