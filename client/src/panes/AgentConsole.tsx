@@ -28,6 +28,10 @@ interface ConsoleMessage {
   fileChanges?: FileChange[];
   /** True if this system message is a warning (amber accent). */
   isWarning?: boolean;
+  /** Sub-agent message trace (rendered as collapsible block). */
+  subAgentMessages?: { role: string; content: string; name?: string; reasoning_content?: string }[];
+  /** Sub-agent display name. */
+  subAgentName?: string;
 }
 
 interface TodoItem {
@@ -159,6 +163,10 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
   const pendingPermissionMsgIdRef = useRef<string | null>(null);
   const queuedPermissionDecisionRef = useRef<boolean | null>(null);
   const agentDoneRef = useRef(false);
+  // Cumulative turns across the entire session (not per-response)
+  const totalTurnsRef = useRef(0);
+  // Track which sub-agent cards are expanded (keyed by message id)
+  const [expandedSubAgents, setExpandedSubAgents] = useState<Set<string>>(new Set());
   // Agent completion footer state
   const [agentStatus, setAgentStatus] = useState<"idle" | "completed" | "stopped">("idle");
   const [agentUsage, setAgentUsage] = useState<{ estimatedTokens: number; contextLimit: number; turns: number } | null>(null);
@@ -467,16 +475,22 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadKey]);
 
+  // Stable ref for getProjectFiles to avoid re-running the file-list effect
+  // when the parent passes a new function reference on every render.
+  const getProjectFilesRef = useRef(getProjectFiles);
+  getProjectFilesRef.current = getProjectFiles;
+
   // Load project files async for mention dropdown
   useEffect(() => {
     let active = true;
     setFileLoading(true);
     (async () => {
-      const files = await (getProjectFiles?.() ?? Promise.resolve([]));
+      const files = await (getProjectFilesRef.current?.() ?? Promise.resolve([]));
       if (active) { setFileList(files); setFileLoading(false); }
     })();
     return () => { active = false; };
-  }, [getProjectFiles, messages]); // reload on messages change (files may be created)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages]); // reload on messages change (files may be created)
 
   // Save current thread whenever messages change
   useEffect(() => {
@@ -1060,6 +1074,10 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
                 const patch: Partial<ConsoleMessage> = { content: isTerminal ? "" : (evt.toolResult || ""), state: undefined };
                 // Only override sandboxOutput if the server actually sent one
                 if (evt.toolSandbox != null) patch.sandboxOutput = evt.toolSandbox;
+                if ((evt as any).subAgentMessages) {
+                  patch.subAgentMessages = (evt as any).subAgentMessages;
+                  patch.subAgentName = (evt as any).subAgentName;
+                }
                 next[idx] = { ...next[idx], ...patch };
               }
               return next;
@@ -1153,7 +1171,8 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
           }
           setAgentStatus("completed");
           if (evt.usage) {
-            setAgentUsage(evt.usage);
+            totalTurnsRef.current += evt.usage.turns || 0;
+            setAgentUsage({ ...evt.usage, turns: totalTurnsRef.current });
             // Persist usage to thread
             setThreads((prev) => prev.map((t) => t.id === activeThreadId ? { ...t, usage: evt.usage } : t));
           }
@@ -1279,8 +1298,13 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
               if (idx >= 0) {
                 // Don't show raw "Diff ready" as tool-card content — the
                 // accept/reject buttons convey the action. Show nothing.
-                const patch: Partial<ConsoleMessage> = { content: "", state: undefined };
+                const isDiffReady = evt.toolResult === "Diff ready";
+                const patch: Partial<ConsoleMessage> = { content: isDiffReady ? "" : (evt.toolResult || ""), state: undefined };
                 if (evt.toolSandbox != null) patch.sandboxOutput = evt.toolSandbox;
+                if ((evt as any).subAgentMessages) {
+                  patch.subAgentMessages = (evt as any).subAgentMessages;
+                  patch.subAgentName = (evt as any).subAgentName;
+                }
                 next[idx] = { ...next[idx], ...patch };
               }
               return next;
@@ -1386,7 +1410,8 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
           );
           setAgentStatus("completed");
           if (evt.usage) {
-            setAgentUsage(evt.usage);
+            totalTurnsRef.current += evt.usage.turns || 0;
+            setAgentUsage({ ...evt.usage, turns: totalTurnsRef.current });
             // Persist usage to thread
             setThreads((prev) => prev.map((t) => t.id === activeThreadId ? { ...t, usage: evt.usage } : t));
           }
@@ -1899,17 +1924,17 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
 
   // ── Pending items for the input-area banner ──
   const pendingTodos = useMemo(() => {
-    const collected: (TodoItem & { msgId: string })[] = [];
+    // Only use the latest todos — when the agent calls write_todos again,
+    // old messages still carry stale todo arrays. We want just the newest.
+    let latestTodos: (TodoItem & { msgId: string })[] = [];
     for (const m of messages) {
-      if (m.todos) {
-        for (const t of m.todos) {
-          if (t.status !== "completed" && t.status !== "cancelled") {
-            collected.push({ ...t, msgId: m.id });
-          }
-        }
+      if (m.todos && m.todos.length > 0) {
+        latestTodos = m.todos
+          .filter((t) => t.status !== "completed" && t.status !== "cancelled")
+          .map((t) => ({ ...t, msgId: m.id }));
       }
     }
-    return collected;
+    return latestTodos;
   }, [messages]);
 
   const unconfirmedFileChanges: { path: string; name: string; msgId: string }[] = useMemo(() => {
@@ -1930,10 +1955,18 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
     // Collect paths before state update so side effects can run OUTSIDE the
     // setMessages functional updater (avoiding setState-during-render in EditorPane).
     const pathsToAccept: string[] = [];
+    let renameOldPath = "";
+    let renameNewPath = "";
     for (const m of messages) {
       if (m.fileChanges) {
         for (const fc of m.fileChanges) {
-          if (!fc.accepted && !fc.rejected && fc.deferred) pathsToAccept.push(fc.path);
+          if (!fc.accepted && !fc.rejected && fc.deferred) {
+            pathsToAccept.push(fc.path);
+            if (fc.changeType === "rename" && fc.content) {
+              renameOldPath = fc.path;
+              renameNewPath = fc.content;
+            }
+          }
         }
       }
     }
@@ -1957,7 +1990,18 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
     for (const p of pathsToAccept) {
       acceptEditorChange?.(resolvePath(p));
     }
-  }, [messages, acceptEditorChange, onRefreshFs, resolvePath]);
+
+    // Handle deferred tool: resume the agent stream
+    const dt = deferredToolRef.current;
+    if (dt) {
+      if (renameOldPath && renameNewPath) {
+        renameEditorFile?.(resolvePath(renameOldPath), resolvePath(renameNewPath));
+      }
+      setLoading(true);
+      deferredToolRef.current = null;
+      continueDeferredRef.current?.(true, dt.sessionId, dt.toolCallId);
+    }
+  }, [messages, acceptEditorChange, onRefreshFs, resolvePath, renameEditorFile]);
 
   const [showPendingBanner, setShowPendingBanner] = useState(false);
 
@@ -2269,15 +2313,15 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
   return (
     <div className="console-panel">
       {/* ── Toolbar ── */}
-      <div className="agent-toolbar">
-        <button className="agent-toolbar-btn" onClick={newTask} title="New Task">
+      <div className={`agent-toolbar${loading ? " agent-toolbar-locked" : ""}`}>
+        <button className="agent-toolbar-btn" disabled={loading} onClick={newTask} title={loading ? "Agent is running" : "New Task"}>
           <i className="codicon codicon-add" /> New Task
         </button>
-        <button className="agent-toolbar-btn" onClick={() => setShowHistory((v) => !v)} title="Show History">
+        <button className="agent-toolbar-btn" disabled={loading} onClick={() => setShowHistory((v) => !v)} title={loading ? "Agent is running" : "Show History"}>
           <i className="codicon codicon-history" /> {showHistory ? "Hide History" : "History"}
         </button>
         {messages.length > 0 && (
-          <button className="agent-toolbar-btn" onClick={exportChat} title="Export chat">
+          <button className="agent-toolbar-btn" disabled={loading} onClick={exportChat} title={loading ? "Agent is running" : "Export chat"}>
             <i className="codicon codicon-save" />
           </button>
         )}
@@ -2380,10 +2424,10 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
             )}
             {/* Tool execution card */}
             {msg.role === "tool" && msg.toolName && (
-              <div key={`${msg.id}-tool`} className={`agent-tool-card${msg.state === "waiting" ? " streaming" : ""}`}>
+              <div key={`${msg.id}-tool`} className={`agent-tool-card${msg.toolName === "delegate_task" ? " agent-tool-card-subagent" : ""}${msg.state === "waiting" ? " streaming" : ""}`}>
                 <div className="agent-tool-card-header">
                   {msg.state === "waiting" ? <span className="agent-spinner" /> : <i className="codicon codicon-check" />}
-                  <i className={`codicon codicon-${msg.toolName.startsWith("browser_") ? "globe" : msg.toolName === "run_in_terminal" ? "terminal" : msg.toolName === "read_file" ? "file-code" : msg.toolName === "grep" ? "search" : msg.toolName === "list_files" || msg.toolName === "search_files" ? "folder-opened" : "tools"}`} />
+                  <i className={`codicon codicon-${msg.toolName === "delegate_task" ? "hubot" : msg.toolName.startsWith("browser_") ? "globe" : msg.toolName === "run_in_terminal" ? "terminal" : msg.toolName === "read_file" ? "file-code" : msg.toolName === "grep" ? "search" : msg.toolName === "list_files" || msg.toolName === "search_files" ? "folder-opened" : "tools"}`} />
                   {(() => {
                     const FILE_CARD_TOOLS = ["write_file", "edit_file", "delete_file", "rename_file"];
                     if (FILE_CARD_TOOLS.includes(msg.toolName)) {
@@ -2402,6 +2446,7 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
                     return (
                       <>
                         <span className="agent-tool-card-name">{msg.toolName.replace("browser_", "").replace(/_/g, " ")}</span>
+                        {msg.toolName === "delegate_task" && <span className="agent-tool-card-label">sub-agent</span>}
                         {msg.toolName === "run_in_terminal" && <span className="agent-tool-card-label">terminal</span>}
                         {msg.toolName === "run_command" && <span className="agent-tool-card-label">sandbox</span>}
                         {msg.toolParams && msg.toolName !== "run_in_terminal" && msg.toolName !== "run_command" && (
@@ -2527,6 +2572,45 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
                 {msg.content && !msg.sandboxOutput && msg.toolName !== "run_in_terminal" && (
                   <pre className="agent-code">{msg.content}</pre>
                 )}
+                {/* ── Sub-agent collapsible trace ── */}
+                {msg.subAgentMessages && msg.subAgentMessages.length > 0 && (
+                  <div className="agent-sub-agent">
+                    <div className="agent-sub-agent-header"
+                      onClick={() => setExpandedSubAgents((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(msg.id)) next.delete(msg.id); else next.add(msg.id);
+                        return next;
+                      })}>
+                      <i className={`codicon codicon-${expandedSubAgents.has(msg.id) ? "chevron-down" : "chevron-right"}`} />
+                      <span>{msg.subAgentName || "Sub-agent"} trace ({msg.subAgentMessages.length} messages)</span>
+                    </div>
+                    {expandedSubAgents.has(msg.id) && (
+                      <div className="agent-sub-agent-body">
+                        {msg.subAgentMessages.map((m, i) => (
+                          <div key={i} className={`agent-sub-agent-msg${m.reasoning_content ? " thinking" : ""}${m.name ? " tool" : ""}`}>
+                            {m.reasoning_content && (
+                              <div className="agent-sub-agent-thought">{m.reasoning_content}</div>
+                            )}
+                            {m.name && (
+                              <div className="agent-sub-agent-tool">
+                                <i className="codicon codicon-tools" /> {m.name.replace(/_/g, " ")}
+                              </div>
+                            )}
+                            {m.content && !m.name && m.role === "assistant" && (
+                              <div className="agent-sub-agent-text">{m.content}</div>
+                            )}
+                            {m.role === "user" && (
+                              <div className="agent-sub-agent-text agent-sub-agent-user">User: {m.content}</div>
+                            )}
+                            {m.role === "tool" && (
+                              <div className="agent-sub-agent-result">{m.content.slice(0, 200)}</div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
             {/* Fallback for tool msgs without tool-card */}
@@ -2556,6 +2640,22 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
         {!isLast && hasAssistant && (
           <div className="agent-turn-footer">
             <i className="codicon codicon-check" /> Response complete
+            {effectiveUsage && (
+              <span className="agent-turn-footer-usage">
+                ~{effectiveUsage.estimatedTokens} / {effectiveUsage.contextLimit} tokens &middot; {totalTurnsRef.current} turns
+              </span>
+            )}
+            <div className="agent-turn-footer-actions">
+              <button className="agent-footer-btn" title="Copy entire chat" onClick={copyChat}>
+                <i className="codicon codicon-copy" />
+              </button>
+              <button className="agent-footer-btn" title="Retry last prompt" onClick={retryLast}>
+                <i className="codicon codicon-refresh" />
+              </button>
+              <button className="agent-footer-btn" title="Create a copy of this chat" onClick={forkChat}>
+                <i className="codicon codicon-repo-forked" />
+              </button>
+            </div>
           </div>
         )}
         {isLast && !hasAssistant && lastGroupIsUserOnly && (
@@ -2578,8 +2678,10 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
               <i className={`codicon codicon-${agentStatus === "stopped" ? "debug-stop" : "check-all"}`} />
               {agentStatus === "stopped" ? "Manually Stopped" : "Completed"}
             </div>
-            {effectiveUsage && (() => {
-              const pct = Math.min(100, (effectiveUsage.estimatedTokens / effectiveUsage.contextLimit) * 100);
+            {(() => {
+              const est = effectiveUsage?.estimatedTokens ?? 0;
+              const ctx = effectiveUsage?.contextLimit ?? 128_000;
+              const pct = Math.min(100, (est / ctx) * 100);
               const radius = 8;
               const circumference = 2 * Math.PI * radius;
               const offset = circumference - (pct / 100) * circumference;
@@ -2588,14 +2690,14 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
                   <svg className="agent-footer-usage-ring" width="20" height="20" viewBox="0 0 20 20">
                     <circle className="agent-footer-usage-ring-bg" cx="10" cy="10" r={radius} />
                     <circle
-                      className={`agent-footer-usage-ring-fill${effectiveUsage.estimatedTokens > effectiveUsage.contextLimit * 0.8 ? " high" : ""}`}
+                      className={`agent-footer-usage-ring-fill${est > ctx * 0.8 ? " high" : ""}`}
                       cx="10" cy="10" r={radius}
                       strokeDasharray={circumference}
                       strokeDashoffset={offset}
                     />
                   </svg>
                   <span className="agent-footer-usage-text">
-                    ~{effectiveUsage.estimatedTokens} / {effectiveUsage.contextLimit} tokens ({Math.round(pct)}%) &middot; {effectiveUsage.turns} turns
+                    ~{est} / {ctx} tokens ({Math.round(pct)}%) &middot; {effectiveUsage?.turns ?? 0} turns
                   </span>
                 </div>
               );

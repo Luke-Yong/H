@@ -50,7 +50,7 @@ function displayStatus(s: string): string {
   return s;
 }
 
-export default function ScmPanel({ fsBasePath, newFilePaths }: { fsBasePath: string; newFilePaths?: Set<string> }) {
+export default function ScmPanel({ fsBasePath, newFilePaths, onOpenFile }: { fsBasePath: string; newFilePaths?: Set<string>; onOpenFile?: (fsPath: string) => void }) {
   const [status, setStatus] = useState<GitStatus | null>(null);
   const [log, setLog] = useState<GitLog | null>(null);
   const [statusLoading, setStatusLoading] = useState(false);
@@ -59,6 +59,15 @@ export default function ScmPanel({ fsBasePath, newFilePaths }: { fsBasePath: str
   const [stagedOpen, setStagedOpen] = useState(true);
   const [unstagedOpen, setUnstagedOpen] = useState(true);
   const [logOpen, setLogOpen] = useState(true);
+
+  // Resolve a repo-relative git path to an absolute path for editor matching.
+  // Git always uses forward slashes in --porcelain output.
+  const toAbsolutePath = (relPath: string): string => {
+    const norm = (p: string) => p.replace(/\\/g, "/").replace(/^([a-zA-Z]):/, (_m, d) => d.toUpperCase() + ":");
+    if (/^[A-Z]:/i.test(relPath) || relPath.startsWith("/")) return norm(relPath);
+    const base = (fsBasePath || "").replace(/\\/g, "/").replace(/\/$/, "");
+    return norm(base + "/" + relPath);
+  };
 
   const fetchStatus = useCallback(async () => {
     setStatusLoading(true);
@@ -188,7 +197,7 @@ export default function ScmPanel({ fsBasePath, newFilePaths }: { fsBasePath: str
                 <div className="scm-empty">No staged changes. Stage changes with `git add`.</div>
               )}
               {status!.staged.map((c, i) => (
-                <div key={i} className="scm-item">
+                <div key={i} className="scm-item" onClick={() => onOpenFile?.(toAbsolutePath(c.path))} title={`Open ${c.path}`}>
                   <span className={`scm-status ${statusClass(c.status)}`}>{displayStatus(c.status)}</span>
                   <span className="scm-path">{c.path}</span>
                 </div>
@@ -212,7 +221,7 @@ export default function ScmPanel({ fsBasePath, newFilePaths }: { fsBasePath: str
                 <div className="scm-empty">No unstaged changes found.</div>
               )}
               {status!.unstaged.map((c, i) => (
-                <div key={i} className="scm-item">
+                <div key={i} className="scm-item" onClick={() => onOpenFile?.(toAbsolutePath(c.path))} title={`Open ${c.path}`}>
                   <span className={`scm-status ${statusClass(c.status)}`}>{displayStatus(c.status)}</span>
                   <span className="scm-path">{c.path}</span>
                   <div className="scm-item-actions">
@@ -235,7 +244,7 @@ export default function ScmPanel({ fsBasePath, newFilePaths }: { fsBasePath: str
           </div>
           <div className="scm-section-body">
             {[...newFilePaths].map((p) => (
-              <div key={p} className="scm-item">
+              <div key={p} className="scm-item" onClick={() => onOpenFile?.(toAbsolutePath(p))} title={`Open ${p}`}>
                 <span className="scm-status scm-status-untracked">U</span>
                 <span className="scm-path">{p}</span>
               </div>

@@ -76,11 +76,30 @@ async function deepseekFetch(
 let logSeq = 0;
 let cacheHitCount = 0;
 let cacheRequestCount = 0;
+let lastCleanupDay = 0;
 
 function logOutgoing(label: string, messages: Array<any>, cacheCtx?: string) {
   try {
     const dir = path.resolve(process.cwd(), ".harness-debug");
     fs.mkdirSync(dir, { recursive: true });
+    // Cleanup files older than 7 days (run once per day max)
+    const now = Date.now();
+    const DAY_MS = 86_400_000;
+    const MAX_AGE = 7 * DAY_MS;
+    if (!lastCleanupDay || now - lastCleanupDay > DAY_MS) {
+      lastCleanupDay = now;
+      try {
+        const files = fs.readdirSync(dir);
+        let deleted = 0;
+        for (const f of files) {
+          const fp = path.join(dir, f);
+          try {
+            if (fs.statSync(fp).mtimeMs < now - MAX_AGE) { fs.unlinkSync(fp); deleted++; }
+          } catch {}
+        }
+        if (deleted > 0) console.log(`[debug] Cleaned up ${deleted} debug files older than 7 days.`);
+      } catch {}
+    }
     const seq = String(++logSeq).padStart(3, "0");
     const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
     const file = path.join(dir, `${ts}_${seq}_${label}.json`);

@@ -64,7 +64,7 @@ The Node.js Express server on **port 3001** is the backbone. It owns all backend
 
 | Layer | File | Role |
 |---|---|---|
-| HTTP API | `server/index.ts` | REST endpoints for filesystem CRUD, git status/commit/diff, project detection, system stats, and agent chat (blocking + SSE streaming) |
+| HTTP API | `server/index.ts` | REST endpoints for filesystem CRUD, git status/commit/diff, project detection, system stats, and agent chat (blocking + SSE streaming + step-by-step) |
 | Agent loop | `server/agent.ts` | Tool-calling orchestration: receives user messages, sends tool definitions to DeepSeek, executes filesystem/terminal tools, manages browser tool handoff, compacts conversation history |
 | DeepSeek bridge | `server/deepseek.ts` | Raw DeepSeek API calls — chat, tool-calling, and SSE streaming — with prefix-cache tracking |
 | LSP bridge | `server/lsp.ts` | Spawns language servers over stdio, forwards diagnostics to the client, handles completions and hover |
@@ -98,6 +98,7 @@ The client **never calls DeepSeek directly**. All AI interaction flows through t
 ```
 User types goal → AgentConsole
   → POST /api/chat/agent/stream (message, context, projectRoot)
+     or POST /api/chat/agent/stream/stepbystep (IDE-driven mode)
   → Server builds dynamic system prompt (ITR), compacts history, calls DeepSeek
   → DeepSeek returns text/tool_calls via SSE stream
   → Server executes filesystem tools (read_file, write_file, etc.) directly
@@ -379,6 +380,7 @@ The AI agent has access to these tools when working on your project:
 |------|------|-------------|
 | `run_command` | **Sandbox** | Run a shell command with inline output. Fast, no permission needed. Use for: tests, lint, git, pip, npm, builds, grep. Output is summarized to key lines (errors, warnings, URLs); full output is cached for `read_command_output`. |
 | `run_in_terminal` | **Real terminal** | Run a long-running command in a dedicated terminal tab. User must Allow each command. Use for: `python app.py`, `npm start`, flask, watch mode, interactive shells. The agent **waits for the command to exit or produce recognizable output** (traceback, server-started message, etc.) before receiving the result. Terminal output is captured in full for the UI tool card, and a summarized version (key error/success lines) is sent to the model to save tokens. |
+| `kill_terminal` | **Control** | Kill agent-spawned terminal sessions. **`kill_terminal`** kills all, **`kill_terminal index=N`** kills the Nth terminal (0-based, in order of creation). Only kills terminals the agent started — user-created terminals are untouched. Returns a message confirming which terminal was killed and its command. Use to stop servers, free ports, or clean up before finishing. |
 
 #### `run_in_terminal` lifecycle
 
@@ -439,9 +441,9 @@ Agent calls run_in_terminal
 
 | Tool | Description |
 |------|-------------|
-| `write_todos` | Create or update a structured task list to track progress |
-| `task_complete` | Signal completion with a summary of what was done |
-| `delegate_task` | Delegate a sub-task to a specialized sub-agent (code-search, code-writer, researcher) that runs independently with its own context window |
+| `write_todos` | Create or update a structured task list to track progress. In step-by-step mode, this is the ONLY tool available during planning — the agent must create a complete plan before any execution begins. |
+| `task_complete` | Signal completion with a **structured summary** using the template: `### Changes Made`, `### Verification`, `### Outcome`. Vague or thought-process-style summaries (e.g. "I did the task") are **rejected** by the server — the agent must rewrite until the summary is concrete. |
+| `delegate_task` | Delegate a sub-task to a specialized sub-agent (browser, code-search, code-writer, researcher) that runs independently with its own context window |
 | `delegate_parallel` | Delegate multiple sub-tasks to run in parallel, each with its own sub-agent. Returns combined results |
 
 ### Multi-Agent Delegation
@@ -456,14 +458,15 @@ Harness supports **sub-agent delegation** — the main agent can spawn specializ
 │  - Breaks down user request with write_todos │
 │  - Calls delegate_task / delegate_parallel   │
 │  - Synthesizes results, calls task_complete  │
-└──────┬──────────────────┬────────────────────┘
-       ▼                  ▼
+└──────┬──────────────┬────────────────────────┘
+       │              │
+       ▼              ▼
 ┌──────────────┐  ┌──────────────┐
-│ Sub-Agent #1 │  │ Sub-Agent #2 │
+│ Sub-Agent #1 │  │ Browser Agent│
 │ Isolated     │  │ Isolated     │
 │ AgentState   │  │ AgentState   │
-│ Own context  │  │ Own context  │
-│ Own tools    │  │ Own tools    │
+│ Own context  │  │ browser_*    │──► Paused ──► Renderer executes tool
+│ Own tools    │  │ tools only   │◄── Result  ◄── /continue resumes agent
 │ Result → sum │  │ Result → sum │
 └──────────────┘  └──────────────┘
 ```
@@ -472,6 +475,7 @@ Harness supports **sub-agent delegation** — the main agent can spawn specializ
 
 | Profile | Tools | Iterations | Description |
 |---------|-------|-----------|-------------|
+| `browser` | `browser_navigate`, `browser_info`, `browser_screenshot`, `browser_get_dom`, `browser_click`, `browser_type`, `browser_clear`, `browser_select`, `browser_press_key`, `browser_console`, `browser_request_errors`, `browser_scroll`, `browser_wait`, `browser_eval` | 15 | Full browser automation. Navigates pages, clicks elements, types text, fills forms, clears inputs, selects dropdowns, presses keys, scrolls, and inspects DOM/console/network. Reports results with element indices and interaction outcomes. |
 | `code-search` | `read_file`, `list_files`, `search_files`, `grep` | 8 | Read-only code exploration. Finds files, reads code, reports findings. Never edits. |
 | `code-writer` | Full filesystem + `run_command`, `read_problems` | 25 | Implements features or fixes bugs. Reads, edits, builds, and verifies. |
 | `researcher` | `read_file`, `list_files`, `search_files`, `grep`, `run_command` | 10 | Explores codebase to answer questions. Reports with file paths and line numbers. |
@@ -482,7 +486,8 @@ Harness supports **sub-agent delegation** — the main agent can spawn specializ
 |---------|--------|
 | **Context isolation** | Each sub-agent has its own `AgentState` — messages do not pollute the parent's context |
 | **Tool allowlisting** | Sub-agents receive only the tools their profile specifies (e.g. code-search can never write files) |
-| **Headless execution** | Sub-agents cannot use browser tools or `run_in_terminal` — they run entirely server-side |
+| **Headless execution** | Code-search, code-writer, and researcher sub-agents run entirely server-side — no browser or terminal tools |
+| **Browser sub-agent** | Has full browser automation tools: navigate, info, screenshot, get_dom, click, type, clear, select, press_key, scroll, wait, console, eval. Pauses/resumes across browser tool calls via the parent's renderer |
 | **Result summarization** | Sub-agent results are compressed before returning to the parent, preserving context budget |
 | **Parallelism** | `delegate_parallel` runs multiple sub-agents concurrently via `Promise.all` |
 
@@ -505,7 +510,39 @@ Agent: delegate_task task="Find all authentication-related code
   - server/auth.ts:45-120 (JWT verification, password hashing)
   - client/src/Login.tsx:1-80 (login form component)
   ...
+```
 
+**Browser agent example** — the sub-agent can now navigate, click, type, and inspect pages interactively:
+
+```
+Parent: delegate_task task="Go to http://localhost:3000/login,
+  type 'admin' into the email field, type 'pass123' into the
+  password field, click Sign In, and report what happens."
+  agent_type="browser"
+
+→ [Browser Agent] browser_navigate http://localhost:3000/login
+  → Renderer executes → page loads
+→ [Browser Agent] browser_get_dom
+  → Renderer returns indexed elements
+→ [Browser Agent] browser_click index=12  (email input)
+  → Renderer clicks → input focused
+→ [Browser Agent] browser_type index=12 text="admin"
+  → Renderer types → "admin" entered
+→ [Browser Agent] browser_click index=15  (password input)
+→ [Browser Agent] browser_type index=15 text="pass123"
+→ [Browser Agent] browser_click index=18  (Sign In button)
+→ [Browser Agent] browser_screenshot
+  → Sees "Welcome, admin!" — login succeeded
+
+→ [Browser Agent] Completed in 10 turns.
+  Login test: SUCCESS. Navigated to login page,
+  filled email and password fields, clicked Sign In.
+  Result: "Welcome, admin!" displayed.
+```
+
+**Parallel example** — code-writer + researcher run simultaneously:
+
+```
 Agent: delegate_parallel tasks=[
   {task:"Implement POST /api/login in server/auth.ts", agent_type:"code-writer"},
   {task:"Research how existing API routes handle error responses", agent_type:"researcher"}
@@ -520,6 +557,71 @@ Agent: delegate_parallel tasks=[
 
 - **`delegate_task`**: For a single complex sub-task that would take many turns (deep research, feature implementation, multi-file refactoring)
 - **`delegate_parallel`**: For multiple independent sub-tasks that don't depend on each other (parallel research + implementation, multiple unrelated fixes)
+
+### IDE-Driven Step-by-Step Execution (Force Todo)
+
+In the default agent loop, the LLM controls when to create, update, and complete todos — it can skip steps, forget updates, or jump ahead. **Step-by-step mode** inverts this: the **IDE/server locks the todo list** and forces the agent through each step one at a time via isolated sub-agents.
+
+#### How it works
+
+```
+User sends task → POST /api/chat/agent/stream/stepbystep
+
+Phase 1: PLANNING
+  Agent only has write_todos — no other tools
+  Agent MUST create a complete, ordered plan
+  → Server validates (non-empty, specific steps)
+
+Phase 2: LOCKED
+  Server locks the todo list → SSE "step_plan" event
+  UI renders the locked plan in the pending banner
+
+Phase 3: EXECUTE (per step)
+  For each pending todo:
+    → SSE "step_begin" event
+    → Code-writer sub-agent spawned with ONLY this step's context
+    → Sub-agent has full filesystem + run_command tools (max 25 iters)
+    → Streaming tool_start/tool_end events shown in UI
+    → Sub-agent calls task_complete → SSE "step_end" event
+    → Step marked completed/failed, next step begins
+  Previous step results are passed as context to subsequent steps
+
+Phase 4: WRAP-UP
+  → SSE "done" event with allStepResults summary
+```
+
+#### Key differences from default mode
+
+| Aspect | Default Mode | Step-by-Step Mode |
+|--------|-------------|-------------------|
+| Planning | Agent can plan AND execute in same turn | Strict separation: plan first, execute later |
+| Todo ownership | Agent-driven — LLM chooses when to update | IDE-driven — server locks todos, forces progression |
+| Execution | Agent works on anything at any time | One step at a time, isolated sub-agent per step |
+| Context | Full conversation history in one loop | Each step gets fresh sub-agent with only that step + previous results |
+| Tool restriction | Full tool set available | Planning: only write_todos. Execution: code-writer tools (no browser/terminal) |
+| Max turns | 50 per agent loop | Planning: 5 turns. Per step: 25 turns (configurable per agent profile) |
+
+#### Why use it
+
+- **Deterministic execution**: The server enforces todo progression — agent can't skip or forget steps
+- **Isolated failures**: If a step's sub-agent fails, subsequent steps still run with clear failure context
+- **Clean context per step**: Each step sub-agent starts fresh, avoiding context bloat from earlier steps
+- **Verifiable progress**: The UI shows a locked plan with per-step status (pending → in_progress → completed/failed)
+
+#### Summary Lock
+
+Both default and step-by-step modes enforce **structured summaries** on `task_complete`. The server validates every summary against a required template:
+
+```
+### Changes Made
+- [file path]: [what was changed]
+### Verification
+- [build/test/check result]
+### Outcome
+- [concise description of what was accomplished]
+```
+
+Summaries that are too short (< 30 chars), match thought-process patterns (e.g. "I did the task", "OK, completed"), or lack concrete details (no file references, actions, or results) are **rejected**. The agent receives the rejection as a tool error and must call `task_complete` again with a proper summary — the loop continues until a valid summary is provided.
 
 ### Persistent Memory
 
@@ -1081,6 +1183,52 @@ Harness now distills bulky command/build output before storing it back into the 
 - The **full raw command output is still cached** in the command-output store and can be re-read later with `read_command_output`
 
 This cuts repeated replay of large terminal/compiler logs while keeping the raw output available on demand.
+
+### 5. Context Token Estimation
+
+The agent footer shows a live estimate of context usage: `~N / M tokens (X%) · T turns`. This is calculated on the server each agent turn and sent to the client via the SSE `done` event.
+
+#### How it's calculated
+
+```
+estimatedTokens = round(totalChars / 4)
+
+totalChars = sum of every char in state.messages
+           + historySummary length
+           + system prompt length
+```
+
+`state.messages` includes everything the model has seen or will see:
+- User messages, assistant replies, and tool call JSON
+- `reasoning_content` (DeepSeek's chain-of-thought — can be 10-30K chars per turn)
+- Tool result content (file contents, command output summaries, browser snapshots)
+- `tool_call_id` UUIDs and function `name` fields
+
+The system prompt is built fresh each turn by ITR chunk selection and is added to the estimate (it's not stored in `state.messages`).
+
+#### Accuracy
+
+| Factor | Note |
+|--------|------|
+| **`chars / 4`** | Rough heuristic. DeepSeek's byte-level BPE tokenizer varies: code/text is typically 2-3 chars/token, CJK ~1 char/token. Can be off by up to 2x. |
+| **System prompt** | Counted. Built from ITR chunks (3-15K chars / 0.75-3.75K tokens). |
+| **`reasoning_content`** | Counted. DeepSeek R1/reasoner models produce verbose chain-of-thought. |
+| **Console context** | NOT counted. The IDE's diagnostic/terminal context is small and passed separately for ITR selection. |
+| **NOT_EXECUTED injections** | NOT counted. These are injected by `buildOpenAiMessages` at API-call time and not stored in `state.messages`. |
+
+#### Context limit
+
+The `contextLimit` is set dynamically based on the model name:
+
+| Model pattern | Context window |
+|---------------|---------------|
+| `deepseek-chat` (V3), `deepseek-reasoner` (R1) | 128,000 tokens |
+| Models containing `v4`, `pro`, or `flash` | 1,000,000 tokens |
+| Unknown / custom | 128,000 tokens (default) |
+
+#### Cumulative turns
+
+The `turns` counter accumulates across the entire session, not per-response. The server sends `turns = iter + 1` (iterations in that agent turn), and the client sums them into `totalTurnsRef`.
 
 ### Architecture
 

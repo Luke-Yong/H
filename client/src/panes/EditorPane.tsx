@@ -1379,8 +1379,10 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   // Switch to file by fsPath
   const openFileByFsPath = useCallback((fsPath: string) => {
     const f = files.find((x) => x._fsPath && normPath(x._fsPath) === normPath(fsPath));
-    if (f) setActiveFileId(f.id);
-  }, [files]);
+    if (f) { setActiveFileId(f.id); return; }
+    // File not open yet — open it from disk
+    openFsFile(fsPath);
+  }, [files, openFsFile]);
 
   // Apply agent diff decorations when agent changes or active file changes
   useEffect(() => {
@@ -1595,6 +1597,8 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     }
     return s;
   }, [files]);
+
+  const scmBadgeCount = useMemo(() => gitChanges.size + newFilePaths.size, [gitChanges, newFilePaths]);
 
   useImperativeHandle(ref, () => ({
     getCode, getFiles: () => files, applyAiFiles, applyAgentFileChanges,
@@ -1985,6 +1989,9 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
               title={item.title}
             >
               <i className={`codicon codicon-${item.icon}`} />
+              {item.id === "scm" && scmBadgeCount > 0 && (
+                <span className="activity-bar-badge">{scmBadgeCount}</span>
+              )}
             </button>
           ))}
           <div className="activity-bar-spacer" />
@@ -1999,7 +2006,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
             {sidebarPanel === "extensions" && <div className="placeholder-sub">Extension marketplace coming soon</div>}
           </div>
         )}
-        {sidebarVisible && sidebarPanel === "scm" && <ScmPanel fsBasePath={fsBasePath} newFilePaths={newFilePaths} />}
+        {sidebarVisible && sidebarPanel === "scm" && <ScmPanel fsBasePath={fsBasePath} newFilePaths={newFilePaths} onOpenFile={openFileByFsPath} />}
         <div className="editor-welcome">
           <div className="welcome-logo">Harness</div>
           <div className="welcome-subtitle">AI-Powered Browser Test IDE</div>
@@ -2063,6 +2070,9 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
             title={item.title}
           >
             <i className={`codicon codicon-${item.icon}`} />
+            {item.id === "scm" && scmBadgeCount > 0 && (
+              <span className="activity-bar-badge">{scmBadgeCount}</span>
+            )}
           </button>
         ))}
         <div className="activity-bar-spacer" />
@@ -2114,7 +2124,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
           )}
         </div>
       )}
-      {sidebarVisible && sidebarPanel === "scm" && <ScmPanel fsBasePath={fsBasePath} newFilePaths={newFilePaths} />}
+      {sidebarVisible && sidebarPanel === "scm" && <ScmPanel fsBasePath={fsBasePath} newFilePaths={newFilePaths} onOpenFile={openFileByFsPath} />}
       <div className="ide-editor-area">
         <div className="editor-tabs">
           {files.length === 0 && !hasBrowserTabs && (

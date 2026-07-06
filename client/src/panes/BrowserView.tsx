@@ -15,7 +15,7 @@ export interface BrowserViewHandle {
   /** Click element at index (from getIndexedDom). */
   clickElement: (index: number) => Promise<string>;
   /** Type text into element at index using realistic keyboard events. */
-  typeIntoElement: (index: number, text: string) => Promise<void>;
+  typeIntoElement: (index: number, text: string) => Promise<string>;
   /** Get a text snapshot of the page: URL, title, visible text, form elements, buttons. */
   getPageSnapshot: () => Promise<string>;
   /** Navigate to a URL in the current tab. */
@@ -264,14 +264,27 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   }, [currentUrl]);
 
   // Sync the displayed URL when the prop changes (new tab, detected URL, etc.)
+  // IMPORTANT: when urlSyncFromWebviewRef is true, the URL change originated from the
+  // webview itself (redirect / in-page navigation). We must NOT update navUrl or
+  // navTabId — changing the <webview> src attribute would trigger a reload loop.
   useEffect(() => {
-    setNavTabId(tabId);
-    setNavUrl(url);
-    setCurrentUrl(url);
-    setInputUrl(url);
-    setSecure(isHttps(url));
-    liveUrlRef.current = url;
-    if (url) setLoading(true);
+    if (urlSyncFromWebviewRef.current) {
+      urlSyncFromWebviewRef.current = false;
+      // Sync display-only state (address bar) but do NOT touch navUrl/navTabId
+      setCurrentUrl(url);
+      setInputUrl(url);
+      setSecure(isHttps(url));
+      liveUrlRef.current = url;
+      if (url) setLoading(true);
+    } else {
+      setNavTabId(tabId);
+      setNavUrl(url);
+      setCurrentUrl(url);
+      setInputUrl(url);
+      setSecure(isHttps(url));
+      liveUrlRef.current = url;
+      if (url) setLoading(true);
+    }
 
     if (!url) {
       requestAnimationFrame(() => { inputRef.current?.focus(); });
@@ -287,6 +300,12 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
 
   // Track user-initiated navigation to prevent polling from reverting URL
   const navigatingRef = useRef(false);
+
+  // Track whether a URL update in props was triggered by the webview itself
+  // (e.g. a server redirect). When true, we must NOT update navUrl — doing so
+  // would change the <webview> src attribute and trigger a reload, causing
+  // a redirect feedback loop.
+  const urlSyncFromWebviewRef = useRef(false);
 
   // Set up iframe load listener + polling (native events, not React synthetic)
   const setupIframe = useCallback((iframe: HTMLIFrameElement | null) => {
@@ -783,20 +802,22 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     if (!nextUrl || nextUrl === "about:blank") return;
 
     if (nextUrl !== liveUrlRef.current) {
-      // During user-initiated navigation, the webview still shows the old URL.
-      // Block ALL sync sources until the navigation completes (did-navigate/did-finish-load
-      // reset the flag before calling us).
-      if (navigatingRef.current) return;
+        // During user-initiated navigation, the webview still shows the old URL.
+        // Block ALL sync sources until the navigation completes (did-navigate/did-finish-load
+        // reset the flag before calling us).
+        if (navigatingRef.current) return;
 
-      liveUrlRef.current = nextUrl;
-      setCurrentUrl(nextUrl);
-      setInputUrl(nextUrl);
-      setSecure(isHttps(nextUrl));
-      onUrlChange?.(tabId, nextUrl);
-      // Do NOT update navUrl here — navUrl controls the webview's src attribute.
-      // Setting src while the webview is mid-navigation (e.g. a redirect) causes
-      // Chromium to abort the in-flight request with ERR_ABORTED (-3).
-    }
+        liveUrlRef.current = nextUrl;
+        setCurrentUrl(nextUrl);
+        setInputUrl(nextUrl);
+        setSecure(isHttps(nextUrl));
+        // Flag that this URL change originated from the webview (redirect / in-page nav).
+        // The parent state update will flow back as a new `url` prop, but we must NOT
+        // update navUrl in the effect below — that would change webview src and cause
+        // a reload loop.
+        urlSyncFromWebviewRef.current = true;
+        onUrlChange?.(tabId, nextUrl);
+      }
 
     try {
       setCanGoBack(!!view.canGoBack?.());
@@ -1412,6 +1433,23 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     return "No browser page loaded.";
   }, [getIframe, getWebview]);
 
+  // Check if an evalInPage result indicates a navigation-triggered error.
+  // When a click causes a page navigation, Electron's executeJavaScript throws
+  // GUEST_VIEW_MANAGER_CALL because the renderer process is torn down.
+  const handleNavigationError = useCallback(async (result: string, fallback: string): Promise<string> => {
+    if (result.startsWith("Error:") && (result.includes("GUEST_VIEW_MANAGER_CALL") || result.includes("Script failed to execute"))) {
+      await new Promise((r) => setTimeout(r, 2000));
+      try {
+        const wv = getWebview();
+        const newUrl = wv ? (wv as any).getURL() : "";
+        return fallback + (newUrl ? " (navigation triggered, now at " + newUrl + ")" : " (navigation triggered)");
+      } catch {
+        return fallback + " (navigation triggered)";
+      }
+    }
+    return result;
+  }, [getWebview]);
+
   const getIndexedDom = useCallback(async (): Promise<string> => {
     return evalInPage(`
       (() => {
@@ -1510,9 +1548,12 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   const clickElement = useCallback(async (index: number): Promise<string> => {
     const result = await evalInPage(`
       (() => {
+        const vw = window.innerWidth, vh = window.innerHeight;
         const w = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
         let i = 0; let el;
         while ((el = w.nextNode())) {
+          const r = el.getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0 || r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw) continue;
           if (i++ !== ${index}) continue;
           const rect = el.getBoundingClientRect();
           const cx = rect.left + rect.width / 2;
@@ -1537,16 +1578,26 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
         return 'element not found at index ${index}';
       })()
     `);
-    await new Promise((r) => setTimeout(r, 400));
-    return result;
-  }, [evalInPage]);
+    // If the click triggered a page navigation (e.g. clicking a link/button that changes URL),
+    // Electron's executeJavaScript throws GUEST_VIEW_MANAGER_CALL because the renderer
+    // process is torn down mid-execution. The click did succeed — we report the new URL.
+    const finalResult = await handleNavigationError(result, "clicked element at index " + index);
+    if (result === finalResult) {
+      // No navigation error — normal click, short wait for DOM updates
+      await new Promise((r) => setTimeout(r, 400));
+    }
+    return finalResult;
+  }, [evalInPage, handleNavigationError]);
 
   const typeIntoElement = useCallback(async (index: number, text: string) => {
-    return evalInPage(`
+    const result = await evalInPage(`
       (() => {
+        const vw = window.innerWidth, vh = window.innerHeight;
         const w = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
         let i = 0; let el;
         while ((el = w.nextNode())) {
+          const r = el.getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0 || r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw) continue;
           if (i++ !== ${index}) continue;
           const inp = el;
 
@@ -1599,7 +1650,9 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
         }
         return 'element not found at index ${index}';
       })()
-    `).then(async () => { await new Promise((r) => setTimeout(r, 300)); });
+    `);
+    await new Promise((r) => setTimeout(r, 300));
+    return result;
   }, [evalInPage]);
 
   const getPageSnapshot = useCallback(async (): Promise<string> => {
@@ -1752,9 +1805,19 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     if (activeTab) {
       liveUrlRef.current = url;
       navigatingRef.current = true;
+      setNavTabId(activeTab.id);
+      setNavUrl(url);
+      setCurrentUrl(url);
+      setInputUrl(url);
+      setSecure(isHttps(url));
       onUrlChange?.(activeTab.id, url);
+      // Explicit loadURL for desktop webview — src attribute update via React
+      // alone may not trigger navigation if the URL string hasn't changed.
+      if (isDesktop) {
+        webviewRef.current?.loadURL?.(url);
+      }
     }
-  }, [activeTab, onUrlChange]);
+  }, [activeTab, onUrlChange, isDesktop]);
 
   const getInfo = useCallback((): string => {
     if (!activeTab || !currentUrl) return "No browser tab open. Use browser_navigate to open a URL first.";
@@ -1762,7 +1825,9 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   }, [activeTab, currentUrl, loading, tabs]);
 
   const clearElement = useCallback(async (index: number): Promise<string> => {
-    return typeIntoElement(index, "").then(() => "Cleared element.");
+    const result = await typeIntoElement(index, "");
+    // typeIntoElement returns "cleared element at index N" for empty text
+    return result.startsWith("cleared") ? "Cleared element." : result;
   }, [typeIntoElement]);
 
   // ── Coordinate-based mouse ──
@@ -1799,8 +1864,9 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   }, [evalInPage]);
 
   const clickCoords = useCallback(async (x: number, y: number): Promise<string> => {
-    return mouseEvent(x, y, "click");
-  }, [mouseEvent]);
+    const result = await mouseEvent(x, y, "click");
+    return handleNavigationError(result, "click at (" + x + "," + y + ")");
+  }, [mouseEvent, handleNavigationError]);
 
   const moveMouse = useCallback(async (x: number, y: number): Promise<string> => {
     return mouseEvent(x, y, "move");

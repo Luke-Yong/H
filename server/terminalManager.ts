@@ -193,6 +193,7 @@ export function createSession(ws: WebSocket, groupKey: string, opts?: { cwd?: st
       });
 
       ws.send(`term:ready:${id}:pty`);
+      lastCreatedSessionId = id;
       return id;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -244,6 +245,7 @@ export function createSession(ws: WebSocket, groupKey: string, opts?: { cwd?: st
   sessions.set(groupKey, group);
 
   ws.send(`term:ready:${id}:pipe`);
+  lastCreatedSessionId = id;
   return id;
 }
 
@@ -327,4 +329,32 @@ function removeSession(groupKey: string, sessionId: string) {
     if (idx !== -1) group.splice(idx, 1);
     if (group.length === 0) sessions.delete(groupKey);
   }
+}
+
+// ── Agent-accessible terminal kill ──
+// The agent doesn't know terminal session IDs directly, so we track the
+// WebSocket groupKey and expose a kill-all function the agent can call.
+
+let lastWsGroupKey: string | null = null;
+
+export function setLastWsGroupKey(key: string) {
+  lastWsGroupKey = key;
+}
+
+export function getLastWsGroupKey(): string | null {
+  return lastWsGroupKey;
+}
+
+let lastCreatedSessionId: string | null = null;
+
+export function getLastCreatedSessionId(): string | null {
+  return lastCreatedSessionId;
+}
+
+export function killAllAgentTerminals(): number {
+  if (!lastWsGroupKey) return 0;
+  const group = sessions.get(lastWsGroupKey);
+  const count = group?.length ?? 0;
+  killAllInGroup(lastWsGroupKey);
+  return count;
 }

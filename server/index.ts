@@ -7,7 +7,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { chatDeepSeek } from "./deepseek";
 import {
   createSession, writeToSession, resizeSession,
-  killSession, killAllInGroup,
+  killSession, killAllInGroup, setLastWsGroupKey, getLastCreatedSessionId,
 } from "./terminalManager";
 import fs from "fs";
 import path from "path";
@@ -53,7 +53,7 @@ app.post("/api/chat", async (req, res) => {
 });
 
 // ── Agentic chat (tool-calling loop) ──
-import { createAgentSession, getAgentSession, addToolResult, addToolResultStream, deleteAgentSession, agentLoop, agentLoopStream, runFsTool, storeCommandOutput, summarizeCommandResult, type AgentState, type AgentResponse, type AgentSseEvent } from "./agent";
+import { createAgentSession, getAgentSession, addToolResult, addToolResultStream, deleteAgentSession, agentLoop, agentLoopStream, agentLoopStepByStep, runFsTool, storeCommandOutput, summarizeCommandResult, resumeSubAgent, type AgentState, type AgentResponse, type AgentSseEvent } from "./agent";
 
 app.post("/api/chat/agent", async (req, res) => {
   const { message, context, projectRoot, apiKey, model } = req.body || {};
@@ -96,6 +96,49 @@ app.post("/api/chat/agent/continue", async (req, res) => {
   try {
     const state = getAgentSession(sessionId);
     if (!state) return res.status(404).json({ error: "Session not found" });
+
+    // ── Sub-agent resume: if a sub-agent was paused waiting for a browser tool ──
+    if (state.pendingSubAgent) {
+      const psa = state.pendingSubAgent;
+      state.pendingSubAgent = undefined;
+      const subResult = await resumeSubAgent(
+        psa.subState, psa.config, toolCallId, String(toolResult),
+        { model, apiKey },
+      );
+      if (subResult.phase === "browser_tool") {
+        // Sub-agent needs another browser tool — re-store and yield again
+        state.pendingSubAgent = {
+          ...psa,
+          subState: subResult.subState,
+        };
+        broadcast({ type: "agent_tool", data: { sessionId, tool: { name: subResult.toolName, id: subResult.toolCallId, params: subResult.params }, executedTools: [] } });
+        return res.json({
+          phase: "tool_needed",
+          sessionId,
+          tool: { name: subResult.toolName, id: subResult.toolCallId, params: subResult.params },
+          executedTools: [],
+          messages: state.messages,
+        });
+      }
+      // Sub-agent done — push delegate_task result to parent state
+      const resultText = `[${psa.config.name}] Completed in ${subResult.iterations} turns.\n${subResult.summary}`;
+      state.messages.push({
+        role: "assistant",
+        content: JSON.stringify([{ id: psa.parentToolCallId, type: "function", function: { name: "delegate_task", arguments: psa.parentToolArgs } }]),
+        name: "delegate_task",
+        ...(psa.parentReasoning ? { reasoning_content: psa.parentReasoning } : {}),
+      });
+      state.messages.push({ role: "tool", content: resultText, tool_call_id: psa.parentToolCallId });
+      // Continue the parent agent loop
+      broadcast({ type: "agent_tool_result", data: { sessionId, toolCallId: psa.parentToolCallId, toolResult: resultText.slice(0, 500) } });
+      const result = await agentLoop(projectRoot || state.projectRoot, state, "", { model, apiKey });
+      if (result.phase === "tool_needed") {
+        broadcast({ type: "agent_tool", data: { sessionId, tool: result.tool, executedTools: result.executedTools } });
+        return res.json({ phase: "tool_needed", sessionId, tool: result.tool, executedTools: result.executedTools, messages: result.messages });
+      }
+      broadcast({ type: "assistant", data: result.reply });
+      return res.json({ phase: "done", reply: result.reply, messages: result.messages });
+    }
 
     addToolResult(sessionId, toolCallId, String(toolResult));
     broadcast({ type: "agent_tool_result", data: { sessionId, toolCallId, toolResult: String(toolResult).slice(0, 500) } });
@@ -167,6 +210,51 @@ app.post("/api/chat/agent/stream", async (req, res) => {
   }
 });
 
+// ── Step-by-Step Agent Streaming (IDE-Driven Todo Execution) ──
+// The agent first creates a plan (write_todos only), then the IDE locks the
+// todo list and forces the agent through each step one at a time via sub-agents.
+
+app.post("/api/chat/agent/stream/stepbystep", async (req, res) => {
+  const { message, context, projectRoot, model, apiKey } = req.body || {};
+  const effectiveModel = model || "deepseek-chat";
+  if (!message) return res.status(400).json({ error: "Missing message" });
+
+  try {
+    broadcast({ type: "log", data: `User (step-by-step): ${message}` });
+    const root = projectRoot || process.cwd();
+    const sessionId = `agent-sbs-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const state = createAgentSession(sessionId, root, message, context || "");
+
+    // SSE headers
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+
+    const sendEvent = (event: AgentSseEvent) => {
+      const data = JSON.stringify({ ...event, sessionId });
+      res.write(`data: ${data}\n\n`);
+    };
+
+    const modelOpts = (effectiveModel || apiKey) ? { model: effectiveModel, apiKey } : undefined;
+    for await (const event of agentLoopStepByStep(root, state, context || "", sessionId, modelOpts)) {
+      sendEvent(event);
+      if (event.type === "done" || event.type === "error") break;
+    }
+
+    res.end();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    broadcast({ type: "error", data: msg });
+    if (!res.writableEnded) {
+      res.write(`data: ${JSON.stringify({ type: "error", error: msg })}\n\n`);
+      res.end();
+    }
+  }
+});
+
 app.post("/api/chat/agent/stream/continue", async (req, res) => {
   const { sessionId, toolCallId, toolResult, permissionGranted, apiKey, model, thinking, consoleContext } = req.body || {};
   const effectiveModel = model || "deepseek-chat";
@@ -185,6 +273,61 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
     let permissionToolName: string | undefined = undefined;
     let permissionToolParams: Record<string, unknown> | undefined;
     let statePushed = false; // skip generic push when already pushed (e.g. summarized terminal output)
+    
+    // ── Sub-agent resume (streaming): check before normal flow ──
+    if (state.pendingSubAgent && !state.deferredTool && !(state.pendingPermission && state.pendingPermission.toolCallId === toolCallId)) {
+      const psa = state.pendingSubAgent;
+      state.pendingSubAgent = undefined;
+      const subResult = await resumeSubAgent(
+        psa.subState, psa.config, toolCallId, String(toolResult),
+        { model: effectiveModel, apiKey },
+      );
+      if (subResult.phase === "browser_tool") {
+        state.pendingSubAgent = { ...psa, subState: subResult.subState };
+        broadcast({ type: "agent_tool", data: { sessionId, tool: { name: subResult.toolName, id: subResult.toolCallId, params: subResult.params }, executedTools: [] } });
+        return res.json({
+          phase: "tool_needed",
+          sessionId,
+          tool: { name: subResult.toolName, id: subResult.toolCallId, params: subResult.params },
+          executedTools: [],
+          messages: state.messages,
+        });
+      }
+      // Sub-agent done — push delegate_task result to parent state and continue
+      const resultText = `[${psa.config.name}] Completed in ${subResult.iterations} turns.\n${subResult.summary}`;
+      state.messages.push({
+        role: "assistant",
+        content: JSON.stringify([{ id: psa.parentToolCallId, type: "function", function: { name: "delegate_task", arguments: psa.parentToolArgs } }]),
+        name: "delegate_task",
+        ...(psa.parentReasoning ? { reasoning_content: psa.parentReasoning } : {}),
+      });
+      state.messages.push({ role: "tool", content: resultText, tool_call_id: psa.parentToolCallId });
+      broadcast({ type: "agent_tool_result", data: { sessionId, toolCallId: psa.parentToolCallId, toolResult: resultText.slice(0, 500) } });
+
+      // SSE headers
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+      });
+      const sendEvent = (event: AgentSseEvent) => {
+        res.write(`data: ${JSON.stringify({ ...event, sessionId })}\n\n`);
+      };
+      sendEvent({ type: "tool_end", toolName: "delegate_task", toolResult: resultText, toolParams: {},
+        subAgentName: psa.config.name,
+        subAgentMessages: subResult.subState.messages.map((m: any) => ({
+          role: m.role, content: m.content || "", name: m.name, reasoning_content: m.reasoning_content,
+        })),
+      } as AgentSseEvent);
+      const continueContext = typeof consoleContext === "string" ? consoleContext : "";
+      for await (const event of agentLoopStream(state.projectRoot, state, continueContext, sessionId, { model: effectiveModel, apiKey })) {
+        sendEvent(event);
+        if (event.type === "browser_tool" || event.type === "done" || event.type === "error") break;
+      }
+      return res.end();
+    }
+
     if (state.deferredTool && state.deferredTool.toolCallId === toolCallId) {
       const dt = state.deferredTool;
       state.deferredTool = undefined;
@@ -225,6 +368,12 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
             statePushed = true;
           } else {
             cmdResult = `${pp.command} is starting in a terminal tab. The terminal may auto-detect a URL and open a browser tab shortly. Call browser_info to check if a tab opened — do NOT guess the port.`;
+          }
+          // Track this terminal session for kill_terminal
+          const termSessionId = getLastCreatedSessionId();
+          if (termSessionId) {
+            if (!state.agentTerminalSessions) state.agentTerminalSessions = [];
+            state.agentTerminalSessions.push({ sessionId: termSessionId, command: pp.command });
           }
         }
       } else {
@@ -1273,6 +1422,7 @@ wss.on("connection", (ws) => {
       const venvDir = parts[2] ? decodeURIComponent(parts[2]) : undefined;
       const activateScript = parts[3] ? decodeURIComponent(parts[3]) : undefined;
       groupKey = nextGroupKey;
+      setLastWsGroupKey(nextGroupKey);
       const id = createSession(ws, groupKey, { cwd, venvDir, activateScript });
       activeSessions.add(id);
 
