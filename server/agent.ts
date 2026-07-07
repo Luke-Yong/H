@@ -1499,8 +1499,15 @@ function compactAgentHistory(state: AgentState): void {
   const compactedMessages = state.messages.filter((_, index) => indexesToCompact.has(index));
   if (compactedMessages.length === 0) return;
 
+  const beforeCount = state.messages.length;
+  const beforeEstTokens = estimateStateTokens(state);
   state.historySummary = mergeHistorySummary(state.historySummary, compactedMessages);
   state.messages = state.messages.filter((_, index) => !indexesToCompact.has(index));
+  const afterCount = state.messages.length;
+  const summaryChars = state.historySummary?.length || 0;
+  const afterEstTokens = estimateStateTokens(state);
+  const savedTokens = beforeEstTokens - afterEstTokens;
+  console.log(`[compact] messages ${beforeCount} → ${afterCount} (compacted ${compactedMessages.length}) | ~${beforeEstTokens} → ~${afterEstTokens} tokens (saved ~${savedTokens}) | summary ${summaryChars} chars${overMessageLimit ? " [msg trigger]" : ""}${overTokenLimit ? " [token trigger]" : ""}`);
 }
 
 function extractCommandId(text: string): number | null {
@@ -2075,9 +2082,12 @@ function buildSystemPrompt(
   combined += "\n" + toolNames.join(" ");
 
   // Select optional chunks by trigger match score
+  const selectedChunks: string[] = [];
+  const skippedChunks: string[] = [];
   for (const chunk of PROMPT_CHUNKS) {
     if (chunk.always) {
       parts.push(chunk.content);
+      selectedChunks.push(chunk.id);
       continue;
     }
     const score = countTriggers(combined, chunk.triggers);
@@ -2085,6 +2095,9 @@ function buildSystemPrompt(
     const browserBoost = (chunk.id === "browser" && toolNames.some((n) => n.startsWith("browser_"))) ? 5 : 0;
     if (score >= 2 || browserBoost > 0) {
       parts.push(chunk.content);
+      selectedChunks.push(`${chunk.id}(s:${score}${browserBoost ? `+b${browserBoost}` : ""})`);
+    } else {
+      skippedChunks.push(`${chunk.id}(s:${score})`);
     }
   }
 
@@ -2093,7 +2106,15 @@ function buildSystemPrompt(
     parts.push(`### Additional context from the IDE\n${context}`);
   }
 
-  return parts.join("\n\n");
+  const result = parts.join("\n\n");
+  const totalChars = result.length;
+  const estTokens = Math.round(totalChars / 4);
+  console.log(`[ITR] prompt: ${totalChars} chars (~${estTokens} tokens) | ${selectedChunks.length + 1} chunks selected${skippedChunks.length > 0 ? `, ${skippedChunks.length} skipped` : ""}`);
+  if (skippedChunks.length > 0) {
+    console.log(`[ITR]   included: ${selectedChunks.join(", ")}`);
+    console.log(`[ITR]   skipped:  ${skippedChunks.join(", ")}`);
+  }
+  return result;
 }
 
 let callSeq = 0;

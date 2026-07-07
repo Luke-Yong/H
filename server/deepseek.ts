@@ -43,6 +43,9 @@ export async function generateEmbedding(
 // message content, enabling stable prefixes across consecutive turns.
 
 let lastCacheContextId = "";
+let cacheHitCount = 0;
+let cacheRequestCount = 0;
+let cacheMissCount = 0;
 async function deepseekFetch(
   apiKey: string,
   body: Record<string, unknown>,
@@ -54,12 +57,20 @@ async function deepseekFetch(
   };
   // Track cache context — when the system message is unchanged, DeepSeek
   // reuses the KV cache for the shared prefix automatically.
+  let cacheHit = false;
   if (cacheContextId && cacheContextId === lastCacheContextId) {
-    // Same prefix as last request → DeepSeek will hit the cache for this prefix
+    cacheHitCount++;
+    cacheHit = true;
+  } else if (cacheContextId) {
+    cacheMissCount++;
   }
   if (cacheContextId) {
     lastCacheContextId = cacheContextId;
   }
+  cacheRequestCount++;
+  const model = (body as any).model || "?";
+  const stream = (body as any).stream ? "stream" : "block";
+  console.log(`[cache] ${stream} #${cacheRequestCount} ${cacheHit ? "HIT" : "MISS"} (hits:${cacheHitCount} misses:${cacheMissCount}) model=${model} ctx=${(cacheContextId || "").slice(0, 30)}`);
   const res = await fetch(`${BASE_URL}/chat/completions`, {
     method: "POST",
     headers,
@@ -74,8 +85,6 @@ async function deepseekFetch(
 
 // ── Debug: log outgoing messages to file ──
 let logSeq = 0;
-let cacheHitCount = 0;
-let cacheRequestCount = 0;
 let lastCleanupDay = 0;
 
 function logOutgoing(label: string, messages: Array<any>, cacheCtx?: string) {
@@ -185,7 +194,6 @@ export async function chatDeepSeekTool(
 ): Promise<ToolCallResult> {
   const sysMsg = messages.find((m) => m.role === "system");
   const cacheCtx = sysMsg?.content ? `ctx-${Date.now().toString(36)}-${sysMsg.content.length}-${sysMsg.content.slice(0, 40)}` : undefined;
-  cacheRequestCount++;
   logOutgoing("tool", messages as any[], cacheCtx);
 
   const res = await deepseekFetch(opts?.apiKey || "", {
@@ -285,11 +293,6 @@ export async function* chatDeepSeekToolStream(
   // Compute cache context ID from the system message (prefix for DeepSeek's KV cache)
   const sysMsg = messages.find((m) => m.role === "system");
   const cacheCtx = sysMsg?.content ? `ctx-${Date.now().toString(36)}-${sysMsg.content.length}-${sysMsg.content.slice(0, 40)}` : undefined;
-  cacheRequestCount++;
-  if (cacheCtx) {
-    // DeepSeek automatically caches repeated message prefixes server-side.
-    // By keeping the system message stable across turns, we leverage this caching.
-  }
   logOutgoing("stream", messages as any[], cacheCtx);
 
   const res = await deepseekFetch(opts.apiKey, {

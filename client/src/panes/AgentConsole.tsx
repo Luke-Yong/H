@@ -1083,6 +1083,11 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
               return next;
             });
           }
+          // Bridge: show "Thinking..." between tools so the state indicator never vanishes
+          if (!assistantMsgId && !isTerminal) {
+            assistantMsgId = nextId();
+            pushRaw(assistantMsgId, { role: "assistant", content: "", state: "thinking" });
+          }
           // If file tool Diff ready, defer — user must Accept/Reject before agent continues
           const FILE_TOOLS = ["edit_file"];
           if (FILE_TOOLS.includes(tn) && evt.toolResult === "Diff ready") {
@@ -1309,6 +1314,11 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
               }
               return next;
             });
+          }
+          // Bridge: show "Thinking..." between tools so the state indicator never vanishes
+          if (!assistantMsgId) {
+            assistantMsgId = nextId();
+            pushRaw(assistantMsgId, { role: "assistant", content: "", state: "thinking" });
           }
           // Sync Monaco diffs for permission-gated destructive file tools
           if (DESTRUCTIVE.includes(tn) && id) {
@@ -1855,6 +1865,23 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
     }).join("\n\n");
     navigator.clipboard?.writeText(text).catch(() => {});
   }, [messages]);
+
+  const copyTurn = useCallback((messages: ConsoleMessage[]) => {
+    const text = messages.map((m) => {
+      const prefix = m.role === "user" ? "You" : m.role === "assistant" ? "AI" : m.toolName ? `Tool: ${m.toolName}` : "System";
+      return `### ${prefix}\n${m.content}`;
+    }).join("\n\n");
+    navigator.clipboard?.writeText(text).catch(() => {});
+  }, []);
+
+  const retryTurn = useCallback((messages: ConsoleMessage[]) => {
+    const userMsg = messages.find((m) => m.role === "user");
+    if (userMsg) {
+      setInput(userMsg.content);
+      setAgentStatus("idle");
+      setAgentUsage(null);
+    }
+  }, []);
 
   const [thumbsFeedback, setThumbsFeedback] = useState<"up" | "down" | null>(null);
   const feedback = useCallback((v: "up" | "down") => setThumbsFeedback(v), []);
@@ -2646,14 +2673,11 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
               </span>
             )}
             <div className="agent-turn-footer-actions">
-              <button className="agent-footer-btn" title="Copy entire chat" onClick={copyChat}>
+              <button className="agent-footer-btn" title="Copy this turn" onClick={() => copyTurn(group.items)}>
                 <i className="codicon codicon-copy" />
               </button>
-              <button className="agent-footer-btn" title="Retry last prompt" onClick={retryLast}>
+              <button className="agent-footer-btn" title="Retry this turn" onClick={() => retryTurn(group.items)}>
                 <i className="codicon codicon-refresh" />
-              </button>
-              <button className="agent-footer-btn" title="Create a copy of this chat" onClick={forkChat}>
-                <i className="codicon codicon-repo-forked" />
               </button>
             </div>
           </div>
@@ -2741,14 +2765,11 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
               <button className={`agent-footer-btn${thumbsFeedback === "down" ? " active" : ""}`} title="Bad response" onClick={() => feedback("down")}>
                 <i className={`codicon codicon-${thumbsFeedback === "down" ? "thumbsdown-filled" : "thumbsdown"}`} />
               </button>
-              <button className="agent-footer-btn" title="Copy entire chat" onClick={copyChat}>
+              <button className="agent-footer-btn" title="Copy last turn" onClick={() => copyTurn(messageGroups[messageGroups.length - 1]?.items || [])}>
                 <i className="codicon codicon-copy" />
               </button>
-              <button className="agent-footer-btn" title="Retry last prompt" onClick={retryLast}>
+              <button className="agent-footer-btn" title="Retry last turn" onClick={() => retryTurn(messageGroups[messageGroups.length - 1]?.items || [])}>
                 <i className="codicon codicon-refresh" />
-              </button>
-              <button className="agent-footer-btn" title="Create a copy of this chat" onClick={forkChat}>
-                <i className="codicon codicon-repo-forked" />
               </button>
             </div>
           </div>
