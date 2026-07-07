@@ -1243,6 +1243,15 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
         }
 
         if (evt.type === "tool_start") {
+          // Track write_todos so the pending banner stays in sync
+          const tn = evt.toolName;
+          if (tn === "write_todos" && Array.isArray(evt.toolParams?.todos)) {
+            todosRef.current = (evt.toolParams.todos as any[]).map((t: any): TodoItem => ({
+              id: String(t.id || ""),
+              text: String(t.text || ""),
+              status: (["pending", "in_progress", "completed", "cancelled"].includes(String(t.status)) ? String(t.status) : "pending") as TodoItem["status"],
+            }));
+          }
           // End assistant streaming, flush file changes to the assistant message
           if (assistantMsgId) {
             flushSync(() => {
@@ -1851,12 +1860,13 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
 
   const forkChat = useCallback(() => {
     const id = `thread-${Date.now()}`;
-    const t: ChatThread = { id, title: `Fork of ${activeThreadId || "chat"}`, messages: [...messages], createdAt: Date.now() };
+    const usage = effectiveUsage ?? undefined;
+    const t: ChatThread = { id, title: `Fork of ${activeThreadId || "chat"}`, messages: [...messages], createdAt: Date.now(), usage };
     setThreads((prev) => [...prev, t]);
     setActiveThreadId(id);
     setAgentStatus("idle");
     setAgentUsage(null);
-  }, [messages, activeThreadId]);
+  }, [messages, activeThreadId, effectiveUsage]);
 
   const copyChat = useCallback(() => {
     const text = messages.map((m) => {
@@ -1867,11 +1877,26 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
   }, [messages]);
 
   const copyTurn = useCallback((messages: ConsoleMessage[]) => {
-    const text = messages.map((m) => {
-      const prefix = m.role === "user" ? "You" : m.role === "assistant" ? "AI" : m.toolName ? `Tool: ${m.toolName}` : "System";
-      return `### ${prefix}\n${m.content}`;
-    }).join("\n\n");
-    navigator.clipboard?.writeText(text).catch(() => {});
+    const lines: string[] = [];
+    for (const m of messages) {
+      if (m.role === "user") {
+        lines.push("", m.content, "");
+      } else if (m.role === "tool" && m.toolName) {
+        lines.push(`toolName: ${m.toolName}`);
+        lines.push("status: success");
+        if (m.toolParams?.path || m.toolParams?.oldPath) {
+          lines.push(`filePath: ${m.toolParams.path || m.toolParams.oldPath}`);
+        }
+        if (m.toolParams?.command) {
+          lines.push(`command: ${m.toolParams.command}`);
+        }
+        lines.push("");
+      } else if (m.role === "assistant" && m.content) {
+        lines.push(m.content);
+        lines.push("");
+      }
+    }
+    navigator.clipboard?.writeText(lines.join("\n").trim()).catch(() => {});
   }, []);
 
   const retryTurn = useCallback((messages: ConsoleMessage[]) => {
@@ -2665,14 +2690,42 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
         ))}
         {/* Compact footer after each assistant turn (except the last — main footer handles that) */}
         {!isLast && hasAssistant && (
-          <div className="agent-turn-footer">
-            <i className="codicon codicon-check" /> Response complete
-            {effectiveUsage && (
-              <span className="agent-turn-footer-usage">
-                ~{effectiveUsage.estimatedTokens} / {effectiveUsage.contextLimit} tokens &middot; {totalTurnsRef.current} turns
-              </span>
-            )}
-            <div className="agent-turn-footer-actions">
+          <div className="agent-footer">
+            <div className="agent-footer-status">
+              <i className="codicon codicon-check" /> Response complete
+            </div>
+            {(() => {
+              const ctx = effectiveUsage?.contextLimit ?? 128_000;
+              const turnChars = group.items.reduce((sum, m) => sum + (m.content?.length || 0), 0);
+              const est = Math.round(turnChars / 4);
+              const pct = Math.min(100, (est / ctx) * 100);
+              const radius = 8;
+              const circumference = 2 * Math.PI * radius;
+              const offset = circumference - (pct / 100) * circumference;
+              return (
+                <div className="agent-footer-usage">
+                  <svg className="agent-footer-usage-ring" width="20" height="20" viewBox="0 0 20 20">
+                    <circle className="agent-footer-usage-ring-bg" cx="10" cy="10" r={radius} />
+                    <circle
+                      className={`agent-footer-usage-ring-fill${est > ctx * 0.8 ? " high" : ""}`}
+                      cx="10" cy="10" r={radius}
+                      strokeDasharray={circumference}
+                      strokeDashoffset={offset}
+                    />
+                  </svg>
+                  <span className="agent-footer-usage-text">
+                    ~{est} tokens this turn
+                  </span>
+                </div>
+              );
+            })()}
+            <div className="agent-footer-actions">
+              <button className={`agent-footer-btn${thumbsFeedback === "up" ? " active" : ""}`} title="Good response" onClick={() => feedback("up")}>
+                <i className={`codicon codicon-${thumbsFeedback === "up" ? "thumbsup-filled" : "thumbsup"}`} />
+              </button>
+              <button className={`agent-footer-btn${thumbsFeedback === "down" ? " active" : ""}`} title="Bad response" onClick={() => feedback("down")}>
+                <i className={`codicon codicon-${thumbsFeedback === "down" ? "thumbsdown-filled" : "thumbsdown"}`} />
+              </button>
               <button className="agent-footer-btn" title="Copy this turn" onClick={() => copyTurn(group.items)}>
                 <i className="codicon codicon-copy" />
               </button>
@@ -2759,6 +2812,8 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
                   )}
                 </div>
               )}
+            </div>
+            <div className="agent-footer-actions">
               <button className={`agent-footer-btn${thumbsFeedback === "up" ? " active" : ""}`} title="Good response" onClick={() => feedback("up")}>
                 <i className={`codicon codicon-${thumbsFeedback === "up" ? "thumbsup-filled" : "thumbsup"}`} />
               </button>
@@ -2770,6 +2825,9 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
               </button>
               <button className="agent-footer-btn" title="Retry last turn" onClick={() => retryTurn(messageGroups[messageGroups.length - 1]?.items || [])}>
                 <i className="codicon codicon-refresh" />
+              </button>
+              <button className="agent-footer-btn" title="Fork this chat" onClick={forkChat}>
+                <i className="codicon codicon-repo-forked" />
               </button>
             </div>
           </div>
