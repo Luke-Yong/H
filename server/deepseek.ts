@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import os from "os";
 
 const BASE_URL = "https://api.deepseek.com/v1";
 
@@ -89,7 +90,7 @@ let lastCleanupDay = 0;
 
 function logOutgoing(label: string, messages: Array<any>, cacheCtx?: string) {
   try {
-    const dir = path.resolve(process.cwd(), ".harness-debug");
+    const dir = path.resolve(os.homedir(), ".harness-debug");
     fs.mkdirSync(dir, { recursive: true });
     // Cleanup files older than 7 days (run once per day max)
     const now = Date.now();
@@ -133,7 +134,9 @@ function logOutgoing(label: string, messages: Array<any>, cacheCtx?: string) {
     }
     compact.push(meta);
     fs.writeFileSync(file, JSON.stringify(compact, null, 2), "utf-8");
-  } catch { /* ignore logging errors */ }
+  } catch (err) {
+    console.error("[harness-debug] Failed to write debug log:", err instanceof Error ? err.message : String(err));
+  }
 }
 
 export async function chatDeepSeek(

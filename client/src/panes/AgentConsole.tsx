@@ -1,6 +1,5 @@
 import { useRef, useEffect, useState, useCallback, useMemo } from "react";
 import { flushSync } from "react-dom";
-import { createPortal } from "react-dom";
 import type { AgentTerminalBridge } from "./AgentTerminalBridge";
 
 // ── Rich message types for the unified agent chat ──
@@ -175,6 +174,8 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
   // Track agent terminal output streaming from the bridge
   const agentTermMsgIdRef = useRef<string | null>(null);
   const agentTermOutputRef = useRef<string>("");
+  // Track the local message ID of the most recent delegate_task tool card
+  const delegateTaskCardIdRef = useRef<string | null>(null);
   // Deferred destructive file tool: after file auto-executes, diff is shown. User must Accept/Reject before agent continues.
   const deferredToolRef = useRef<{ sessionId: string; toolCallId: string; filePath: string; name: string; originalContent: string | null } | null>(null);
   const continueDeferredRef = useRef<((accepted: boolean, sessionId: string, toolCallId: string) => Promise<void>) | null>(null);
@@ -1010,6 +1011,9 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
             }
             flushSync(() => {
               pushRaw(id, { role: "tool", content: "", toolName: evt.toolName, toolParams: evt.toolParams, state: "waiting", sandboxOutput: evt.toolName === "run_command" ? "" : undefined, tokenCount: fcTokenSaved as number | undefined });
+              if (evt.toolName === "delegate_task") {
+                delegateTaskCardIdRef.current = id;
+              }
             });
           } else {
             // Store the command so permission_required can use it (does not run yet)
@@ -1131,6 +1135,24 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
           return false; // stop — wait for user to Allow/Deny
         } else if (evt.type === "browser_tool") {
           toolCallId = evt.toolCallId || "";
+          // If this browser tool belongs to a sub-agent, nest it under the delegate_task card
+          if ((evt as any).subAgentParentToolCallId && delegateTaskCardIdRef.current) {
+            const parentId = delegateTaskCardIdRef.current;
+            setMessages((prev) => {
+              const next = [...prev];
+              const idx = next.findIndex((m) => m.id === parentId);
+              if (idx >= 0) {
+                const existing = next[idx].subAgentMessages || [];
+                next[idx] = {
+                  ...next[idx],
+                  subAgentMessages: [...existing, { role: "tool", name: evt.toolName, content: `Running ${(evt.toolName || "").replace(/_/g, " ")}...` }],
+                  state: undefined,
+                };
+              }
+              return next;
+            });
+            return false;
+          }
           // Show the browser tool being executed
           if (assistantMsgId) {
             setMessages((prev) => {
@@ -1455,6 +1477,24 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
 
         if (evt.type === "browser_tool") {
           toolCallId = evt.toolCallId || "";
+          // If this browser tool belongs to a sub-agent, nest it under the delegate_task card
+          if ((evt as any).subAgentParentToolCallId && delegateTaskCardIdRef.current) {
+            const parentId = delegateTaskCardIdRef.current;
+            setMessages((prev) => {
+              const next = [...prev];
+              const idx = next.findIndex((m) => m.id === parentId);
+              if (idx >= 0) {
+                const existing = next[idx].subAgentMessages || [];
+                next[idx] = {
+                  ...next[idx],
+                  subAgentMessages: [...existing, { role: "tool", name: evt.toolName, content: `Running ${(evt.toolName || "").replace(/_/g, " ")}...` }],
+                  state: undefined,
+                };
+              }
+              return next;
+            });
+            return false;
+          }
           if (assistantMsgId) {
             setMessages((prev) => {
               const next = [...prev];
@@ -1910,9 +1950,8 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
 
   const [thumbsFeedback, setThumbsFeedback] = useState<"up" | "down" | null>(null);
   const feedback = useCallback((v: "up" | "down") => setThumbsFeedback(v), []);
-  const [diffPanelOpen, setDiffPanelOpen] = useState(false);
   const [expandedDiffPath, setExpandedDiffPath] = useState<string | null>(null);
-  const diffHostRef = useRef<HTMLButtonElement>(null);
+  const [expandedGroupDiffKey, setExpandedGroupDiffKey] = useState<string | null>(null);
 
   // ── Simple line-by-line diff (LCS-based unified diff) ──
   const computeUnifiedDiff = useCallback((original: string, current: string, contextLines = 3): string => {
@@ -1973,6 +2012,20 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
     }
     return files;
   }, [messages, computeUnifiedDiff]);
+
+  const getGroupDiffFiles = useCallback((items: ConsoleMessage[]) => {
+    const files: { path: string; name: string; diff: string }[] = [];
+    for (const m of items) {
+      if (m.role === "assistant" && m.fileChanges && m.fileChanges.length > 0) {
+        for (const fc of m.fileChanges) {
+          if (fc.changeType === "write" && fc.originalContent != null && fc.content) {
+            files.push({ path: fc.path, name: fc.name, diff: computeUnifiedDiff(fc.originalContent || "", fc.content) });
+          }
+        }
+      }
+    }
+    return files;
+  }, [computeUnifiedDiff]);
 
   // ── Pending items for the input-area banner ──
   const pendingTodos = useMemo(() => {
@@ -2058,16 +2111,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
   const [showPendingBanner, setShowPendingBanner] = useState(false);
 
   // Clear diff panel when messages change
-  useEffect(() => { setDiffPanelOpen(false); setExpandedDiffPath(null); }, [messages.length]);
-
-  // Compute position of the diff host button for the portal
-  const diffHostRect = useMemo(() => {
-    if (!diffPanelOpen) return null;
-    const btn = diffHostRef.current;
-    if (!btn) return null;
-    const r = btn.getBoundingClientRect();
-    return { bottom: window.innerHeight - r.top + 4, right: window.innerWidth - r.right };
-  }, [diffPanelOpen, changedFiles]);
+  useEffect(() => { setExpandedDiffPath(null); setExpandedGroupDiffKey(null); }, [messages.length]);
 
   // ── Accept/reject pending diff ──
 
@@ -2503,15 +2547,56 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
                         {msg.toolName === "run_command" && <span className="agent-tool-card-label">sandbox</span>}
                         {msg.toolParams && msg.toolName !== "run_in_terminal" && msg.toolName !== "run_command" && (
                           <span className="agent-tool-card-args">
-                            {Object.entries(msg.toolParams).map(([k, v]) => (
-                              <span key={k}>{k}: {String(v).slice(0, 60)}</span>
-                            ))}
+                            {Object.entries(msg.toolParams)
+                              .filter(([k]) => msg.toolName === "delegate_task" ? k !== "task" : true)
+                              .map(([k, v]) => (
+                                <span key={k}>{k}: {String(v).slice(0, 60)}</span>
+                              ))}
                           </span>
                         )}
                       </>
                     );
                   })()}
                 </div>
+                {/* ── Sub-agent container inside tool card ── */}
+                {msg.toolName === "delegate_task" && msg.subAgentMessages && msg.subAgentMessages.length > 0 && (
+                  <div className="agent-sub-agent">
+                    <div className="agent-sub-agent-header"
+                      onClick={() => setExpandedSubAgents((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(msg.id)) next.delete(msg.id); else next.add(msg.id);
+                        return next;
+                      })}>
+                      <i className={`codicon codicon-${expandedSubAgents.has(msg.id) ? "chevron-down" : "chevron-right"}`} />
+                      <span>{msg.subAgentName || "Sub-agent"} ({msg.subAgentMessages.length} messages)</span>
+                    </div>
+                    {expandedSubAgents.has(msg.id) && (
+                      <div className="agent-sub-agent-body">
+                        {msg.subAgentMessages.map((m, i) => (
+                          <div key={i} className={`agent-sub-agent-msg${m.reasoning_content ? " thinking" : ""}${m.name ? " tool" : ""}`}>
+                            {m.reasoning_content && (
+                              <div className="agent-sub-agent-thought">{m.reasoning_content}</div>
+                            )}
+                            {m.name && (
+                              <div className="agent-sub-agent-tool">
+                                <i className="codicon codicon-tools" /> {m.name.replace(/_/g, " ")}
+                              </div>
+                            )}
+                            {m.content && !m.name && m.role === "assistant" && (
+                              <div className="agent-sub-agent-text">{m.content}</div>
+                            )}
+                            {m.role === "user" && (
+                              <div className="agent-sub-agent-text agent-sub-agent-user">User: {m.content}</div>
+                            )}
+                            {m.role === "tool" && (
+                              <div className="agent-sub-agent-result">{m.content.slice(0, 200)}</div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
                 {/* ── Accept/reject for file tools ── */}
                 {(() => {
                   const FILE_TOOLS = ["edit_file"];
@@ -2624,45 +2709,6 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
                 {msg.content && !msg.sandboxOutput && msg.toolName !== "run_in_terminal" && (
                   <pre className="agent-code">{msg.content}</pre>
                 )}
-                {/* ── Sub-agent collapsible trace ── */}
-                {msg.subAgentMessages && msg.subAgentMessages.length > 0 && (
-                  <div className="agent-sub-agent">
-                    <div className="agent-sub-agent-header"
-                      onClick={() => setExpandedSubAgents((prev) => {
-                        const next = new Set(prev);
-                        if (next.has(msg.id)) next.delete(msg.id); else next.add(msg.id);
-                        return next;
-                      })}>
-                      <i className={`codicon codicon-${expandedSubAgents.has(msg.id) ? "chevron-down" : "chevron-right"}`} />
-                      <span>{msg.subAgentName || "Sub-agent"} trace ({msg.subAgentMessages.length} messages)</span>
-                    </div>
-                    {expandedSubAgents.has(msg.id) && (
-                      <div className="agent-sub-agent-body">
-                        {msg.subAgentMessages.map((m, i) => (
-                          <div key={i} className={`agent-sub-agent-msg${m.reasoning_content ? " thinking" : ""}${m.name ? " tool" : ""}`}>
-                            {m.reasoning_content && (
-                              <div className="agent-sub-agent-thought">{m.reasoning_content}</div>
-                            )}
-                            {m.name && (
-                              <div className="agent-sub-agent-tool">
-                                <i className="codicon codicon-tools" /> {m.name.replace(/_/g, " ")}
-                              </div>
-                            )}
-                            {m.content && !m.name && m.role === "assistant" && (
-                              <div className="agent-sub-agent-text">{m.content}</div>
-                            )}
-                            {m.role === "user" && (
-                              <div className="agent-sub-agent-text agent-sub-agent-user">User: {m.content}</div>
-                            )}
-                            {m.role === "tool" && (
-                              <div className="agent-sub-agent-result">{m.content.slice(0, 200)}</div>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
               </div>
             )}
             {/* Fallback for tool msgs without tool-card */}
@@ -2703,7 +2749,7 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
               const circumference = 2 * Math.PI * radius;
               const offset = circumference - (pct / 100) * circumference;
               return (
-                <div className="agent-footer-usage">
+                <div className="agent-footer-usage" title={`~${est} estimated tokens of ${ctx.toLocaleString()} context limit`}>
                   <svg className="agent-footer-usage-ring" width="20" height="20" viewBox="0 0 20 20">
                     <circle className="agent-footer-usage-ring-bg" cx="10" cy="10" r={radius} />
                     <circle
@@ -2714,7 +2760,7 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
                     />
                   </svg>
                   <span className="agent-footer-usage-text">
-                    ~{est} tokens this turn
+                    {Math.round(pct)}%
                   </span>
                 </div>
               );
@@ -2726,6 +2772,18 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
               <button className={`agent-footer-btn${thumbsFeedback === "down" ? " active" : ""}`} title="Bad response" onClick={() => feedback("down")}>
                 <i className={`codicon codicon-${thumbsFeedback === "down" ? "thumbsdown-filled" : "thumbsdown"}`} />
               </button>
+              {(() => {
+                const gDiff = getGroupDiffFiles(group.items);
+                if (gDiff.length === 0) return null;
+                const isOpen = expandedGroupDiffKey === group.key;
+                return (
+                  <>
+                    <button className={`agent-footer-btn${isOpen ? " active" : ""}`} title="View changes" onClick={() => setExpandedGroupDiffKey(isOpen ? null : group.key)}>
+                      <i className="codicon codicon-diff" /> {gDiff.length}
+                    </button>
+                  </>
+                );
+              })()}
               <button className="agent-footer-btn" title="Copy this turn" onClick={() => copyTurn(group.items)}>
                 <i className="codicon codicon-copy" />
               </button>
@@ -2733,6 +2791,25 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
                 <i className="codicon codicon-refresh" />
               </button>
             </div>
+            {expandedGroupDiffKey === group.key && (
+              <div className="agent-group-diff-panel">
+                {getGroupDiffFiles(group.items).map((f) => (
+                  <div key={f.path} className="agent-group-diff-file">
+                    <div className="agent-group-diff-file-header" onClick={() => setExpandedDiffPath(expandedDiffPath === f.path ? null : f.path)}>
+                      <i className={`codicon codicon-${expandedDiffPath === f.path ? "chevron-down" : "chevron-right"}`} />
+                      {f.path}
+                    </div>
+                    {expandedDiffPath === f.path && (
+                      <div className="agent-diff-content">
+                        {f.diff.split("\n").map((line, i) => (
+                          <span key={i} className={`agent-diff-line${line.startsWith("+") ? " added" : line.startsWith("-") ? " removed" : ""}`}>{line}{"\n"}</span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
         {isLast && !hasAssistant && lastGroupIsUserOnly && (
@@ -2763,7 +2840,7 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
               const circumference = 2 * Math.PI * radius;
               const offset = circumference - (pct / 100) * circumference;
               return (
-                <div className="agent-footer-usage">
+                <div className="agent-footer-usage" title={`${est.toLocaleString()} estimated tokens · ${effectiveUsage?.turns ?? 0} turns · ${ctx.toLocaleString()} context limit (${Math.round(pct)}%)`}>
                   <svg className="agent-footer-usage-ring" width="20" height="20" viewBox="0 0 20 20">
                     <circle className="agent-footer-usage-ring-bg" cx="10" cy="10" r={radius} />
                     <circle
@@ -2774,43 +2851,16 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
                     />
                   </svg>
                   <span className="agent-footer-usage-text">
-                    ~{est} / {ctx} tokens ({Math.round(pct)}%) &middot; {effectiveUsage?.turns ?? 0} turns
+                    {Math.round(pct)}% &middot; {effectiveUsage?.turns ?? 0}t
                   </span>
                 </div>
               );
             })()}
             <div className="agent-footer-actions">
               {changedFiles.length > 0 && (
-                <div className="agent-diff-host">
-                  <button className="agent-footer-btn" ref={diffHostRef} title="View changes" onClick={() => setDiffPanelOpen((v) => !v)}>
-                    <i className="codicon codicon-diff" /> {changedFiles.length} diff{changedFiles.length > 1 ? "s" : ""}
-                  </button>
-                  {diffPanelOpen && diffHostRect && createPortal(
-                    <div className="agent-diff-panel" style={{ position: "fixed", bottom: diffHostRect.bottom, right: diffHostRect.right }}>
-                      <div className="agent-diff-panel-header">
-                        Changed files
-                        <button className="agent-diff-panel-close" onClick={() => setDiffPanelOpen(false)} title="Close">&times;</button>
-                      </div>
-                      {changedFiles.map((f) => (
-                        <div key={f.path} className={`agent-diff-file${expandedDiffPath === f.path ? " expanded" : ""}`}>
-                          <button className="agent-diff-file-name" onClick={() => setExpandedDiffPath((p) => p === f.path ? null : f.path)}>
-                            <i className={`codicon codicon-${expandedDiffPath === f.path ? "chevron-down" : "chevron-right"}`} />
-                            <span>{f.name}</span>
-                            <span className="agent-diff-file-path">{f.path}</span>
-                          </button>
-                          {expandedDiffPath === f.path && (
-                            <div className="agent-diff-content">
-                              {f.diff.split("\n").map((line, i) => (
-                                <span key={i} className={`agent-diff-line${line.startsWith("+") ? " added" : line.startsWith("-") ? " removed" : ""}`}>{line}{"\n"}</span>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  , document.body
-                  )}
-                </div>
+                <button className="agent-footer-btn" title={`${changedFiles.length} file${changedFiles.length > 1 ? "s" : ""} changed`}>
+                  <i className="codicon codicon-diff" /> {changedFiles.length}
+                </button>
               )}
             </div>
             <div className="agent-footer-actions">

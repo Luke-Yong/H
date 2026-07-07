@@ -1680,6 +1680,21 @@ body.resizing iframe { pointer-events: none; }
 .agent-diff-line.added { background: rgba(78, 201, 78, 0.08); color: #4ec94e; }
 .agent-diff-line.removed { background: rgba(248, 81, 73, 0.08); color: #f85149; }
 
+/* ── Inline group diff panel (per-turn footer) ── */
+.agent-group-diff-panel {
+  border-top: 1px solid var(--border);
+  background: rgba(0,0,0,0.1);
+}
+.agent-group-diff-file { border-bottom: 1px solid rgba(255,255,255,0.05); }
+.agent-group-diff-file:last-child { border-bottom: none; }
+.agent-group-diff-file-header {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 12px; font-size: 11px;
+  cursor: pointer; color: var(--text-dim);
+}
+.agent-group-diff-file-header:hover { background: rgba(255,255,255,0.04); color: var(--text); }
+.agent-group-diff-file-header .codicon { font-size: 10px; }
+
 /* ── Agent diff inline decorations in editor ── */
 .agent-diff-added-line { background: rgba(78, 201, 78, 0.12) !important; }
 .agent-diff-removed-line { background: rgba(248, 81, 73, 0.12) !important; }
@@ -1840,6 +1855,9 @@ details[open] .agent-thought-summary::before { transform: rotate(90deg); }
   padding: 6px 10px 8px 24px; font-size: 11px; color: rgba(255,255,255,0.55);
   line-height: 1.45; white-space: pre-wrap;
   border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+.agent-thought[open] .agent-thought-body {
+  max-height: 260px; overflow-y: auto;
 }
 
 /* ── Message body ── */

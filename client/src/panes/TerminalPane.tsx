@@ -946,6 +946,16 @@ export default function TerminalPane({
 
     ws.onmessage = (msg) => {
       const data = msg.data as string;
+      // ── Non-terminal broadcast messages (JSON) ──
+      if (data.startsWith("{")) {
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed.type === "server_log") {
+            console.log("[server]", parsed.data);
+          }
+        } catch {}
+        return;
+      }
       if (data.startsWith("term:ready:")) {
         const rest = data.slice(11);
         const sep = rest.indexOf(":");

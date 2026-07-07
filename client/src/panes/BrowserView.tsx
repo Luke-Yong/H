@@ -38,6 +38,8 @@ export interface BrowserViewHandle {
   moveMouse: (x: number, y: number) => Promise<string>;
   /** Right-click at viewport coordinates (opens context menu). */
   rightClick: (x: number, y: number) => Promise<string>;
+  /** Right-click element at DOM index. */
+  rightClickElement: (index: number) => Promise<string>;
   /** Scroll the page. */
   scrollPage: (x: number, y: number, to?: string) => Promise<string>;
   /** Press a keyboard key. */
@@ -1420,7 +1422,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   const evalInPage = useCallback(async (code: string): Promise<string> => {
     try {
       const wv = getWebview();
-      if (wv && webviewReadyRef.current) {
+      if (wv) {
         const result = await (wv as any).executeJavaScript(code);
         return String(result ?? "");
       }
@@ -1876,6 +1878,34 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     return mouseEvent(x, y, "contextmenu");
   }, [mouseEvent]);
 
+  const rightClickElement = useCallback(async (index: number): Promise<string> => {
+    return evalInPage(`
+      (() => {
+        const vw = window.innerWidth, vh = window.innerHeight;
+        const w = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+        let i = 0; let el;
+        while ((el = w.nextNode())) {
+          const r = el.getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0 || r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw) continue;
+          if (i++ !== ${index}) continue;
+          const rect = el.getBoundingClientRect();
+          const cx = rect.left + rect.width / 2;
+          const cy = rect.top + rect.height / 2;
+          const vx = Math.max(0, Math.min(cx, window.innerWidth - 1));
+          const vy = Math.max(0, Math.min(cy, window.innerHeight - 1));
+          const opts = { clientX: vx, clientY: vy, screenX: vx, screenY: vy, bubbles: true, cancelable: true, button: 2, buttons: 2, view: window };
+          el.dispatchEvent(new PointerEvent('pointerdown', { ...opts, pointerId: 1, pointerType: 'mouse' }));
+          el.dispatchEvent(new MouseEvent('mousedown', opts));
+          el.dispatchEvent(new PointerEvent('pointerup', { ...opts, pointerId: 1, pointerType: 'mouse' }));
+          el.dispatchEvent(new MouseEvent('mouseup', opts));
+          el.dispatchEvent(new MouseEvent('contextmenu', opts));
+          return 'right-clicked <' + el.tagName.toLowerCase() + '> at index ${index}';
+        }
+        return 'element not found at index ${index}';
+      })()
+    `);
+  }, [evalInPage]);
+
   const scrollPage = useCallback(async (x: number, y: number, to?: string): Promise<string> => {
     if (to === "top") return evalInPage(`window.scrollTo(0, 0); 'Scrolled to top.';`);
     if (to === "bottom") return evalInPage(`window.scrollTo(0, document.body.scrollHeight); 'Scrolled to bottom.';`);
@@ -2052,9 +2082,9 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   }, [evalInPage]);
 
   useImperativeHandle(ref, () => ({
-    evalInPage, getIndexedDom, clickElement, typeIntoElement, clearElement, clickCoords, moveMouse, rightClick, scrollPage, pressKey, uploadFile, getPageSnapshot, navigateTo,
+    evalInPage, getIndexedDom, clickElement, typeIntoElement, clearElement, clickCoords, moveMouse, rightClick, rightClickElement, scrollPage, pressKey, uploadFile, getPageSnapshot, navigateTo,
     waitForElement, getConsoleEntries, getRequestErrors, getInfo, selectOption,
-  }), [evalInPage, getIndexedDom, clickElement, typeIntoElement, clearElement, clickCoords, moveMouse, rightClick, scrollPage, pressKey, uploadFile, getPageSnapshot, navigateTo,
+  }), [evalInPage, getIndexedDom, clickElement, typeIntoElement, clearElement, clickCoords, moveMouse, rightClick, rightClickElement, scrollPage, pressKey, uploadFile, getPageSnapshot, navigateTo,
     waitForElement, getConsoleEntries, getRequestErrors, getInfo, selectOption]);
 
   return (

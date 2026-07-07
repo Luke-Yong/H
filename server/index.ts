@@ -7,7 +7,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { chatDeepSeek } from "./deepseek";
 import {
   createSession, writeToSession, resizeSession,
-  killSession, killAllInGroup, setLastWsGroupKey, getLastCreatedSessionId,
+  killSession, killAllInGroup, setLastWsGroupKey, getLastWsGroupKey, getLastCreatedSessionId,
 } from "./terminalManager";
 import fs from "fs";
 import path from "path";
@@ -32,6 +32,15 @@ const broadcast = (event: { type: string; data: unknown }) => {
       client.send(payload);
     }
   });
+};
+
+// Forward server console.log to renderer DevTools via WebSocket
+const _origLog = console.log;
+console.log = (...args: any[]) => {
+  _origLog(...args);
+  try {
+    broadcast({ type: "server_log", data: args.map((a) => (typeof a === "string" ? a : String(a))).join(" ") });
+  } catch {}
 };
 
 // ── Agentic coding chat (simple, single-turn) ──
@@ -285,13 +294,23 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
       if (subResult.phase === "browser_tool") {
         state.pendingSubAgent = { ...psa, subState: subResult.subState };
         broadcast({ type: "agent_tool", data: { sessionId, tool: { name: subResult.toolName, id: subResult.toolCallId, params: subResult.params }, executedTools: [] } });
-        return res.json({
-          phase: "tool_needed",
-          sessionId,
-          tool: { name: subResult.toolName, id: subResult.toolCallId, params: subResult.params },
-          executedTools: [],
-          messages: state.messages,
+        // Return SSE so the frontend can parse the event and continue with the correct toolCallId
+        res.writeHead(200, {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          "Connection": "keep-alive",
+          "X-Accel-Buffering": "no",
         });
+        res.write(`data: ${JSON.stringify({
+          type: "browser_tool",
+          toolName: subResult.toolName,
+          toolCallId: subResult.toolCallId,
+          toolParams: subResult.params,
+          subAgentParentToolCallId: psa.parentToolCallId,
+          sessionId,
+        })}\n\n`);
+        res.end();
+        return;
       }
       // Sub-agent done — push delegate_task result to parent state and continue
       const resultText = `[${psa.config.name}] Completed in ${subResult.iterations} turns.\n${subResult.summary}`;
@@ -371,9 +390,10 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
           }
           // Track this terminal session for kill_terminal
           const termSessionId = getLastCreatedSessionId();
-          if (termSessionId) {
+          const termGroupKey = getLastWsGroupKey();
+          if (termSessionId && termGroupKey) {
             if (!state.agentTerminalSessions) state.agentTerminalSessions = [];
-            state.agentTerminalSessions.push({ sessionId: termSessionId, command: pp.command });
+            state.agentTerminalSessions.push({ sessionId: termSessionId, groupKey: termGroupKey, command: pp.command });
           }
         }
       } else {

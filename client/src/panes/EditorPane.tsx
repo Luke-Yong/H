@@ -1563,8 +1563,11 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
       case "browser_click":
         if (params.index != null) return bv.clickElement(Number(params.index));
         return bv.clickCoords(Number(params.x || 0), Number(params.y || 0));
+      case "browser_right_click":
+        if (params.index != null) return bv.rightClickElement(Number(params.index));
+        return bv.rightClick(Number(params.x || 0), Number(params.y || 0));
       case "browser_move_mouse": return bv.moveMouse(Number(params.x || 0), Number(params.y || 0));
-      case "browser_right_click": return bv.rightClick(Number(params.x || 0), Number(params.y || 0));
+      case "browser_scroll": return bv.scrollPage(Number(params.x || 0), Number(params.y || 0), params.to as string | undefined);
       case "browser_press_key": return bv.pressKey(String(params.key || ""));
       case "browser_upload_file": return bv.uploadFile(Number(params.index || 0), (params.paths as string[]) || []);
       case "browser_console": return bv.getConsoleEntries();

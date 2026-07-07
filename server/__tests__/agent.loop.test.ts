@@ -155,7 +155,6 @@ describe("agentLoop", () => {
     const result = await agentLoop(tmpDir, state, "", { apiKey: "sk-test" });
 
     expect(result.phase).toBe("done");
-    expect(state.isReasoningModel).toBe(true);
   });
 });
 
@@ -213,7 +212,6 @@ describe("agentLoopStream", () => {
 
     const thinkingEvents = events.filter(e => e.type === "thinking");
     expect(thinkingEvents.length).toBeGreaterThan(0);
-    expect(state.isReasoningModel).toBe(true);
   });
 
   it("yields tool_start and tool_end for filesystem tools, then completes", async () => {

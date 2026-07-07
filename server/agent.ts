@@ -9,8 +9,8 @@
 // Conversation state is held in memory keyed by session id.
 
 import { chatDeepSeekTool, chatDeepSeekToolStream, generateEmbedding } from "./deepseek";
-import { getMemoryStore, MemoryStore } from "./memory";
-import { killAllAgentTerminals, killSession, getLastWsGroupKey, getLastCreatedSessionId } from "./terminalManager";
+import { getMemoryStore } from "./memory";
+import { killSession, getLastCreatedSessionId } from "./terminalManager";
 import fs from "fs";
 import path from "path";
 import { execSync, spawn } from "child_process";
@@ -57,14 +57,12 @@ export interface AgentState {
     parentToolArgs: string;
     parentReasoning?: string;
   };
-  /** True once the API has returned reasoning_content in any response. */
-  isReasoningModel?: boolean;
   /** Step-by-step mode: locked todo list populated during planning phase. */
   lockedTodos?: LockedTodo[];
   /** Current step index in step-by-step execution mode. */
   currentStepIndex?: number;
   /** Terminal sessions spawned by this agent via run_in_terminal. */
-  agentTerminalSessions?: { sessionId: string; command: string }[];
+  agentTerminalSessions?: { sessionId: string; groupKey: string; command: string }[];
   /** Latest todo list from write_todos — used to detect incomplete tasks at task_complete. */
   latestTodos?: { id: string; text: string; status: string }[];
 }
@@ -212,6 +210,8 @@ export interface AgentSseEvent {
   subAgentMessages?: { role: string; content: string; name?: string; reasoning_content?: string }[];
   /** Sub-agent display name (on tool_end for delegate_task). */
   subAgentName?: string;
+  /** When a browser_tool is yielded from within a sub-agent, this is the delegate_task's tool_call_id. */
+  subAgentParentToolCallId?: string;
   /** Locked todo list (on step_plan). */
   lockedTodos?: LockedTodo[];
   /** Current step todo item (on step_begin / step_end). */
@@ -1309,10 +1309,10 @@ export async function runFsTool(name: string, params: Record<string, unknown>, r
 async function runMemoryTool(
   name: string,
   params: Record<string, unknown>,
-  projectRoot: string,
+  _projectRoot: string,
   apiKey: string,
 ): Promise<string> {
-  const store = getMemoryStore(projectRoot);
+  const store = getMemoryStore();
 
   if (name === "remember") {
     const key = String(params.key || "").trim();
@@ -1575,49 +1575,63 @@ function buildOpenAiMessages(state: AgentState, context: string): ModelMessage[]
     + (state.historySummary ? `\n\n### Earlier conversation summary\n${state.historySummary}` : "");
 
   const msgs: ModelMessage[] = [{ role: "system", content: systemMsg }];
-  const pendingIds = new Set<string>();
 
+  // Build a map of tool_call_id → content from all tool messages in state.
+  // This lets us emit tool responses immediately after their assistant message,
+  // regardless of where the tool message appears in state.messages order.
+  // DeepSeek requires each assistant(tool_calls) to be immediately followed
+  // by tool messages for all its tool_call_ids — no intervening messages.
+  const toolResults = new Map<string, string>();
   for (const message of state.messages) {
     if (message.role === "tool") {
       const toolId = message.tool_call_id;
-      if (toolId && pendingIds.has(toolId)) {
-        pendingIds.delete(toolId);
-        msgs.push({ role: "tool", content: message.content, tool_call_id: toolId });
+      if (toolId && !toolResults.has(toolId)) {
+        toolResults.set(toolId, message.content);
       }
+    }
+  }
+
+  const consumedIds = new Set<string>();
+
+  for (const message of state.messages) {
+    // Tool messages are handled inline by the assistant that issued them —
+    // skip standalone tool messages to avoid duplicates.
+    if (message.role === "tool") {
       continue;
     }
 
     if (message.role === "assistant" && message.name) {
-      for (const id of pendingIds) {
-        msgs.push({ role: "tool", content: "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_get_dom, browser_select, or any other browser_* tool) on your next turn to get the actual result.", tool_call_id: id });
-      }
-      pendingIds.clear();
-
       try {
         const calls: Array<{ id?: string }> = JSON.parse(message.content);
         const ids = calls.map((call) => call.id).filter(Boolean) as string[];
-        for (const id of ids) pendingIds.add(id);
         msgs.push({
           role: "assistant",
           content: null,
           tool_calls: calls,
-          ...(message.reasoning_content || state.isReasoningModel ? { reasoning_content: message.reasoning_content || "" } : {}),
+          ...(message.reasoning_content ? { reasoning_content: message.reasoning_content } : {}),
         });
+        // Emit tool responses immediately after the assistant message,
+        // ensuring DeepSeek's required message ordering.
+        for (const id of ids) {
+          const result = !consumedIds.has(id) ? toolResults.get(id) : undefined;
+          consumedIds.add(id);
+          msgs.push({
+            role: "tool",
+            content: result ?? `ERROR: Tool execution failed or was interrupted. Do not retry — the state may be inconsistent.`,
+            tool_call_id: id,
+          });
+        }
       } catch {
         msgs.push({
           role: "assistant",
           content: message.content,
-          ...(message.reasoning_content || state.isReasoningModel ? { reasoning_content: message.reasoning_content || "" } : {}),
+          ...(message.reasoning_content ? { reasoning_content: message.reasoning_content } : {}),
         });
       }
       continue;
     }
 
     msgs.push(message);
-  }
-
-  for (const id of pendingIds) {
-    msgs.push({ role: "tool", content: "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_get_dom, browser_select, or any other browser_* tool) on your next turn to get the actual result.", tool_call_id: id });
   }
 
   return msgs;
@@ -2126,22 +2140,67 @@ function buildOpenAiMessagesForSubAgent(
   customSystemPrompt: string,
 ): ModelMessage[] {
   const msgs: ModelMessage[] = [{ role: "system", content: customSystemPrompt }];
+
+  // Build a map of tool_call_id → content from all tool messages in state.
+  // This lets us emit tool responses immediately after their assistant message,
+  // regardless of where the tool message appears in state.messages order.
+  // DeepSeek requires each assistant(tool_calls) to be immediately followed
+  // by tool messages for all its tool_call_ids — no intervening messages.
+  const toolResults = new Map<string, string>();
   for (const m of state.messages) {
     if (m.role === "tool") {
-      msgs.push({ role: "tool", content: m.content, tool_call_id: m.tool_call_id });
+      const id = m.tool_call_id;
+      if (id && !toolResults.has(id)) {
+        toolResults.set(id, m.content);
+      }
+    }
+  }
+
+  const consumedIds = new Set<string>();
+
+  for (const m of state.messages) {
+    // Tool messages are handled inline by the assistant that issued them —
+    // skip standalone tool messages to avoid duplicates.
+    if (m.role === "tool") {
       continue;
     }
     if (m.role === "assistant" && m.name) {
       try {
-        const calls = JSON.parse(m.content);
-        msgs.push({ role: "assistant", content: null, tool_calls: calls });
+        const calls: Array<{ id?: string }> = JSON.parse(m.content);
+        const ids = calls.map((call) => call.id).filter(Boolean) as string[];
+        msgs.push({
+          role: "assistant",
+          content: null,
+          tool_calls: calls,
+          ...(m.reasoning_content ? { reasoning_content: m.reasoning_content } : {}),
+        });
+        // Emit tool responses immediately after the assistant message,
+        // ensuring DeepSeek's required message ordering.
+        for (const id of ids) {
+          const result = !consumedIds.has(id) ? toolResults.get(id) : undefined;
+          consumedIds.add(id);
+          msgs.push({
+            role: "tool",
+            content: result ?? "ERROR: Sub-agent tool execution failed.",
+            tool_call_id: id,
+          });
+        }
       } catch {
-        msgs.push({ role: "assistant", content: m.content });
+        msgs.push({
+          role: "assistant",
+          content: m.content,
+          ...(m.reasoning_content ? { reasoning_content: m.reasoning_content } : {}),
+        });
       }
       continue;
     }
-    msgs.push({ role: m.role as "user" | "assistant", content: m.content });
+    msgs.push({
+      role: m.role as "user" | "assistant",
+      content: m.content,
+      ...(m.reasoning_content ? { reasoning_content: m.reasoning_content } : {}),
+    });
   }
+
   return msgs;
 }
 
@@ -2158,8 +2217,6 @@ function summarizeSubAgentResult(rawResult: string, agentName: string): string {
 // ── Summary validation: reject vague "thought process" style summaries ──
 function isVagueSummary(summary: string): string | null {
   const s = summary.trim();
-  // Too short — definitely vague
-  if (s.length < 30) return "Summary is too short. Use the template: ### Changes Made, ### Verification, ### Outcome.";
   // Common "thought process" patterns that indicate no real structure
   const thoughtPatterns = [
     /^OK\.?\s*$/i,
@@ -2168,22 +2225,21 @@ function isVagueSummary(summary: string): string | null {
     /^(OK|Alright|Sure|Got it),?\s/i,
     /^The (task|step|change|request|user)/i,
     /^Task completed/i,
-    /^Completed/i,
-    /^All done/i,
     /^Here('| i)s (what|a summary)/i,
   ];
-  // If summary matches a thought pattern AND doesn't have template headers, it's vague
   const hasTemplateHeader = /(?:###\s*Changes\s*Made|###\s*Verification|###\s*Outcome|\*\*Changes\s*Made\*\*|\*\*Verification\*\*|\*\*Outcome\*\*|-\s*\[.*\]\s*:)/i.test(s);
-  if (!hasTemplateHeader) {
-    for (const pat of thoughtPatterns) {
-      if (pat.test(s)) {
-        return `Summary looks like a thought process, not a structured summary. Use the exact template:\n### Changes Made\n- [file path]: [what was changed]\n### Verification\n- [build/test/check result]\n### Outcome\n- [concise description of what was accomplished]`;
-      }
+  // Check thought patterns — only override if template headers exist
+  for (const pat of thoughtPatterns) {
+    if (pat.test(s) && !hasTemplateHeader) {
+      return `Summary looks like a thought process, not a structured summary. Use the exact template:\n### Changes Made\n- [file path]: [what was changed]\n### Verification\n- [build/test/check result]\n### Outcome\n- [concise description of what was accomplished]`;
     }
   }
-  // Check for at least one concrete file reference or action
-  const hasConcrete = /(?:file|edit|wrote|created|deleted|renamed|modified|changed|added|removed|fixed|built|tested|ran|verified|error|warning|output)/i.test(s);
-  if (!hasConcrete && s.length < 80) {
+  // Reject single-word or empty summaries
+  if (s.length < 8) {
+    return "Summary is too short. Use the template: ### Changes Made, ### Verification, ### Outcome.";
+  }
+  // Reject if no template headers and too short
+  if (!hasTemplateHeader && s.length < 60) {
     return "Summary lacks concrete details (no file references, actions, or results). Use the template: ### Changes Made, ### Verification, ### Outcome.";
   }
   return null; // passes validation
@@ -2233,14 +2289,16 @@ async function runSubAgent(
     : allowedSet ? TOOLS.filter((t) => allowedSet.has(t.name)) : TOOLS;
 
   const systemPrompt = config.systemPrompt || "";
+  const rc = (reasoning: string | null | undefined) =>
+    reasoning ? { reasoning_content: reasoning } : {};
   for (let iter = 0; iter < maxIter; iter++) {
     subState.iteration++;
     const openaiMessages = buildOpenAiMessagesForSubAgent(subState, systemPrompt);
-    const { text, toolCalls } = await chatDeepSeekTool(openaiMessages, subTools, modelOpts);
+    const { text, toolCalls, reasoningContent } = await chatDeepSeekTool(openaiMessages, subTools, modelOpts);
 
     if (!toolCalls || toolCalls.length === 0) {
       const reply = text || "Done.";
-      subState.messages.push({ role: "assistant", content: reply });
+      subState.messages.push({ role: "assistant", content: reply, ...rc(reasoningContent) });
       const summary = summarizeSubAgentResult(reply, config.name);
       return { phase: "done", success: true, summary, iterations: iter + 1, subState };
     }
@@ -2255,6 +2313,7 @@ async function runSubAgent(
           role: "assistant",
           content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]),
           name: fnName,
+          ...rc(reasoningContent),
         });
         // Push remaining tool calls as NOT_EXECUTED
         for (let j = 0; j < toolCalls.length; j++) {
@@ -2264,6 +2323,7 @@ async function runSubAgent(
               role: "assistant",
               content: JSON.stringify([{ id: skipped.id, type: "function", function: { name: skipped.function.name, arguments: skipped.function.arguments } }]),
               name: skipped.function.name,
+              ...rc(reasoningContent),
             });
             subState.messages.push({
               role: "tool",
@@ -2279,6 +2339,7 @@ async function runSubAgent(
         role: "assistant",
         content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]),
         name: fnName,
+        ...rc(reasoningContent),
       });
 
       const fsResult = await runFsTool(fnName, params, subState.projectRoot);
@@ -2290,6 +2351,13 @@ async function runSubAgent(
         subState.messages.push({ role: "tool", content: diag.summary, tool_call_id: tc.id });
       } else if (fnName === "task_complete") {
         const summary = String(params.summary || "Task completed.");
+        const validationError = isVagueSummary(summary);
+        if (validationError) {
+          subState.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(reasoningContent) });
+          subState.messages.push({ role: "tool", content: validationError, tool_call_id: tc.id });
+          subState.messages.push({ role: "user", content: `Your task_complete summary was rejected: ${validationError}\nPlease call task_complete again with a proper structured summary.` });
+          continue;
+        }
         subState.messages.push({ role: "tool", content: "OK", tool_call_id: tc.id });
         const final = summarizeSubAgentResult(summary, config.name);
         return { phase: "done", success: true, summary: final, iterations: iter + 1, subState };
@@ -2325,15 +2393,17 @@ export async function resumeSubAgent(
     : allowedSet ? TOOLS.filter((t) => allowedSet.has(t.name)) : TOOLS;
 
   const systemPrompt = config.systemPrompt || "";
+  const rc = (reasoning: string | null | undefined) =>
+    reasoning ? { reasoning_content: reasoning } : {};
 
   for (let iter = subState.iteration; iter < maxIter; iter++) {
     subState.iteration++;
     const openaiMessages = buildOpenAiMessagesForSubAgent(subState, systemPrompt);
-    const { text, toolCalls } = await chatDeepSeekTool(openaiMessages, subTools, modelOpts);
+    const { text, toolCalls, reasoningContent } = await chatDeepSeekTool(openaiMessages, subTools, modelOpts);
 
     if (!toolCalls || toolCalls.length === 0) {
       const reply = text || "Done.";
-      subState.messages.push({ role: "assistant", content: reply });
+      subState.messages.push({ role: "assistant", content: reply, ...rc(reasoningContent) });
       const summary = summarizeSubAgentResult(reply, config.name);
       return { phase: "done", success: true, summary, iterations: iter + 1, subState };
     }
@@ -2347,6 +2417,7 @@ export async function resumeSubAgent(
           role: "assistant",
           content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]),
           name: fnName,
+          ...rc(reasoningContent),
         });
         for (let j = 0; j < toolCalls.length; j++) {
           if (j !== toolCalls.indexOf(tc)) {
@@ -2355,6 +2426,7 @@ export async function resumeSubAgent(
               role: "assistant",
               content: JSON.stringify([{ id: skipped.id, type: "function", function: { name: skipped.function.name, arguments: skipped.function.arguments } }]),
               name: skipped.function.name,
+              ...rc(reasoningContent),
             });
             subState.messages.push({ role: "tool", content: "NOT_EXECUTED: batched with browser tool.", tool_call_id: skipped.id });
           }
@@ -2366,6 +2438,7 @@ export async function resumeSubAgent(
         role: "assistant",
         content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]),
         name: fnName,
+        ...rc(reasoningContent),
       });
 
       const fsResult = await runFsTool(fnName, params, subState.projectRoot);
@@ -2377,6 +2450,13 @@ export async function resumeSubAgent(
         subState.messages.push({ role: "tool", content: diag.summary, tool_call_id: tc.id });
       } else if (fnName === "task_complete") {
         const summary = String(params.summary || "Task completed.");
+        const validationError = isVagueSummary(summary);
+        if (validationError) {
+          subState.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(reasoningContent) });
+          subState.messages.push({ role: "tool", content: validationError, tool_call_id: tc.id });
+          subState.messages.push({ role: "user", content: `Your task_complete summary was rejected: ${validationError}\nPlease call task_complete again with a proper structured summary.` });
+          continue;
+        }
         subState.messages.push({ role: "tool", content: "OK", tool_call_id: tc.id });
         const final = summarizeSubAgentResult(summary, config.name);
         return { phase: "done", success: true, summary: final, iterations: iter + 1, subState };
@@ -2640,7 +2720,7 @@ export async function* agentLoopStepByStep(
 
   // ── Helper: attach reasoning_content ──
   const rc = (reasoning: string | null | undefined) =>
-    (reasoning || state.isReasoningModel) ? { reasoning_content: reasoning || "" } : {};
+    reasoning ? { reasoning_content: reasoning } : {};
 
   // ═══════════════════════════════════════════════════════════════
   //  PHASE 1: PLANNING
@@ -2680,7 +2760,6 @@ export async function* agentLoopStepByStep(
       } else if (chunk.type === "done") {
         finalText = chunk.finalText ?? null;
         finalReasoning = chunk.reasoningContent ?? null;
-        if (chunk.reasoningContent != null) state.isReasoningModel = true;
         finalToolCalls = chunk.toolCalls ?? null;
       }
     }
@@ -2857,13 +2936,12 @@ export async function agentLoop(
   }
 
   const rc2 = (reasoning: string | null | undefined) =>
-    (reasoning || state.isReasoningModel) ? { reasoning_content: reasoning || "" } : {};
+    reasoning ? { reasoning_content: reasoning } : {};
 
   // Dynamic instruction retrieval — only include relevant prompt chunks
   const openaiMessages = buildOpenAiMessages(state, context);
 
   const { text, toolCalls, reasoningContent } = await chatDeepSeekTool(openaiMessages, TOOLS, { model: modelOpts?.model, apiKey });
-  if (reasoningContent != null) state.isReasoningModel = true;
 
   if (toolCalls && toolCalls.length > 0) {
     const executedTools: { name: string; result: string }[] = [];
@@ -2928,6 +3006,13 @@ export async function agentLoop(
           continue;
         }
         const summary = String(params.summary || "Task completed.");
+        const validationError = isVagueSummary(summary);
+        if (validationError) {
+          state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc2(reasoningContent) });
+          state.messages.push({ role: "tool", content: validationError, tool_call_id: tc.id });
+          state.messages.push({ role: "user", content: `Your task_complete summary was rejected: ${validationError}\nPlease call task_complete again with a proper structured summary.` });
+          continue;
+        }
         state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc2(reasoningContent) });
         state.messages.push({ role: "tool", content: "OK", tool_call_id: tc.id });
         return { phase: "done", reply: summary, messages: state.messages, executedTools };
@@ -2942,14 +3027,18 @@ export async function agentLoop(
         if (requestedIndex !== undefined) {
           if (requestedIndex >= 0 && requestedIndex < sessions.length) {
             const s = sessions[requestedIndex];
-            killSession(getLastWsGroupKey() || "", s.sessionId);
+            killSession(s.groupKey, s.sessionId);
             sessions.splice(requestedIndex, 1);
             resultMsg = `Killed terminal [${requestedIndex}]: ${s.command.slice(0, 80)}`;
           } else {
             resultMsg = `No terminal at index ${requestedIndex}. Currently ${sessions.length} agent terminal${sessions.length !== 1 ? "s" : ""} (indices 0–${Math.max(0, sessions.length - 1)}).`;
           }
         } else {
-          const killed = killAllAgentTerminals();
+          let killed = 0;
+          for (const s of sessions) {
+            killSession(s.groupKey, s.sessionId);
+            killed++;
+          }
           sessions.length = 0;
           resultMsg = killed > 0
             ? `Killed ${killed} terminal session${killed > 1 ? "s" : ""}.`
@@ -3078,15 +3167,17 @@ export async function* agentLoopStream(
   // Track how many iterations since last write_todos call — used to inject reminders
   let turnsSinceTodoUpdate = 0;
 
-  const modelContextLimit = (() => {
-    const m = (modelOpts?.model || "").toLowerCase();
-    // Known DeepSeek model context windows (tokens).
-    // V3 / R1: 128K.  V4 Pro / Flash: 1M.
-    if (m.includes("v4") || m.includes("flash") || m.includes("pro")) return 1_000_000;
-    if (m.includes("reasoner")) return 128_000; // R1
-    if (m.includes("chat")) return 128_000;     // V3, default
-    return 128_000; // unknown model — assume 128K
-  })();
+  // ── Inject pending todos from previous turn ──
+  const pendingTodos = state.latestTodos?.filter((t) => t.status !== "completed" && t.status !== "cancelled");
+  if (pendingTodos && pendingTodos.length > 0) {
+    const pendingList = pendingTodos.map((t) => `  [${t.status}] ${t.text}`).join("\n");
+    state.messages.splice(1, 0, {
+      role: "assistant" as const,
+      content: `⚠️ You have ${pendingTodos.length} pending task${pendingTodos.length > 1 ? "s" : ""} from your previous session:\n${pendingList}\n\nUse write_todos to continue tracking these.`,
+    });
+  }
+
+  const modelContextLimit = 1_000_000; // All DeepSeek models support 1M context
 
   const makeUsage = (turns: number) => ({
     estimatedTokens: finalEstTokens,
@@ -3096,7 +3187,7 @@ export async function* agentLoopStream(
 
   // ── Helper: attach reasoning_content if this is a reasoning model ──
   const rc = (reasoning: string | null | undefined) =>
-    (reasoning || state.isReasoningModel) ? { reasoning_content: reasoning || "" } : {};
+    reasoning ? { reasoning_content: reasoning } : {};
 
   for (let iter = 0; iter < MAX_ITERS; iter++) {
     state.iteration++;
@@ -3134,7 +3225,6 @@ export async function* agentLoopStream(
       } else if (chunk.type === "done") {
         finalText = chunk.finalText ?? null;
         finalReasoning = chunk.reasoningContent ?? null;
-        if (chunk.reasoningContent != null) state.isReasoningModel = true;
         finalToolCalls = chunk.toolCalls ?? null;
         streamDone = true;
       }
@@ -3198,7 +3288,7 @@ export async function* agentLoopStream(
         if (requestedIndex !== undefined) {
           if (requestedIndex >= 0 && requestedIndex < sessions.length) {
             const s = sessions[requestedIndex];
-            killSession(getLastWsGroupKey() || "", s.sessionId);
+            killSession(s.groupKey, s.sessionId);
             sessions.splice(requestedIndex, 1);
             killed = 1;
             resultMsg = `Killed terminal [${requestedIndex}]: ${s.command.slice(0, 80)}`;
@@ -3207,7 +3297,10 @@ export async function* agentLoopStream(
           }
         } else {
           // Kill all
-          killed = killAllAgentTerminals();
+          for (const s of sessions) {
+            killSession(s.groupKey, s.sessionId);
+            killed++;
+          }
           sessions.length = 0;
           resultMsg = killed > 0
             ? `Killed ${killed} terminal session${killed > 1 ? "s" : ""}.`
@@ -3422,6 +3515,14 @@ export async function* agentLoopStream(
           continue;
         }
         const summary = String(params.summary || "Task completed.");
+        const validationError = isVagueSummary(summary);
+        if (validationError) {
+          state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
+          state.messages.push({ role: "tool", content: validationError, tool_call_id: tc.id });
+          state.messages.push({ role: "user", content: `Your task_complete summary was rejected: ${validationError}\nPlease call task_complete again with a proper structured summary.` });
+          yield { type: "tool_end", toolName: fnName, toolResult: validationError };
+          continue;
+        }
         state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
         state.messages.push({ role: "tool", content: "OK", tool_call_id: tc.id });
         yield { type: "done", reply: summary, usage: makeUsage(iter + 1) };
@@ -3435,22 +3536,23 @@ export async function* agentLoopStream(
         const subResult = await runSubAgent(state, String(params.task || ""), cfg, { model: modelOpts?.model, apiKey: apiKey! });
         if (subResult.phase === "browser_tool") {
           state.pendingSubAgent = {
-            subState: subResult.subState,
-            config: cfg,
-            task: String(params.task || ""),
-            parentToolCallId: tc.id,
-            parentToolArgs: tc.function.arguments,
-            parentReasoning: finalReasoning ?? undefined,
-          };
-          yield {
-            type: "browser_tool",
-            toolName: subResult.toolName,
-            toolParams: subResult.params,
-            toolCallId: subResult.toolCallId,
-            sessionId,
-            executedTools,
-          };
-          return;
+          subState: subResult.subState,
+          config: cfg,
+          task: String(params.task || ""),
+          parentToolCallId: tc.id,
+          parentToolArgs: tc.function.arguments,
+          parentReasoning: finalReasoning ?? undefined,
+        };
+        yield {
+          type: "browser_tool",
+          toolName: subResult.toolName,
+          toolParams: subResult.params,
+          toolCallId: subResult.toolCallId,
+          sessionId,
+          executedTools,
+          subAgentParentToolCallId: tc.id,
+        };
+        return;
         }
         const resultText = `[${cfg.name}] Completed in ${subResult.iterations} turns.\n${subResult.summary}`;
         state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
@@ -3608,12 +3710,16 @@ export function clearCommandOutputs() {
 const agentSessions = new Map<string, AgentState>();
 
 export function createAgentSession(sessionId: string, projectRoot: string, userMessage: string, context: string): AgentState {
+  const prev = agentSessions.get(sessionId);
   const state: AgentState = {
     messages: [
       { role: "user", content: userMessage },
     ],
     iteration: 0,
     projectRoot,
+    // Preserve pending todos so the agent knows what's left from the previous turn
+    latestTodos: prev?.latestTodos?.filter((t) => t.status !== "completed" && t.status !== "cancelled"),
+    agentTerminalSessions: prev?.agentTerminalSessions,
   };
   agentSessions.set(sessionId, state);
   return state;

@@ -109,6 +109,67 @@ User types goal → AgentConsole
   → Loop continues until task_complete
 ```
 
+### Agent loop internals
+
+The agent loop (`agentLoopStream` / `agentLoop` in `server/agent.ts`) orchestrates a conversation between the user, the model, and tools using a message array (`state.messages`). Each turn follows a fixed pattern:
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Agent loop iteration                                        │
+│                                                              │
+│  1. buildOpenAiMessages(state)                               │
+│     ↓ Converts internal messages → DeepSeek API format       │
+│     ↓ Pairs tool_calls with tool_call_id responses           │
+│     ↓ Injects system prompt (ITR-selected chunks)            │
+│                                                              │
+│  2. chatDeepSeekToolStream(messages, tools)                  │
+│     ↓ Sends to DeepSeek, receives SSE stream                 │
+│     ↓ Yields thinking events, text, tool_calls               │
+│                                                              │
+│  3. For each tool call:                                      │
+│     ├─ Push assistant tool_calls message to state.messages   │
+│     ├─ Execute tool (filesystem / terminal / browser)       │
+│     ├─ Push tool result message to state.messages            │
+│     └─ Continue to next tool (batch) or next iteration       │
+│                                                              │
+│  4. If no tool calls → task_complete or final text reply     │
+│     → Push assistant text message → return phase: "done"     │
+└──────────────────────────────────────────────────────────────┘
+```
+
+#### Message roles
+
+The agent state tracks three message roles. Each serves a specific purpose in the conversation:
+
+| Role | Who creates it | Purpose | Content |
+|------|---------------|---------|---------|
+| **`user`** | Client (`createAgentSession`) | User's request / goal | Plain text ("Add login endpoint") |
+| **`assistant`** (text) | DeepSeek API → server pushes | Model's reasoning / replies | Text response |
+| **`assistant`** (with `name`) | DeepSeek API → server pushes | Tool call request | JSON array of `{ id, function: { name, arguments } }` |
+| **`tool`** | Server (after tool execution) | Tool execution result | Tool output (file contents, command output, browser result) |
+
+#### Message lifecycle
+
+```
+User sends request
+  → state.messages = [{ role: "user", content: "..." }]
+
+Iteration 1: DeepSeek decides to read a file
+  → state.messages.push({ role: "assistant", name: "read_file", content: '[...]' })
+  → Server executes read_file → returns file contents
+  → state.messages.push({ role: "tool", content: "...", tool_call_id: "call_1" })
+
+Iteration 2: DeepSeek reads the result, decides to edit
+  → state.messages.push({ role: "assistant", name: "edit_file", content: '[...]' })
+  → state.messages.push({ role: "tool", content: "Wrote ...", tool_call_id: "call_2" })
+
+Iteration 3: DeepSeek is done
+  → state.messages.push({ role: "assistant", content: "Added login endpoint..." })
+  → Calls task_complete → agent returns phase: "done"
+```
+
+Each tool call is always a matched pair: an `assistant` message with `name` containing the tool_calls JSON, followed immediately by a `tool` message with the same `tool_call_id`. `buildOpenAiMessages()` enforces this pairing — unpaired tool calls get synthetic error responses before the request reaches DeepSeek.
+
 ### Desktop vs web mode
 
 | Feature | Web (browser) | Desktop (Electron) |
@@ -633,7 +694,7 @@ Harness includes a **cross-session memory system** backed by SQLite. The agent c
 Agent detects an important fact
   → calls remember(key, value, category, tags)
   → value is optionally embedded via DeepSeek embeddings API
-  → stored in .harness/memory.db (SQLite, per project)
+  → stored in ~/.harness/memory.db (SQLite, global user store)
 
 Next session:
   → Agent calls recall(query: "UI framework")
@@ -654,7 +715,7 @@ Next session:
 
 | Detail | Value |
 |--------|-------|
-| Database | SQLite (WAL mode) at `.harness/memory.db` per project root |
+| Database | SQLite (WAL mode) at `~/.harness/memory.db` (global, not in project dir) |
 | Schema | `id`, `key` (unique), `value`, `category`, `tags`, `embedding` (BLOB), `created_at`, `updated_at` |
 | Embeddings | Generated via DeepSeek `/v1/embeddings` endpoint (optional; graceful fallback to keyword search if unavailable) |
 | Retrieval | Embedding cosine similarity search → keyword `LIKE` fallback → list-all |
@@ -669,7 +730,7 @@ Next session:
 
 | File | Role |
 |------|------|
-| `server/memory.ts` | `MemoryStore` class — SQLite CRUD, embedding search, cosine similarity, singleton-per-project |
+| `server/memory.ts` | `MemoryStore` class — SQLite CRUD, embedding search, cosine similarity, global singleton |
 | `server/deepseek.ts` | `generateEmbedding()` — calls DeepSeek embeddings API, returns `Float32Array` |
 | `server/agent.ts` | `runMemoryTool()` — tool execution handler; wired in both `agentLoop()` and `agentLoopStream()` |
 
@@ -1190,21 +1251,23 @@ The agent footer shows a live estimate of context usage: `~N / M tokens (X%) · 
 
 #### How it's calculated
 
+`estimateStateTokens()` in `server/agent.ts` walks every field of every message:
+
 ```
+totalChars =
+  Σ messages (
+    content.length          // user messages, assistant replies, tool results
+    + tool_call_id.length   // UUIDs linking tool calls to results
+    + name.length           // function names (e.g. "read_file", "grep")
+    + reasoning_content?.length  // DeepSeek chain-of-thought (R1/reasoner models)
+  )
+  + historySummary?.length  // compacted older conversation turns
+  + systemPromptChars       // ITR-selected prompt chunks (counted once per turn)
+
 estimatedTokens = round(totalChars / 4)
-
-totalChars = sum of every char in state.messages
-           + historySummary length
-           + system prompt length
 ```
 
-`state.messages` includes everything the model has seen or will see:
-- User messages, assistant replies, and tool call JSON
-- `reasoning_content` (DeepSeek's chain-of-thought — can be 10-30K chars per turn)
-- Tool result content (file contents, command output summaries, browser snapshots)
-- `tool_call_id` UUIDs and function `name` fields
-
-The system prompt is built fresh each turn by ITR chunk selection and is added to the estimate (it's not stored in `state.messages`).
+Each turn, `buildOpenAiMessages()` calls `estimateStateTokens()` to check against `HISTORY_COMPACTION_TRIGGER_TOKENS` (10,000). The final estimate is also sent to the client via the SSE `done` event for the usage ring in the footer.
 
 #### Accuracy
 

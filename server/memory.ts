@@ -3,11 +3,12 @@
 // conventions. Supports keyword search and (optionally) embedding-based
 // semantic search via DeepSeek embeddings API.
 //
-// Database file: .harness/memory.db (per project root)
+// Database file: ~/.harness/memory.db (global, not in project dir)
 
 import Database from "better-sqlite3";
 import path from "path";
 import fs from "fs";
+import os from "os";
 
 // ── Types ──
 
@@ -29,11 +30,9 @@ export interface MemorySearchResult extends MemoryEntry {
 
 export class MemoryStore {
   private db: Database.Database;
-  private projectRoot: string;
 
-  constructor(projectRoot: string) {
-    this.projectRoot = projectRoot;
-    const dir = path.resolve(projectRoot, ".harness");
+  constructor() {
+    const dir = path.resolve(os.homedir(), ".harness");
     fs.mkdirSync(dir, { recursive: true });
     const dbPath = path.join(dir, "memory.db");
 
@@ -168,23 +167,20 @@ function cosineSimilarity(a: Float32Array, b: Float32Array): number {
   return denom === 0 ? 0 : dot / denom;
 }
 
-// ── Singleton per project root ──
+// ── Global singleton ──
 
-const stores = new Map<string, MemoryStore>();
+let store: MemoryStore | null = null;
 
-export function getMemoryStore(projectRoot: string): MemoryStore {
-  const abs = path.resolve(projectRoot);
-  let store = stores.get(abs);
+export function getMemoryStore(): MemoryStore {
   if (!store) {
-    store = new MemoryStore(abs);
-    stores.set(abs, store);
+    store = new MemoryStore();
   }
   return store;
 }
 
-export function closeAllMemoryStores(): void {
-  for (const store of stores.values()) {
+export function closeMemoryStore(): void {
+  if (store) {
     store.close();
+    store = null;
   }
-  stores.clear();
 }
