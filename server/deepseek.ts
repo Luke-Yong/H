@@ -1,6 +1,5 @@
 import fs from "fs";
 import path from "path";
-import os from "os";
 
 const BASE_URL = "https://api.deepseek.com/v1";
 
@@ -90,7 +89,7 @@ let lastCleanupDay = 0;
 
 function logOutgoing(label: string, messages: Array<any>, cacheCtx?: string) {
   try {
-    const dir = path.resolve(os.homedir(), ".harness-debug");
+    const dir = path.resolve(process.cwd(), ".harness-debug");
     fs.mkdirSync(dir, { recursive: true });
     // Cleanup files older than 7 days (run once per day max)
     const now = Date.now();

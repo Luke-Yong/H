@@ -1482,6 +1482,38 @@ body.resizing iframe { pointer-events: none; }
 .agent-sub-agent-text { font-size: 12px; padding: 2px 0; }
 .agent-sub-agent-user { opacity: 0.6; }
 .agent-sub-agent-result { font-size: 11px; opacity: 0.5; padding: 2px 0; white-space: pre-wrap; word-break: break-all; }
+
+/* Sub-agent container — color-coded to match delegate_task card */
+.agent-sub-agent-container {
+  margin: 4px 0;
+  border: 1px solid rgba(140, 100, 220, 0.25);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.agent-sub-agent-container-header {
+  display: flex; align-items: center; gap: 6px; padding: 5px 10px;
+  cursor: pointer; font-size: 11px; color: rgba(200, 170, 255, 0.75);
+  background: rgba(140, 100, 220, 0.08);
+}
+.agent-sub-agent-container-header:hover {
+  color: rgba(200, 170, 255, 1);
+  background: rgba(140, 100, 220, 0.14);
+}
+.agent-sub-agent-container-body {
+  padding: 4px 10px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+.agent-sub-agent-container-body::-webkit-scrollbar { width: 4px; }
+.agent-sub-agent-container-body::-webkit-scrollbar-thumb { background: rgba(140, 100, 220, 0.3); border-radius: 2px; }
+.agent-sub-agent-container-msg {
+  padding: 3px 0;
+  border-bottom: 1px solid rgba(140, 100, 220, 0.08);
+  font-size: 12px;
+}
+.agent-sub-agent-container-msg:last-child { border-bottom: none; }
+.agent-sub-agent-container-msg.thinking { opacity: 0.6; font-style: italic; }
+.agent-sub-agent-container-msg.tool { color: rgba(200, 170, 255, 0.85); }
 .agent-tool-card-args {
   display: flex; gap: 4px; margin-left: auto; overflow: hidden;
   font-size: 10px; opacity: 0.5;
