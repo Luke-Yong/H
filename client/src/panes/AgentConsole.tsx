@@ -671,7 +671,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
     if (!el) return;
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
     if (nearBottom || !userScrolledUpRef.current) {
-      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+      el.scrollTop = el.scrollHeight;
     }
   }, [messages]);
 
@@ -686,6 +686,14 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
     el.addEventListener("scroll", onScroll, { passive: true });
     return () => el.removeEventListener("scroll", onScroll);
   }, []);
+
+  // Auto-scroll open agent-thought-body elements to bottom as content streams in.
+  useEffect(() => {
+    const bodies = document.querySelectorAll("details.agent-thought[open] .agent-thought-body");
+    for (const body of bodies) {
+      (body as HTMLElement).scrollTop = (body as HTMLElement).scrollHeight;
+    }
+  }, [messages]);
 
   // Safety: if loading is stuck true for 30 s with no new messages, force it off
   // so the footer can appear (covers server-side errors that don't send done).
