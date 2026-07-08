@@ -102,7 +102,7 @@ User types goal → AgentConsole
   → Server builds dynamic system prompt (ITR), compacts history, calls DeepSeek
   → DeepSeek returns text/tool_calls via SSE stream
   → Server executes filesystem tools (read_file, write_file, etc.) directly
-  → Browser tools (browser_click, browser_type, etc.) yield SSE "browser_tool" event
+  → Interactive browser tools (click, type, etc.) yield SSE "browser_tool" event (sub-agent only)
   → AgentConsole sends browser command to EditorPane's webview
   → WebView executes the action, returns result
   → AgentConsole calls POST /api/chat/agent/stream/continue (toolCallId, result)
@@ -470,24 +470,24 @@ Agent calls run_in_terminal
 
 ### Browser
 
-| Tool | Description |
-|------|-------------|
-| `browser_navigate` | Navigate to a URL (http/https only). Creates a new browser tab if none exists, or navigates the active tab. Waits for the browser view to mount before returning (up to 2s), so subsequent tools like `browser_info` / `browser_screenshot` work immediately. Returns `"Navigating to {url}. Browser ready."` on success. |
-| `browser_info` | Get current browser tab state: URL, page title, load status, and open tab count. Use before other browser tools to confirm the page is loaded. |
-| `browser_screenshot` | Get a text snapshot of the current page (URL, title, visible text, form fields, buttons, errors) — DeepSeek is text-only, returns readable text not an image |
-| `browser_get_dom` | Get indexed clickable/typable elements with pixel coordinates (`(x:NNN y:NNN WWWxHHH)`) and viewport size |
-| `browser_click` | Click by DOM index or pixel coordinates (x,y). Dispatches full pointer/mouse event sequence. Index mode auto-computes center from bounding rect. Use before `browser_type`/`browser_clear`/`browser_select` to activate inputs for reactive frameworks |
-| `browser_move_mouse` | Move the cursor to x,y — triggers mousemove/pointermove for hover effects without clicking |
-| `browser_right_click` | Right-click at x,y — dispatches contextmenu event |
-| `browser_type` | Type text into an input by DOM index. Clicks the element first, clears existing value, then types each character with realistic keyboard events (keydown/keypress/input/keyup + change) |
-| `browser_clear` | Clear the value of an input element by DOM index — clicks first, then clears and dispatches change |
-| `browser_select` | Select an option from a `<select>` dropdown by value or label — clicks the select first, then sets value and dispatches input + change |
-| `browser_scroll` | Scroll the page by pixels or to top/bottom — reveals lazy-loaded or off-screen content |
-| `browser_press_key` | Press a keyboard key (Enter, Escape, Tab, Arrows, Backspace, etc.) on the active element — submits forms, closes modals, navigates lists |
-| `browser_upload_file` | Set files on a file input by absolute paths via `/api/fs/read-binary` |
-| `browser_wait` | Wait for an element matching a CSS selector to appear (polls every 200ms, default 5s timeout) |
-| `browser_console` | Get the last 50 console entries (log, warn, error, dialogs) to check for JS errors |
-| `browser_request_errors` | Get failed network requests (4xx/5xx/CORS) to verify API calls and resource loads |
+| Tool | Scope | Description |
+|------|-------|-------------|
+| `browser_navigate` | Parent + Sub | Navigate to a URL (http/https only). Creates a new browser tab if none exists, or navigates the active tab. Waits for the browser view to mount before returning (up to 2s). |
+| `browser_info` | Parent + Sub | Get current browser tab state: URL, page title, load status, and open tab count. |
+| `browser_screenshot` | Parent + Sub | Get a text snapshot of the current page (URL, title, visible text, form fields, buttons, errors). |
+| `browser_get_dom` | Parent + Sub | Get indexed clickable/typable elements with pixel coordinates and viewport size. |
+| `browser_console` | Parent + Sub | Get the last 50 console entries (log, warn, error, dialogs) to check for JS errors |
+| `browser_request_errors` | Parent + Sub | Get failed network requests (4xx/5xx/CORS) to verify API calls and resource loads |
+| `browser_click` | **Sub-agent only** | Click by DOM index or pixel coordinates. Dispatches full pointer/mouse event sequence. |
+| `browser_type` | **Sub-agent only** | Type text into an input by DOM index — clicks first, clears, then types with realistic keyboard events |
+| `browser_clear` | **Sub-agent only** | Clear the value of an input element by DOM index |
+| `browser_select` | **Sub-agent only** | Select an option from a `<select>` dropdown by value or label |
+| `browser_scroll` | **Sub-agent only** | Scroll the page by pixels or to top/bottom |
+| `browser_press_key` | **Sub-agent only** | Press a keyboard key (Enter, Escape, Tab, Arrows, etc.) on the active element |
+| `browser_move_mouse` | **Sub-agent only** | Move the cursor to x,y — triggers hover effects without clicking |
+| `browser_right_click` | **Sub-agent only** | Right-click at x,y — dispatches contextmenu event |
+| `browser_upload_file` | **Sub-agent only** | Set files on a file input by absolute paths |
+| `browser_wait` | **Sub-agent only** | Wait for an element matching a CSS selector to appear (polls every 200ms, default 5s timeout) |
 
 ### Diagnostics
 
@@ -500,7 +500,7 @@ Agent calls run_in_terminal
 | Tool | Description |
 |------|-------------|
 | `write_todos` | Create or update a structured task list to track progress. In step-by-step mode, this is the ONLY tool available during planning — the agent must create a complete plan before any execution begins. |
-| `task_complete` | Signal completion with a **structured summary** using the template: `### Changes Made`, `### Verification`, `### Outcome`. Vague or thought-process-style summaries (e.g. "I did the task") are **rejected** by the server — the agent must rewrite until the summary is concrete. |
+| `task_complete` | Signal completion with a **structured summary** using the template: `### Changes Made`, `### Verification`, `### Outcome`. Vague summaries are **rejected**. After sub-agent delegation, **summary lock** blocks `task_complete` until the summary explicitly describes what each sub-agent accomplished — enforced server-side like the pending-todos check. |
 | `delegate_task` | Delegate a sub-task to a specialized sub-agent (browser, code-search, code-writer, researcher) that runs independently with its own context window |
 | `delegate_parallel` | Delegate multiple sub-tasks to run in parallel. Each sub-agent gets its own card with collapsible trace — results appear incrementally as each completes instead of waiting for all to finish |
 
@@ -533,7 +533,7 @@ Harness supports **sub-agent delegation** — the main agent can spawn specializ
 
 | Profile | Tools | Iterations | Description |
 |---------|-------|-----------|-------------|
-| `browser` | `browser_navigate`, `browser_info`, `browser_screenshot`, `browser_get_dom`, `browser_click`, `browser_type`, `browser_clear`, `browser_select`, `browser_press_key`, `browser_console`, `browser_request_errors`, `browser_scroll`, `browser_wait` | 30 | Full browser automation. Navigates pages, clicks elements, types text, fills forms, clears inputs, selects dropdowns, presses keys, scrolls, and inspects DOM/console/network. Reports results with element indices and interaction outcomes. |
+| `browser` | `browser_navigate`, `browser_info`, `browser_screenshot`, `browser_get_dom`, `browser_click`, `browser_type`, `browser_clear`, `browser_select`, `browser_press_key`, `browser_console`, `browser_request_errors`, `browser_scroll`, `browser_wait`, `browser_move_mouse`, `browser_right_click`, `browser_upload_file` | 100 | Full browser automation — unlimited turns for intensive testing. Navigates, clicks, types, scrolls, fills forms, inspects DOM/console/network. |
 | `code-search` | `read_file`, `list_files`, `search_files`, `grep` | 20 | Read-only code exploration. Finds files, reads code, reports findings. Never edits. |
 | `code-writer` | Full filesystem + `run_command`, `read_problems` | 50 | Implements features or fixes bugs. Reads, edits, builds, and verifies. |
 | `researcher` | `read_file`, `list_files`, `search_files`, `grep`, `run_command` | 25 | Explores codebase to answer questions. Reports with file paths and line numbers. |
@@ -545,7 +545,8 @@ Harness supports **sub-agent delegation** — the main agent can spawn specializ
 | **Context isolation** | Each sub-agent has its own `AgentState` — messages do not pollute the parent's context |
 | **Tool allowlisting** | Sub-agents receive only the tools their profile specifies (e.g. code-search can never write files) |
 | **Headless execution** | Code-search, code-writer, and researcher sub-agents run entirely server-side — no browser or terminal tools |
-| **Browser sub-agent** | Has full browser automation tools: navigate, info, screenshot, get_dom, click, type, clear, select, press_key, scroll, wait, console, eval. Pauses/resumes across browser tool calls via the parent's renderer |
+| **Browser delegation** | Parent has read-only browser tools only (navigate, info, screenshot, get_dom, console, errors). All interactive actions (click, type, scroll, etc.) MUST go through the browser sub-agent via `delegate_task agent_type: "browser"` |
+| **Summary lock** | After delegation, `task_complete` is blocked until the summary explicitly describes what each sub-agent accomplished — enforced server-side (same as pending-todos check) |
 | **Result summarization** | Sub-agent results are compressed before returning to the parent, preserving context budget |
 | **Parallelism** | `delegate_parallel` runs multiple sub-agents concurrently via `Promise.all` |
 

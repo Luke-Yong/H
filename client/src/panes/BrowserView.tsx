@@ -1682,7 +1682,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
         const interactive = [];
         let idx = 0;
         let el;
-        while ((el = w.nextNode()) && idx < 300) {
+        while ((el = w.nextNode()) && idx < 500) {
           const r = el.getBoundingClientRect();
           if (r.width <= 0 || r.height <= 0 || r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw) continue;
 
@@ -1727,7 +1727,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
           lines.push(interactive.join('\\n'));
         }
         // If total element count is manageable, show everything
-        if (allEls.length <= 100) {
+        if (allEls.length <= 200) {
           lines.push('--- All Elements (' + allEls.length + ') ---');
           lines.push(allEls.join('\\n'));
         } else {

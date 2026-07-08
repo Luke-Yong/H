@@ -1321,7 +1321,8 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
               openEditorFile?.(p);
             }
           }
-          pushRaw(id, { role: "tool", content: "", toolName: tn, toolParams: evt.toolParams, state: "waiting", sandboxOutput: tn === "run_command" ? "" : undefined, tokenCount: fcTokenCount });
+          const isSubAgent2 = !!(evt as any).isSubAgent;
+          pushRaw(id, { role: "tool", content: "", toolName: tn, toolParams: evt.toolParams, state: "waiting", sandboxOutput: tn === "run_command" ? "" : undefined, tokenCount: fcTokenCount, ...(isSubAgent2 ? { subAgentName: "Sub-agent" } : {}) });
           // For run_in_terminal: store refs so permission_required and terminal bridge can find the card
           if (tn === "run_in_terminal") {
             agentTermMsgIdRef.current = id;

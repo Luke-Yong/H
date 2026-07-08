@@ -65,6 +65,8 @@ export interface AgentState {
   agentTerminalSessions?: { sessionId: string; groupKey: string; command: string }[];
   /** Latest todo list from write_todos — used to detect incomplete tasks at task_complete. */
   latestTodos?: { id: string; text: string; status: string }[];
+  /** True after sub-agent delegation — requires a text summary before task_complete. */
+  needsSummary?: boolean;
 }
 
 // ── Step-by-Step Types ──
@@ -98,7 +100,7 @@ export const SUB_AGENT_PROFILES: Record<string, SubAgentConfig> = {
       "browser_press_key",
     ],
     headless: false,
-    maxIterations: 30,
+    maxIterations: 100,
     systemPrompt: `You are a browser automation specialist running as a sub-agent. Your job is to interact with a web page and report your findings to the parent agent.
 - Use browser_navigate to go to a URL.
 - Use browser_info to check the current URL and page title.
@@ -435,129 +437,6 @@ export const TOOLS: ToolDef[] = [
     parameters: { type: "object", properties: {}, required: [] },
   },
   {
-    name: "browser_click",
-    description:
-      "Click at viewport pixel coordinates (x, y) OR by DOM element index. "
-      + "When using x,y: call browser_get_dom first to find coordinates. "
-      + "When using index: element center is computed from its bounding rect automatically. "
-      + "Dispatches full pointer/mouse event sequence (pointerdown, mousedown, pointerup, mouseup, click).",
-    parameters: {
-      type: "object",
-      properties: {
-        x: { type: "integer", description: "X pixel coordinate in the viewport (use with y)." },
-        y: { type: "integer", description: "Y pixel coordinate in the viewport (use with x)." },
-        index: { type: "integer", description: "Or: DOM element index from browser_get_dom." },
-      },
-      required: [],
-    },
-  },
-  {
-    name: "browser_move_mouse",
-    description:
-      "Move the mouse cursor to viewport coordinates (x, y) without clicking. "
-      + "Triggers mousemove/pointermove events. Use before browser_click or browser_right_click "
-      + "to simulate natural hover-then-click behavior. Also useful for hover-dependent UI.",
-    parameters: {
-      type: "object",
-      properties: {
-        x: { type: "integer", description: "X pixel coordinate in the viewport." },
-        y: { type: "integer", description: "Y pixel coordinate in the viewport." },
-      },
-      required: ["x", "y"],
-    },
-  },
-  {
-    name: "browser_right_click",
-    description:
-      "Right-click at viewport coordinates (x, y). "
-      + "Dispatches a contextmenu event. Use to open context menus.",
-    parameters: {
-      type: "object",
-      properties: {
-        x: { type: "integer", description: "X pixel coordinate in the viewport." },
-        y: { type: "integer", description: "Y pixel coordinate in the viewport." },
-      },
-      required: ["x", "y"],
-    },
-  },
-  {
-    name: "browser_scroll",
-    description:
-      "Scroll the page by a pixel amount, or scroll to top/bottom. "
-      + "Use this to reveal content below the fold, trigger lazy loading, or check the full page.",
-    parameters: {
-      type: "object",
-      properties: {
-        x: { type: "number", description: "Horizontal scroll pixels (default 0)." },
-        y: { type: "number", description: "Vertical scroll pixels (positive = down, negative = up)." },
-        to: { type: "string", description: "Or: 'top' or 'bottom' to scroll to page extremes." },
-      },
-      required: [],
-    },
-  },
-  {
-    name: "browser_press_key",
-    description:
-      "Press a keyboard key on the page. "
-      + "Dispatches keydown, keypress, and keyup events. "
-      + "Common keys: Enter, Escape, Tab, ArrowDown, ArrowUp, ArrowLeft, ArrowRight, Backspace, Delete, Space. "
-      + "Use for submitting forms (Enter), closing modals (Escape), navigating lists (Arrow keys).",
-    parameters: {
-      type: "object",
-      properties: {
-        key: { type: "string", description: "Key name (e.g. 'Enter', 'Escape', 'Tab', 'ArrowDown')." },
-      },
-      required: ["key"],
-    },
-  },
-  {
-    name: "browser_upload_file",
-    description:
-      "Set files on an <input type=\"file\"> element at the given DOM index. "
-      + "Provide one or more absolute file paths. "
-      + "Dispatches the change event so the page detects the upload.",
-    parameters: {
-      type: "object",
-      properties: {
-        index: { type: "integer", description: "Element index from browser_get_dom (must be an <input type='file'>)." },
-        paths: {
-          type: "array",
-          items: { type: "string" },
-          description: "Absolute file paths to attach to the file input.",
-        },
-      },
-      required: ["index", "paths"],
-    },
-  },
-  {
-    name: "browser_type",
-    description: "Type text into the input element at the given index. "
-      + "Clears the current value first, then types each character with realistic keyboard events.",
-    parameters: {
-      type: "object",
-      properties: {
-        index: { type: "integer", description: "Element index from browser_get_dom." },
-        text: { type: "string", description: "Text to type." },
-      },
-      required: ["index", "text"],
-    },
-  },
-  {
-    name: "browser_clear",
-    description:
-      "Clear the value of an input element at the given DOM index. "
-      + "Use this before browser_type if you need to replace existing content, "
-      + "or to clear a field without typing new text. "
-      + "Dispatches input and change events so reactive frameworks detect the change.",
-    parameters: {
-      type: "object",
-      properties: {
-        index: { type: "integer", description: "Element index from browser_get_dom." },
-      },
-      required: ["index"],
-    },
-  },
-  {
     name: "browser_navigate",
     description: "Navigate the browser to a new URL. "
       + "Before navigating, call \`browser_info\` to check if the page is already open. "
@@ -571,22 +450,6 @@ export const TOOLS: ToolDef[] = [
     },
   },
   {
-    name: "browser_wait",
-    description:
-      "Wait for an element matching a CSS selector to appear on the page. "
-      + "Polls every 200ms until the element is found or the timeout expires. "
-      + "Returns the element details or 'NOT_FOUND'. Use this before clicking/typing "
-      + "to avoid race conditions on dynamic pages.",
-    parameters: {
-      type: "object",
-      properties: {
-        selector: { type: "string", description: "CSS selector (e.g. '.result', '#submit-btn', 'ul li:first-child')." },
-        timeoutMs: { type: "integer", description: "Timeout in milliseconds (default: 5000)." },
-      },
-      required: ["selector"],
-    },
-  },
-  {
     name: "browser_console",
     description:
       "Get the last 50 console entries (log, warn, error, dialog) from the page. "
@@ -594,22 +457,6 @@ export const TOOLS: ToolDef[] = [
       + "Also captures alert/confirm/prompt dialogs as [DIALOG] entries. "
       + "Returns one entry per line in [LEVEL] text format.",
     parameters: { type: "object", properties: {}, required: [] },
-  },
-  {
-    name: "browser_select",
-    description:
-      "Select an option from a <select> dropdown at the given element index. "
-      + "Set value by string (the option's value attribute), or by visible label text. "
-      + "Triggers the 'change' event after selecting.",
-    parameters: {
-      type: "object",
-      properties: {
-        index: { type: "number", description: "Element index (from browser_get_dom)." },
-        value: { type: "string", description: "The value attribute of the option to select." },
-        label: { type: "string", description: "Or: the visible text label of the option to select." },
-      },
-      required: ["index"],
-    },
   },
   {
     name: "browser_request_errors",
@@ -655,7 +502,7 @@ export const TOOLS: ToolDef[] = [
       + "deep codebase research, implementing a self-contained feature, fixing a bug across multiple files, "
       + "or exploring an unfamiliar codebase. "
       + "Available agent types:\n"
-      + "- 'browser': inspect a web page and report findings (read-only browser observation)\n"
+      + "- 'browser': interact with a web page — navigate, click, type, inspect DOM, check console (full browser automation)\n"
       + "- 'code-search': find and read code, report findings (read-only, no edits)\n"
       + "- 'code-writer': implement changes, run builds, fix errors\n"
       + "- 'researcher': explore the codebase and answer questions\n"
@@ -1655,7 +1502,7 @@ You have access to tools that let you read/write files, run commands, interact w
 8. Keep responses concise — one sentence of reasoning, one tool call.
 9. Do NOT guess browser DOM indices — call \`browser_get_dom\` first.
 10. **Before interacting with a web app in the browser, you MUST start the server first.** Use \`run_in_terminal\` to start the server, wait for the user to Allow the command. Then CHECK THE TERMINAL OUTPUT for runtime errors BEFORE navigating to the browser. Only call \`browser_info\` after confirming the terminal output shows no errors.
-11. **For simple browser checks** (checking if a page loaded, verifying a URL), use \`browser_info\` and \`browser_navigate\` directly. **For multi-step browser interactions** (filling forms, clicking through pages, testing workflows), delegate to a browser sub-agent: call \`delegate_task\` with \`agent_type: "browser"\` and describe the full testing task. The sub-agent will handle all navigation, DOM inspection, clicks, and typing — and return a concise summary. This keeps your context clean and avoids bloating the conversation with large DOM snapshots.
+11. **Browser interactions MUST be delegated to a sub-agent.** Use \`browser_navigate\`, \`browser_info\`, \`browser_screenshot\`, and \`browser_get_dom\` for observation only. For ANY interactive actions (clicking, typing, scrolling, selecting, pressing keys), call \`delegate_task agent_type: "browser"\` with a clear description. The sub-agent returns a summary.
 12. After starting a server, do NOT guess the URL or port. Call \`browser_info\` to check if a tab opened. If none, ask the user for the URL.
 13. Only use tools from the registry. NEVER invent tools — use \`read_file\` (not cat/head/tail), \`list_files\` (not ls/dir), \`search_files\` (not find/locate), \`grep\` (the tool, not the shell command), \`edit_file\` (not sed/awk), \`write_file\` (not echo>/cp), \`run_command\` for short commands, \`run_in_terminal\` for servers.
 
@@ -1676,54 +1523,13 @@ You have access to tools that let you read/write files, run commands, interact w
 Current time: ${new Date().toISOString()}`;
 
 const BROWSER_USAGE = `### Browser usage
-- Use \`browser_navigate\` to go to a URL, and \`browser_info\` to check the current tab state.
-- **For multi-step interactions** (filling forms, clicking through pages, testing workflows): delegate to a browser sub-agent via \`delegate_task agent_type: "browser"\`. The sub-agent handles navigation, DOM inspection, clicks, typing, and screenshots — returning only a summary. This keeps your context clean.
-- For quick one-off checks, you may use the following directly:
-- To click: use \`browser_click index=N\` (easiest) or \`browser_click x=CX y=CY\`.
-- To type or clear: use \`browser_click index=N\` FIRST, then \`browser_type index=N\` or \`browser_clear index=N\`. The click activates the input for reactive frameworks.
-- To select: \`browser_select index=N value="v"\` — clicks the select first, then sets the value.
-- Use \`browser_move_mouse\` to move cursor to x,y first (triggers hover effects), then \`browser_click\`.
-- Use \`browser_clear\` to clear an input field before typing new text.
-- Use \`browser_select\` to select an option from a <select> dropdown by value or visible label.
-- Use \`browser_scroll\` to scroll the page (pixels or to top/bottom) — reveals lazy-loaded or off-screen content.
-- Use \`browser_right_click\` to right-click at x,y — opens context menus.
-- Use \`browser_press_key\` to press keyboard keys (Enter, Escape, Tab, arrows) — submits forms, closes modals, navigates.
-- Use \`browser_upload_file\` to set files on a file input — provide absolute file paths.
-- Use \`browser_console\` to check for JavaScript errors, alerts/confirms, or warnings.
-- Use \`browser_request_errors\` to check for failed API calls or resource loads.
+- Use \`browser_navigate\` to go to a URL, \`browser_info\` to check the current tab state.
+- Use \`browser_screenshot\` to capture page text, \`browser_get_dom\` to inspect indexed elements.
+- Use \`browser_console\` and \`browser_request_errors\` to check for errors or failed requests.
+- **All interactive browser actions** (clicking, typing, scrolling, selecting, pressing keys, uploading files) are ONLY available to the browser sub-agent. You do NOT have these tools — delegate via \`delegate_task agent_type: "browser"\`. The sub-agent returns a concise summary.
 
-### Web element patterns
-Use these patterns when encountering common UI elements:
-
-**Text inputs**  
-\`browser_click index=N\` → \`browser_type index=N text="value"\`  
-If the field already has content: \`browser_clear index=N\` first.
-
-**Dropdowns (\<select>)**  
-\`browser_select index=N value="option_value"\` or \`browser_select index=N label="Visible Text"\`  
-If options aren't populated yet, click first to trigger loading: \`browser_click index=N\` then \`browser_get_dom\`.
-
-**Autocomplete / search inputs**  
-Type partial text → wait → recheck DOM for dropdown options:  
-\`browser_type index=N text="partial"\` → \`browser_wait selector=".autocomplete,.suggestion,.dropdown:not(.hidden),ul li:first-child"\` → \`browser_get_dom\` → \`browser_click index=M\` on the suggestion.
-
-**Checkboxes / radio buttons / toggles**  
-Click directly: \`browser_click index=N\`.
-
-**Modals / dialogs**  
-Wait for them: \`browser_wait selector=".modal,.dialog,.overlay:not([style*='display:none'])"\`.  
-Close with: \`browser_press_key key="Escape"\` or click close button.
-
-**Tooltips / hover menus**  
-\`browser_move_mouse x=CX y=CY\` then \`browser_get_dom\` to see revealed elements.
-
-**Lazy-loaded / infinite-scroll content**  
-\`browser_scroll to="bottom"\` → \`browser_wait selector="new-element-selector"\` → \`browser_get_dom\`.
-
-**File uploads**  
-\`browser_upload_file index=N paths=["/absolute/path/to/file.pdf"]\`.
-
-If submits, navigations, or dialog triggers don't work — try alternative element selectors or re-check the DOM with \`browser_get_dom\`.`;
+### Summary requirement
+- After every sub-agent delegation (\`delegate_task\` or \`delegate_parallel\`), you MUST provide a brief summary of what the sub-agent(s) accomplished before making any further tool calls.`;
 
 const BUILD_FIX_LOOP = `### Build & fix loop
 CRITICAL: After making ANY code changes, follow this flow to catch and fix errors:
@@ -2984,8 +2790,16 @@ export async function agentLoop(
         continue;
       }
 
-      // task_complete — reject if pending todos exist
+      // task_complete — reject if needs summary or pending todos exist
       if (fnName === "task_complete") {
+        if (state.needsSummary) {
+          const rejectMsg = "Cannot complete: your summary must explicitly describe what the sub-agent(s) accomplished. Include specific results from each delegated sub-agent in your task_complete summary, then call task_complete again.";
+          state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc2(reasoningContent) });
+          state.messages.push({ role: "tool", content: rejectMsg, tool_call_id: tc.id });
+          state.messages.push({ role: "user", content: rejectMsg });
+          state.needsSummary = false;
+          continue;
+        }
         const pending = getPendingTodos(state);
         if (pending) {
           const pendingList = pending.map((t) => `  [${t.status}] ${t.text}`).join("\n");
@@ -3062,6 +2876,7 @@ export async function agentLoop(
         state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc2(reasoningContent) });
         state.messages.push({ role: "tool", content: resultText, tool_call_id: tc.id });
         executedTools.push({ name: fnName, result: resultText.slice(0, 1000) });
+        state.needsSummary = true;
         continue;
       }
 
@@ -3099,6 +2914,7 @@ export async function agentLoop(
         state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc2(reasoningContent) });
         state.messages.push({ role: "tool", content: resultText, tool_call_id: tc.id });
         executedTools.push({ name: fnName, result: resultText.slice(0, 1000) });
+        state.needsSummary = true;
         continue;
       }
 
@@ -3471,6 +3287,15 @@ export async function* agentLoopStream(
 
       // task_complete — reject if pending todos exist
       if (fnName === "task_complete") {
+        if (state.needsSummary) {
+          const rejectMsg = "Cannot complete: your summary must explicitly describe what the sub-agent(s) accomplished. Include specific results from each delegated sub-agent in your task_complete summary, then call task_complete again.";
+          state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
+          state.messages.push({ role: "tool", content: rejectMsg, tool_call_id: tc.id });
+          state.messages.push({ role: "user", content: rejectMsg });
+          state.needsSummary = false;
+          yield { type: "tool_end", toolName: fnName, toolResult: rejectMsg };
+          continue;
+        }
         const pending = getPendingTodos(state);
         if (pending) {
           const pendingList = pending.map((t) => `  [${t.status}] ${t.text}`).join("\n");
@@ -3538,6 +3363,7 @@ export async function* agentLoopStream(
           })),
         };
         executedTools.push({ name: fnName, result: resultText.slice(0, 1000) });
+        state.needsSummary = true;
         continue;
       }
 
@@ -3611,6 +3437,7 @@ export async function* agentLoopStream(
         state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
         state.messages.push({ role: "tool", content: resultText, tool_call_id: tc.id });
         executedTools.push({ name: fnName, result: resultText.slice(0, 1000) });
+        state.needsSummary = true;
         continue;
       }
 
