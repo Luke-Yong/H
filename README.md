@@ -84,7 +84,7 @@ The React + Vite frontend runs on **port 5173** in development. In desktop/produ
 | Pane | File | Role |
 |---|---|---|
 | Editor | `EditorPane.tsx` | Monaco Editor with tabs, file tree, SCM panel, built-in browser webview, and terminal tabs — the main workspace |
-| Agent console | `AgentConsole.tsx` | Chat interface for the AI agent. Sends user goals to `/api/chat/agent/stream`, consumes the SSE event stream, renders tool calls with spinners/results, prompts user for permission on `run_in_terminal`/`browser_eval`, and shows Accept/Reject diffs for file edits |
+| Agent console | `AgentConsole.tsx` | Chat interface for the AI agent. Sends user goals to `/api/chat/agent/stream`, consumes the SSE event stream, renders tool calls with spinners/results, prompts user for permission on `run_in_terminal`, and shows Accept/Reject diffs for file edits |
 | Files panel | `FilesPanel.tsx` | File explorer tree with create/rename/delete, right-click context menu, and folder expansion state persistence |
 | Terminal | `TerminalPane.tsx` | xterm.js terminal tabs, connected via WebSocket to the server's terminal manager |
 | SCM panel | `ScmPanel.tsx` | Git staging area, commit history, diff viewer |
@@ -392,7 +392,6 @@ Harness gives the AI agent access to your filesystem, terminal, and browser. The
 | Tool | Guard | Blocks |
 |------|-------|--------|
 | `browser_navigate` | **URL validation** | `javascript:`, `data:`, `file:` protocols. Only `http://` and `https://` allowed. |
-| `browser_eval` | **Pattern block** + **User permission** | `document.cookie`, `fetch()`, `XMLHttpRequest`, `window.open`, `window.location`, `WebSocket`, `import()`, `sendBeacon`. User must Allow each execution. |
 | `run_command` | **Env sanitization** | Any env var whose name contains `KEY`, `SECRET`, `TOKEN`, `PASSWORD`, `CREDENTIAL`, or starts with `npm_` is stripped before the child process starts. Only `PATH`, `HOME`, `USER`, `TEMP`, `SHELL`, `SYSTEMROOT`, `LANG` are forwarded. |
 | `run_in_terminal` | **User permission** + **Command sanitization** | User must explicitly Allow each command before it runs. On Windows, bash syntax (`2>&1`, `&&`) is auto-corrected to PowerShell equivalents. |
 | `read_file` / `grep` / `list_files` / `write_file` / `edit_file` / `delete_file` / `rename_file` / `search_files` | **Secret-file block** | All filesystem tools refuse access to files matching `.env`, `.env.*`, `credentials.*`, `secret.*`, `.pem`, `.key`, `.p12`, `.pfx`, and `config/*secret*` / `config/*key*` paths. These files are also hidden from directory listings and search results. |
@@ -408,7 +407,6 @@ Harness gives the AI agent access to your filesystem, terminal, and browser. The
 | Trigger | Mechanism |
 |---------|-----------|
 | `run_in_terminal` | Allow/Deny prompt in the agent console |
-| `browser_eval` | Allow/Deny prompt with the code previewed |
 | `write_file` / `delete_file` | Accept/Reject undo cards in the agent console |
 
 ### Limitations
@@ -488,7 +486,6 @@ Agent calls run_in_terminal
 | `browser_press_key` | Press a keyboard key (Enter, Escape, Tab, Arrows, Backspace, etc.) on the active element — submits forms, closes modals, navigates lists |
 | `browser_upload_file` | Set files on a file input by absolute paths via `/api/fs/read-binary` |
 | `browser_wait` | Wait for an element matching a CSS selector to appear (polls every 200ms, default 5s timeout) |
-| `browser_eval` | Run JavaScript in the page (user permission required; dangerous patterns blocked) |
 | `browser_console` | Get the last 50 console entries (log, warn, error, dialogs) to check for JS errors |
 | `browser_request_errors` | Get failed network requests (4xx/5xx/CORS) to verify API calls and resource loads |
 
@@ -505,7 +502,7 @@ Agent calls run_in_terminal
 | `write_todos` | Create or update a structured task list to track progress. In step-by-step mode, this is the ONLY tool available during planning — the agent must create a complete plan before any execution begins. |
 | `task_complete` | Signal completion with a **structured summary** using the template: `### Changes Made`, `### Verification`, `### Outcome`. Vague or thought-process-style summaries (e.g. "I did the task") are **rejected** by the server — the agent must rewrite until the summary is concrete. |
 | `delegate_task` | Delegate a sub-task to a specialized sub-agent (browser, code-search, code-writer, researcher) that runs independently with its own context window |
-| `delegate_parallel` | Delegate multiple sub-tasks to run in parallel, each with its own sub-agent. Returns combined results |
+| `delegate_parallel` | Delegate multiple sub-tasks to run in parallel. Each sub-agent gets its own card with collapsible trace — results appear incrementally as each completes instead of waiting for all to finish |
 
 ### Multi-Agent Delegation
 
@@ -536,10 +533,10 @@ Harness supports **sub-agent delegation** — the main agent can spawn specializ
 
 | Profile | Tools | Iterations | Description |
 |---------|-------|-----------|-------------|
-| `browser` | `browser_navigate`, `browser_info`, `browser_screenshot`, `browser_get_dom`, `browser_click`, `browser_type`, `browser_clear`, `browser_select`, `browser_press_key`, `browser_console`, `browser_request_errors`, `browser_scroll`, `browser_wait`, `browser_eval` | 15 | Full browser automation. Navigates pages, clicks elements, types text, fills forms, clears inputs, selects dropdowns, presses keys, scrolls, and inspects DOM/console/network. Reports results with element indices and interaction outcomes. |
-| `code-search` | `read_file`, `list_files`, `search_files`, `grep` | 8 | Read-only code exploration. Finds files, reads code, reports findings. Never edits. |
-| `code-writer` | Full filesystem + `run_command`, `read_problems` | 25 | Implements features or fixes bugs. Reads, edits, builds, and verifies. |
-| `researcher` | `read_file`, `list_files`, `search_files`, `grep`, `run_command` | 10 | Explores codebase to answer questions. Reports with file paths and line numbers. |
+| `browser` | `browser_navigate`, `browser_info`, `browser_screenshot`, `browser_get_dom`, `browser_click`, `browser_type`, `browser_clear`, `browser_select`, `browser_press_key`, `browser_console`, `browser_request_errors`, `browser_scroll`, `browser_wait` | 30 | Full browser automation. Navigates pages, clicks elements, types text, fills forms, clears inputs, selects dropdowns, presses keys, scrolls, and inspects DOM/console/network. Reports results with element indices and interaction outcomes. |
+| `code-search` | `read_file`, `list_files`, `search_files`, `grep` | 20 | Read-only code exploration. Finds files, reads code, reports findings. Never edits. |
+| `code-writer` | Full filesystem + `run_command`, `read_problems` | 50 | Implements features or fixes bugs. Reads, edits, builds, and verifies. |
+| `researcher` | `read_file`, `list_files`, `search_files`, `grep`, `run_command` | 25 | Explores codebase to answer questions. Reports with file paths and line numbers. |
 
 #### Key Design
 
@@ -641,7 +638,7 @@ Phase 3: EXECUTE (per step)
   For each pending todo:
     → SSE "step_begin" event
     → Code-writer sub-agent spawned with ONLY this step's context
-    → Sub-agent has full filesystem + run_command tools (max 25 iters)
+    → Sub-agent has full filesystem + run_command tools (max 50 iters)
     → Streaming tool_start/tool_end events shown in UI
     → Sub-agent calls task_complete → SSE "step_end" event
     → Step marked completed/failed, next step begins
@@ -660,7 +657,7 @@ Phase 4: WRAP-UP
 | Execution | Agent works on anything at any time | One step at a time, isolated sub-agent per step |
 | Context | Full conversation history in one loop | Each step gets fresh sub-agent with only that step + previous results |
 | Tool restriction | Full tool set available | Planning: only write_todos. Execution: code-writer tools (no browser/terminal) |
-| Max turns | 50 per agent loop | Planning: 5 turns. Per step: 25 turns (configurable per agent profile) |
+| Max turns | 50 per agent loop | Planning: 5 turns. Per step: 50 turns (configurable per agent profile) |
 
 #### Why use it
 

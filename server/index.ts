@@ -365,7 +365,7 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
       }
       cmdResult = accepted ? dt.result : "Rejected by user.";
     } else if (state.pendingPermission && state.pendingPermission.toolCallId === toolCallId) {
-      // ── Step 1 alternative: Handle permission Allow/Deny (run_in_terminal, browser_eval) ──
+      // ── Step 1 alternative: Handle permission Allow/Deny (run_in_terminal) ──
       const pp = state.pendingPermission;
       permissionToolName = pp.toolName;
       permissionToolParams = pp.params;
@@ -373,7 +373,7 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
 
       if (permissionGranted) {
         if (pp.toolName === "browser_eval") {
-          cmdResult = null;
+          cmdResult = String(toolResult || "Executed.");
         } else {
           // run_in_terminal: use frontend-provided terminal output as tool result if available
           const termOut = typeof toolResult === "string" && toolResult.trim() ? toolResult : null;
@@ -420,7 +420,7 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
       res.write(`data: ${JSON.stringify({ ...event, sessionId })}\n\n`);
     };
 
-    // Yield tool_end for permission-gated tools (run_in_terminal, browser_eval)
+    // Yield tool_end for permission-gated tools (run_in_terminal)
     if (cmdResult !== null && !state.deferredTool) {
       const termSandbox = typeof toolResult === "string" && toolResult.trim() ? toolResult : undefined;
       sendEvent({
@@ -1324,6 +1324,22 @@ if (process.env.HARNESS_SERVE_CLIENT === "1" && fs.existsSync(path.join(clientDi
 
 // ── Browser reverse proxy (universal — all URLs proxied for same-origin iframe access) ──
 
+// Simple JSON syntax highlighter: wraps keys, strings, numbers, booleans, null in colored spans.
+function highlightJson(json: string): string {
+  return json.replace(
+    /("(?:\\.|[^"\\])*")\s*:|("(?:\\.|[^"\\])*")|(-?\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b)|(\btrue\b|\bfalse\b)|(\bnull\b)|([\[\]{}])/g,
+    (match, key, str, num, bool, nil, bracket) => {
+      if (key) return `<span class="key">${key}</span>:`;
+      if (str) return `<span class="str">${str}</span>`;
+      if (num) return `<span class="num">${num}</span>`;
+      if (bool) return `<span class="bool">${bool}</span>`;
+      if (nil) return `<span class="nil">${nil}</span>`;
+      if (bracket) return `<span class="bracket">${bracket}</span>`;
+      return match;
+    }
+  );
+}
+
 // Reverse proxy – /_browser?url=<encoded_url>
 // Proxies any URL through the Harness server so the iframe is always same-origin.
 // This enables click interception, title/URL sync, and _blank link handling for all sites.
@@ -1386,6 +1402,29 @@ app.use("/_browser", (req, res, next) => {
           const injected = body.replace(/<head[^>]*>/i, (match) => match + baseTag);
           res.writeHead(proxyRes.statusCode || 200, headers);
           res.end(injected);
+        });
+      } else if (contentType.includes("application/json") || contentType.includes("+json")) {
+        // Pretty-print JSON responses with syntax highlighting in the browser
+        delete headers["content-length"];
+        headers["content-type"] = "text/html; charset=utf-8";
+        let body = "";
+        proxyRes.setEncoding("utf8");
+        proxyRes.on("data", (chunk: string) => { body += chunk; });
+        proxyRes.on("end", () => {
+          try {
+            const parsed = JSON.parse(body);
+            const formatted = JSON.stringify(parsed, null, 2);
+            const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#1e1e1e;color:#d4d4d4;font:13px/1.5 'Cascadia Code','Fira Code',Consolas,monospace;padding:16px;white-space:pre-wrap;word-break:break-word}
+.key{color:#9cdcfe}.str{color:#ce9178}.num{color:#b5cea8}.bool{color:#569cd6}.nil{color:#569cd6}.bracket{color:#ffd700}
+</style></head><body>${highlightJson(formatted)}</body></html>`;
+            res.writeHead(proxyRes.statusCode || 200, headers);
+            res.end(html);
+          } catch {
+            res.writeHead(proxyRes.statusCode || 200, headers);
+            res.end(body);
+          }
         });
       } else {
         res.writeHead(proxyRes.statusCode || 200, headers);

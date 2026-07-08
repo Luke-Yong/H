@@ -1466,6 +1466,11 @@ body.resizing iframe { pointer-events: none; }
   border-left: 3px solid rgba(140, 100, 220, 0.6);
 }
 .agent-tool-card-subagent .agent-tool-card-name { color: rgba(200, 170, 255, 0.85); }
+/* Step sub-agent tool cards (teal theme to match sub-agent color coding) */
+.agent-tool-card-step-sub {
+  border-left: 3px solid rgba(58, 168, 159, 0.5);
+}
+.agent-tool-card-step-sub .agent-tool-card-name { color: rgba(130, 210, 200, 0.85); }
 /* Sub-agent collapsible trace inside tool cards */
 .agent-sub-agent { margin: 4px 0; border: 1px solid rgba(140, 100, 220, 0.2); border-radius: 4px; overflow: hidden; }
 .agent-sub-agent-header {
@@ -1474,11 +1479,50 @@ body.resizing iframe { pointer-events: none; }
   background: rgba(140, 100, 220, 0.08);
 }
 .agent-sub-agent-header:hover { opacity: 1; background: rgba(140, 100, 220, 0.14); }
-.agent-sub-agent-body { padding: 4px 8px; max-height: 300px; overflow-y: auto; }
-.agent-sub-agent-msg { padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.04); }
-.agent-sub-agent-msg:last-child { border-bottom: none; }
+.agent-sub-agent-body {
+  margin: 0 6px 6px 8px;
+  padding: 6px 8px;
+  max-height: 320px; overflow-y: auto;
+  border: 1px solid rgba(140, 100, 220, 0.2);
+  border-top: none;
+  border-radius: 0 0 5px 5px;
+  background: rgba(15, 12, 28, 0.55);
+}
+/* Each sub-agent message is a contained block with left accent line */
+.agent-sub-agent-msg {
+  margin: 2px 0 2px 2px;
+  padding: 3px 8px;
+  border-left: 2px solid transparent;
+  border-radius: 0 3px 3px 0;
+}
+/* ── Sub-agent color coding (teal/cyan theme) ── */
+/* Tool call: teal accent */
+.agent-sub-agent-msg.turn-tool { border-left-color: #3aa89f; background: rgba(58, 168, 159, 0.06); }
+.agent-sub-agent-msg.turn-tool .agent-sub-agent-tool { color: #5cc9c1; }
+/* Tool result: indent further, dimmer */
+.agent-sub-agent-msg.turn-result {
+  margin-left: 10px;
+  border-left-color: rgba(58, 168, 159, 0.2);
+  background: rgba(58, 168, 159, 0.02);
+}
+/* User message: warm amber */
+.agent-sub-agent-msg.turn-user { border-left-color: rgba(200, 150, 80, 0.35); background: rgba(200, 150, 80, 0.03); }
+/* Plain assistant text: minimal */
+.agent-sub-agent-msg.turn-text { border-left-color: transparent; }
+
+/* Override agent-msg-* classes inside sub-agent body to use teal theme */
+.agent-sub-agent-body .agent-msg-tool {
+  background: rgba(58, 168, 159, 0.04);
+}
+.agent-sub-agent-body .agent-msg-assistant {
+  color: rgba(180, 210, 200, 0.85);
+}
+.agent-sub-agent-body .agent-msg-user {
+  border-left-color: rgba(200, 150, 80, 0.35);
+  background: rgba(200, 150, 80, 0.03);
+}
 .agent-sub-agent-thought { font-size: 11px; opacity: 0.5; font-style: italic; padding: 2px 0; }
-.agent-sub-agent-tool { font-size: 11px; color: #e2b714; padding: 2px 0; }
+.agent-sub-agent-tool { font-size: 11px; color: #5cc9c1; padding: 2px 0; }
 .agent-sub-agent-text { font-size: 12px; padding: 2px 0; }
 .agent-sub-agent-user { opacity: 0.6; }
 .agent-sub-agent-result { font-size: 11px; opacity: 0.5; padding: 2px 0; white-space: pre-wrap; word-break: break-all; }

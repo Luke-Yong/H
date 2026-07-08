@@ -1547,13 +1547,6 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
       case "browser_get_dom": return bv.getIndexedDom();
       case "browser_type": await bv.typeIntoElement(Number(params.index || 0), String(params.text || "")); return `Typed "${params.text}" into element.`;
       case "browser_clear": return bv.clearElement(Number(params.index || 0));
-      case "browser_eval": {
-        const code = String(params.code || "");
-        // Block dangerous operations that could exfiltrate data or compromise the page
-        const blocked = /\b(?:document\.cookie|fetch\s*\(|XMLHttpRequest|window\.open|window\.location\s*=|WebSocket|import\s*\(|navigator\.sendBeacon)\b/;
-        if (blocked.test(code)) return "Blocked: code contains potentially dangerous operations (fetch/XHR/cookie access/window.open).";
-        return bv.evalInPage(code);
-      }
       case "browser_wait": {
         const selector = String(params.selector || "");
         if (!selector) return "Error: selector is required.";

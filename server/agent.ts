@@ -95,10 +95,10 @@ export const SUB_AGENT_PROFILES: Record<string, SubAgentConfig> = {
       "browser_navigate", "browser_info", "browser_screenshot", "browser_get_dom",
       "browser_click", "browser_type", "browser_clear", "browser_select",
       "browser_console", "browser_request_errors", "browser_scroll", "browser_wait",
-      "browser_press_key", "browser_eval",
+      "browser_press_key",
     ],
     headless: false,
-    maxIterations: 15,
+    maxIterations: 30,
     systemPrompt: `You are a browser automation specialist running as a sub-agent. Your job is to interact with a web page and report your findings to the parent agent.
 - Use browser_navigate to go to a URL.
 - Use browser_info to check the current URL and page title.
@@ -118,7 +118,7 @@ export const SUB_AGENT_PROFILES: Record<string, SubAgentConfig> = {
     name: "Code Search Agent",
     tools: ["read_file", "list_files", "search_files", "grep"],
     headless: true,
-    maxIterations: 8,
+    maxIterations: 20,
     systemPrompt: `You are a code-search specialist running as a sub-agent. Your ONLY job is to find and read relevant code in the project.
 - Never create, edit, or delete files.
 - Use read_file to inspect files, list_files to browse directories, search_files to find files by name, and grep to search file contents.
@@ -130,7 +130,7 @@ export const SUB_AGENT_PROFILES: Record<string, SubAgentConfig> = {
     tools: ["read_file", "write_file", "edit_file", "list_files", "search_files", "grep",
             "run_command", "read_problems", "read_command_output", "create_directory", "delete_file", "rename_file"],
     headless: true,
-    maxIterations: 25,
+    maxIterations: 50,
     systemPrompt: `You are a code-writing specialist running as a sub-agent. Your job is to implement a specific feature or fix a specific bug.
 - Read relevant files first to understand the existing code before making changes.
 - Prefer edit_file for targeted changes; use write_file only for new files.
@@ -149,7 +149,7 @@ Do NOT write a thought process or narrative. Use the template.`,
     name: "Research Agent",
     tools: ["read_file", "list_files", "search_files", "grep", "run_command"],
     headless: true,
-    maxIterations: 10,
+    maxIterations: 25,
     systemPrompt: `You are a codebase researcher running as a sub-agent. Explore the project to answer the user's question.
 - Use list_files and search_files to understand the project structure.
 - Use read_file to read relevant source files.
@@ -218,6 +218,8 @@ export interface AgentSseEvent {
   stepTodo?: LockedTodo;
   /** All step results summary (on done for step-by-step mode). */
   allStepResults?: { text: string; status: string; result: string }[];
+  /** True when this tool_start/tool_end came from a step sub-agent (for frontend color coding). */
+  isSubAgent?: boolean;
 }
 
 // ── Tool registry ──
@@ -553,19 +555,6 @@ export const TOOLS: ToolDef[] = [
         index: { type: "integer", description: "Element index from browser_get_dom." },
       },
       required: ["index"],
-    },
-  },
-  {
-    name: "browser_eval",
-    description:
-      "Run arbitrary JavaScript in the browser page and return the result. "
-      + "Use to read page state, check element properties, or interact with the page programmatically.",
-    parameters: {
-      type: "object",
-      properties: {
-        code: { type: "string", description: "JavaScript code to run in the page." },
-      },
-      required: ["code"],
     },
   },
   {
@@ -1409,9 +1398,9 @@ function formatMemoryResults(results: Array<{ key: string; value: string; catego
 // ── Agent loop ──
 
 const MAX_ITERATIONS = 50;
-const HISTORY_COMPACTION_TRIGGER_MESSAGES = 24;
-const HISTORY_COMPACTION_TRIGGER_TOKENS = 10_000;
-const HISTORY_PLAIN_MESSAGES_TO_KEEP = 6;
+const HISTORY_COMPACTION_TRIGGER_MESSAGES = 60;
+const HISTORY_COMPACTION_TRIGGER_TOKENS = 20_000;
+const HISTORY_PLAIN_MESSAGES_TO_KEEP = 15;
 const HISTORY_SUMMARY_LINE_LIMIT = 12;
 const HISTORY_SUMMARY_CHAR_BUDGET = 2_400;
 const TOOL_RESULT_SUMMARY_LINE_LIMIT = 8;
@@ -1700,7 +1689,6 @@ const BROWSER_USAGE = `### Browser usage
 - Use \`browser_right_click\` to right-click at x,y — opens context menus.
 - Use \`browser_press_key\` to press keyboard keys (Enter, Escape, Tab, arrows) — submits forms, closes modals, navigates.
 - Use \`browser_upload_file\` to set files on a file input — provide absolute file paths.
-- Use \`browser_eval\` to inspect page state programmatically.
 - Use \`browser_console\` to check for JavaScript errors, alerts/confirms, or warnings.
 - Use \`browser_request_errors\` to check for failed API calls or resource loads.
 
@@ -1720,8 +1708,7 @@ Type partial text → wait → recheck DOM for dropdown options:
 \`browser_type index=N text="partial"\` → \`browser_wait selector=".autocomplete,.suggestion,.dropdown:not(.hidden),ul li:first-child"\` → \`browser_get_dom\` → \`browser_click index=M\` on the suggestion.
 
 **Checkboxes / radio buttons / toggles**  
-Click directly: \`browser_click index=N\`.  
-To check state after: \`browser_eval code="document.querySelectorAll('input[type=checkbox],input[type=radio]')[N].checked"\`.
+Click directly: \`browser_click index=N\`.
 
 **Modals / dialogs**  
 Wait for them: \`browser_wait selector=".modal,.dialog,.overlay:not([style*='display:none'])"\`.  
@@ -1736,7 +1723,7 @@ Close with: \`browser_press_key key="Escape"\` or click close button.
 **File uploads**  
 \`browser_upload_file index=N paths=["/absolute/path/to/file.pdf"]\`.
 
-**If submits, navigations, or dialog triggers don't work** — use \`browser_eval\` to inspect the page state or trigger the action programmatically.`;
+If submits, navigations, or dialog triggers don't work — try alternative element selectors or re-check the DOM with \`browser_get_dom\`.`;
 
 const BUILD_FIX_LOOP = `### Build & fix loop
 CRITICAL: After making ANY code changes, follow this flow to catch and fix errors:
@@ -2256,7 +2243,7 @@ function getPendingTodos(state: AgentState): { id: string; text: string; status:
 const BROWSER_TOOLS = new Set([
   "browser_info", "browser_screenshot", "browser_get_dom", "browser_console",
   "browser_request_errors", "browser_scroll", "browser_wait",
-  "browser_click", "browser_type", "browser_navigate", "browser_eval",
+  "browser_click", "browser_type", "browser_navigate",
   "browser_move_mouse", "browser_right_click", "browser_press_key",
   "browser_select", "browser_clear", "browser_upload_file",
 ]);
@@ -2850,8 +2837,11 @@ export async function* agentLoopStepByStep(
           try {
             // Run the step sub-agent with streaming
             for await (const stepEvent of runStepSubAgent(state, stepTask, stepConfig, { model: modelOpts?.model, apiKey })) {
-              // Forward tool_start, tool_end, text, thinking events to the client
-              if (stepEvent.type === "thinking" || stepEvent.type === "text" || stepEvent.type === "tool_start" || stepEvent.type === "tool_end") {
+              // Forward tool_start, tool_end, text, thinking events to the client.
+              // Tag tool events with isSubAgent so the frontend color-codes them.
+              if (stepEvent.type === "tool_start" || stepEvent.type === "tool_end") {
+                yield { ...stepEvent, isSubAgent: true } as AgentSseEvent;
+              } else if (stepEvent.type === "thinking" || stepEvent.type === "text") {
                 yield stepEvent;
               }
               if (stepEvent.stepComplete) {
@@ -3077,29 +3067,33 @@ export async function agentLoop(
 
       if (fnName === "delegate_parallel") {
         const tasks = (params.tasks || []) as Array<{ task: string; agent_type: string }>;
-        const results = await Promise.all(
-          tasks.map((t) => {
-            const cfg = SUB_AGENT_PROFILES[t.agent_type] || SUB_AGENT_PROFILES["code-search"];
-            return runSubAgent(state, t.task, cfg, { model: modelOpts?.model, apiKey: apiKey! });
-          }),
-        );
+        // Launch all sub-agents in parallel, tracking which task each result came from.
+        const promises = tasks.map((t, idx) => {
+          const cfg = SUB_AGENT_PROFILES[t.agent_type] || SUB_AGENT_PROFILES["code-search"];
+          return runSubAgent(state, t.task, cfg, { model: modelOpts?.model, apiKey: apiKey! })
+            .then(result => ({ idx, task: t.task, agentType: t.agent_type, result, config: cfg }));
+        });
+        const results = await Promise.all(promises);
+        // Sort back to original task order
+        results.sort((a, b) => a.idx - b.idx);
+
         // If any sub-agent yielded a browser tool, pause (first one wins)
-        const browserYield = results.find((r) => r.phase === "browser_tool");
-        if (browserYield && browserYield.phase === "browser_tool") {
+        const browserYield = results.find((r) => r.result.phase === "browser_tool");
+        if (browserYield && browserYield.result.phase === "browser_tool") {
           state.pendingSubAgent = {
-            subState: browserYield.subState,
-            config: SUB_AGENT_PROFILES[String(params.agent_type || "code-search")] || SUB_AGENT_PROFILES["code-search"],
-            task: String(params.task || ""),
+            subState: browserYield.result.subState,
+            config: browserYield.config,
+            task: browserYield.task,
             parentToolCallId: tc.id,
             parentToolArgs: tc.function.arguments,
             parentReasoning: reasoningContent ?? undefined,
           };
-          browserTool = { name: browserYield.toolName, id: browserYield.toolCallId, params: browserYield.params };
+          browserTool = { name: browserYield.result.toolName, id: browserYield.result.toolCallId, params: browserYield.result.params };
           browserBreakIdx = i;
           break;
         }
-        const combined = (results as Array<{ phase: "done"; summary: string }>)
-          .map((r, i) => `[${i + 1}] ${r.summary}`)
+        const combined = results
+          .map((r, i) => `[${i + 1}] ${r.config.name}: ${r.result.phase === "done" ? r.result.summary : "Interrupted"}`)
           .join("\n");
         const resultText = `${results.length} sub-agents completed.\n${combined}`;
         state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc2(reasoningContent) });
@@ -3357,33 +3351,6 @@ export async function* agentLoopStream(
         return;
       }
 
-      // browser_eval: requires user permission (arbitrary JS execution risk)
-      if (fnName === "browser_eval") {
-        const code = String(params.code || "");
-        // Push individual assistant+tool messages for each tool call.
-        // browser_eval pauses for permission — push "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_get_dom, browser_select, or any other browser_* tool) on your next turn to get the actual result." for all
-        // other tools so they don't block. The actual eval result will be
-        // pushed by /stream/continue.
-        for (let i = 0; i < finalToolCalls.length; i++) {
-          const t = finalToolCalls[i];
-          state.messages.push({ role: "assistant", content: JSON.stringify([{ id: t.id, type: "function", function: { name: t.function.name, arguments: t.function.arguments } }]), name: t.function.name, ...rc(finalReasoning) });
-          if (i > 0) {
-            state.messages.push({ role: "tool", content: "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_get_dom, browser_select, or any other browser_* tool) on your next turn to get the actual result.", tool_call_id: t.id });
-          }
-        }
-        state.pendingPermission = { toolCallId: tc.id, command: code, background: false, toolName: "browser_eval" };
-        yield { type: "tool_start", toolName: fnName, toolParams: params };
-        yield {
-          type: "permission_required",
-          toolCallId: tc.id,
-          toolName: fnName,
-          permissionCommand: code,
-          backgroundPerm: false,
-          executedTools,
-        };
-        return;
-      }
-
       // ── File tools: auto-execute, yield diff for Accept/Reject in UI ──
       const FILE_TOOLS = ["edit_file"];
       if (FILE_TOOLS.includes(fnName)) {
@@ -3575,46 +3542,74 @@ export async function* agentLoopStream(
       }
 
       if (fnName === "delegate_parallel") {
-        yield { type: "tool_start", toolName: fnName, toolParams: params };
         const tasks = (params.tasks || []) as Array<{ task: string; agent_type: string }>;
-        const results = await Promise.all(
-          tasks.map((t) => {
-            const cfg = SUB_AGENT_PROFILES[t.agent_type] || SUB_AGENT_PROFILES["code-search"];
-            return runSubAgent(state, t.task, cfg, { model: modelOpts?.model, apiKey: apiKey! });
-          }),
-        );
-        const browserYield = results.find((r) => r.phase === "browser_tool");
-        if (browserYield && browserYield.phase === "browser_tool") {
+
+        // Launch all sub-agents in parallel.
+        const promises = tasks.map((t, idx) => {
+          const cfg = SUB_AGENT_PROFILES[t.agent_type] || SUB_AGENT_PROFILES["code-search"];
+          return runSubAgent(state, t.task, cfg, { model: modelOpts?.model, apiKey: apiKey! })
+            .then(result => ({ idx, task: t.task, agentType: t.agent_type, result, config: cfg }));
+        });
+
+        // Yield individual sub-agent cards as each completes.
+        const results: { idx: number; task: string; agentType: string; result: SubAgentResult; config: SubAgentConfig }[] = [];
+        for (const p of promises) {
+          const r = await p;
+          results.push(r);
+
+          if (r.result.phase === "done") {
+            const resultText = `[${r.config.name}] Completed in ${r.result.iterations} turns.\n${r.result.summary}`;
+            yield {
+              type: "tool_start",
+              toolName: "delegate_task",
+              toolParams: { task: r.task.slice(0, 100), agent_type: r.agentType },
+            };
+            yield {
+              type: "tool_end",
+              toolName: "delegate_task",
+              toolResult: resultText.slice(0, 2000),
+              subAgentName: r.config.name,
+              subAgentMessages: r.result.subState.messages.map((m: AgentMessage) => ({
+                role: m.role,
+                content: m.content || "",
+                name: m.name,
+                reasoning_content: m.reasoning_content,
+              })),
+            };
+          } else {
+            yield { type: "text", text: `[${r.config.name}] Needs browser interaction — pausing.` };
+          }
+        }
+
+        // Sort back to original task order
+        results.sort((a, b) => a.idx - b.idx);
+
+        const browserYield = results.find((r) => r.result.phase === "browser_tool");
+        if (browserYield && browserYield.result.phase === "browser_tool") {
           state.pendingSubAgent = {
-            subState: browserYield.subState,
-            config: SUB_AGENT_PROFILES[String(params.agent_type || "code-search")] || SUB_AGENT_PROFILES["code-search"],
-            task: String(params.task || ""),
+            subState: browserYield.result.subState,
+            config: browserYield.config,
+            task: browserYield.task,
             parentToolCallId: tc.id,
             parentToolArgs: tc.function.arguments,
             parentReasoning: finalReasoning ?? undefined,
           };
           yield {
             type: "browser_tool",
-            toolName: browserYield.toolName,
-            toolParams: browserYield.params,
-            toolCallId: browserYield.toolCallId,
+            toolName: browserYield.result.toolName,
+            toolParams: browserYield.result.params,
+            toolCallId: browserYield.result.toolCallId,
             sessionId,
             executedTools,
           };
           return;
         }
-        const combined = (results as Array<{ phase: "done"; summary: string }>)
-          .map((r, i) => `[${i + 1}] ${r.summary}`)
+        const combined = results
+          .map((r, i) => `[${i + 1}] ${r.config.name}: ${r.result.phase === "done" ? r.result.summary : "Interrupted"}`)
           .join("\n");
         const resultText = `${results.length} sub-agents completed.\n${combined}`;
         state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
         state.messages.push({ role: "tool", content: resultText, tool_call_id: tc.id });
-        yield {
-          type: "tool_end",
-          toolName: fnName,
-          toolResult: resultText.slice(0, 2000),
-          executedTools: [{ name: fnName, result: resultText.slice(0, 500) }],
-        };
         executedTools.push({ name: fnName, result: resultText.slice(0, 1000) });
         continue;
       }

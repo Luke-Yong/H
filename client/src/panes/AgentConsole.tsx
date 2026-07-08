@@ -988,38 +988,37 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
           }
           currentThought = "";
           currentText = "";
-          const isTerminal = evt.toolName === "run_in_terminal";
           const id = nextId();
           toolIds.push(id);
           streamToolRef.current.set(id, { name: evt.toolName, params: evt.toolParams || {} });
-          // For run_in_terminal: defer card creation to permission_required event.
-          // The command will NOT run until user clicks Allow.
-          if (!isTerminal) {
-            // Open file in Monaco for file tools (close tab for delete to release handle)
-            const FILE_EDIT_TOOLS = ["write_file", "edit_file", "delete_file", "rename_file"];
-            if (FILE_EDIT_TOOLS.includes(evt.toolName) && (evt.toolParams?.path || evt.toolParams?.oldPath)) {
-              const root = (getFsBasePath?.() || "").replace(/[/\\]$/, "");
-              let p = String(evt.toolParams.path || evt.toolParams.oldPath || "");
-              if (root && !/^[a-zA-Z]:/.test(p) && !p.startsWith("/")) {
-                p = root + "/" + p.replace(/\\/g, "/");
-              }
-              if (evt.toolName === "delete_file") {
-                closeEditorFile?.(p);
-              } else {
-                openEditorFile?.(p);
-              }
+          // Create the card immediately — command line will be visible right away.
+          // Open file in Monaco for file tools (close tab for delete to release handle)
+          const FILE_EDIT_TOOLS = ["write_file", "edit_file", "delete_file", "rename_file"];
+          if (FILE_EDIT_TOOLS.includes(evt.toolName) && (evt.toolParams?.path || evt.toolParams?.oldPath)) {
+            const root = (getFsBasePath?.() || "").replace(/[/\\]$/, "");
+            let p = String(evt.toolParams.path || evt.toolParams.oldPath || "");
+            if (root && !/^[a-zA-Z]:/.test(p) && !p.startsWith("/")) {
+              p = root + "/" + p.replace(/\\/g, "/");
             }
-            flushSync(() => {
-              pushRaw(id, { role: "tool", content: "", toolName: evt.toolName, toolParams: evt.toolParams, state: "waiting", sandboxOutput: evt.toolName === "run_command" ? "" : undefined, tokenCount: fcTokenSaved as number | undefined });
-              if (evt.toolName === "delegate_task") {
-                delegateTaskCardIdRef.current = id;
-              }
-            });
-          } else {
-            // Store the command so permission_required can use it (does not run yet)
-            agentTermMsgIdRef.current = id;
-            agentTermOutputRef.current = "";
+            if (evt.toolName === "delete_file") {
+              closeEditorFile?.(p);
+            } else {
+              openEditorFile?.(p);
+            }
           }
+          flushSync(() => {
+            const isSubAgent = !!(evt as any).isSubAgent;
+            pushRaw(id, {
+              role: "tool", content: "", toolName: evt.toolName, toolParams: evt.toolParams,
+              state: "waiting",
+              sandboxOutput: evt.toolName === "run_command" ? "" : undefined,
+              tokenCount: fcTokenSaved as number | undefined,
+              ...(isSubAgent ? { subAgentName: "Sub-agent" } : {}),
+            });
+            if (evt.toolName === "delegate_task") {
+              delegateTaskCardIdRef.current = id;
+            }
+            });
         } else if (evt.type === "tool_end") {
           // Switch file changes from streaming to done and auto-apply to editor.
           const tn = evt.toolName;
@@ -1600,21 +1599,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
           }
 
           if (!signal?.aborted) {
-            if (granted && permTool?.name === "browser_eval") {
-              const code = String(permTool?.params?.code || "");
-              let evalResult = "Browser not available.";
-              if (executeBrowserAction) {
-                evalResult = await executeBrowserAction("browser_eval", { code });
-              }
-              setMessages((prev) => {
-                const next = [...prev];
-                const idx = next.findIndex((m) => m.id === permMsgId);
-                if (idx >= 0) next[idx] = { ...next[idx], permissionPrompt: undefined, content: evalResult, state: undefined };
-                return next;
-              });
-              isPermission = false;
-              tcid = toolCallId || sid;
-            } else if (permTool?.name === "run_in_terminal") {
+            if (permTool?.name === "run_in_terminal") {
               if (permMsgId && granted) {
                 const cmd = String(permTool?.params?.command || "");
                 if (cmd && agentTerminalBridge) {
@@ -1716,22 +1701,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
       }
 
       if (!signal.aborted) {
-        if (granted && permTool?.name === "browser_eval") {
-          // browser_eval: execute in the browser, then continue with the result
-          const code = String(permTool?.params?.code || "");
-          let evalResult = "Browser not available.";
-          if (executeBrowserAction) {
-            evalResult = await executeBrowserAction("browser_eval", { code });
-          }
-          setMessages((prev) => {
-            const next = [...prev];
-            const idx = next.findIndex((m) => m.id === permMsgId);
-            if (idx >= 0) next[idx] = { ...next[idx], permissionPrompt: undefined, content: evalResult, state: undefined };
-            return next;
-          });
-          isPermission = false;
-          await continueStreaming({ sessionId, toolCallId, toolResult: evalResult, model: selectedModel || "deepseek-chat", apiKey, thinking: isThinking, consoleContext: getConsoleContext?.() || "" });
-        } else if (permTool?.name === "run_in_terminal") {
+        if (permTool?.name === "run_in_terminal") {
           // run_in_terminal: execute command in terminal bridge
           if (permMsgId && granted) {
             const cmd = String(permTool?.params?.command || "");
@@ -2520,7 +2490,7 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
             )}
             {/* Tool execution card */}
             {msg.role === "tool" && msg.toolName && (
-              <div key={`${msg.id}-tool`} className={`agent-tool-card${msg.toolName === "delegate_task" ? " agent-tool-card-subagent" : ""}${msg.state === "waiting" ? " streaming" : ""}`}>
+              <div key={`${msg.id}-tool`} className={`agent-tool-card${msg.toolName === "delegate_task" ? " agent-tool-card-subagent" : msg.subAgentName && msg.toolName !== "delegate_task" ? " agent-tool-card-step-sub" : ""}${msg.state === "waiting" ? " streaming" : ""}`}>
                 <div className="agent-tool-card-header">
                   {msg.state === "waiting" ? <span className="agent-spinner" /> : <i className="codicon codicon-check" />}
                   <i className={`codicon codicon-${msg.toolName === "delegate_task" ? "hubot" : msg.toolName.startsWith("browser_") ? "globe" : msg.toolName === "run_in_terminal" ? "terminal" : msg.toolName === "read_file" ? "file-code" : msg.toolName === "grep" ? "search" : msg.toolName === "list_files" || msg.toolName === "search_files" ? "folder-opened" : "tools"}`} />
@@ -2543,6 +2513,7 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
                       <>
                         <span className="agent-tool-card-name">{msg.toolName.replace("browser_", "").replace(/_/g, " ")}</span>
                         {msg.toolName === "delegate_task" && <span className="agent-tool-card-label">sub-agent</span>}
+                        {msg.subAgentName && msg.toolName !== "delegate_task" && <span className="agent-tool-card-label">sub-agent</span>}
                         {msg.toolName === "run_in_terminal" && <span className="agent-tool-card-label">terminal</span>}
                         {msg.toolName === "run_command" && <span className="agent-tool-card-label">sandbox</span>}
                         {msg.toolParams && msg.toolName !== "run_in_terminal" && msg.toolName !== "run_command" && (
@@ -2572,27 +2543,36 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
                     </div>
                     {expandedSubAgents.has(msg.id) && (
                       <div className="agent-sub-agent-body">
-                        {msg.subAgentMessages.map((m, i) => (
-                          <div key={i} className={`agent-sub-agent-msg${m.reasoning_content ? " thinking" : ""}${m.name ? " tool" : ""}`}>
-                            {m.reasoning_content && (
-                              <div className="agent-sub-agent-thought">{m.reasoning_content}</div>
-                            )}
-                            {m.name && (
-                              <div className="agent-sub-agent-tool">
-                                <i className="codicon codicon-tools" /> {m.name.replace(/_/g, " ")}
-                              </div>
-                            )}
-                            {m.content && !m.name && m.role === "assistant" && (
-                              <div className="agent-sub-agent-text">{m.content}</div>
-                            )}
-                            {m.role === "user" && (
-                              <div className="agent-sub-agent-text agent-sub-agent-user">User: {m.content}</div>
-                            )}
-                            {m.role === "tool" && (
-                              <div className="agent-sub-agent-result">{m.content.slice(0, 200)}</div>
-                            )}
-                          </div>
-                        ))}
+                        {msg.subAgentMessages.map((m, i) => {
+                          const hasReasoning = !!m.reasoning_content;
+                          const hasToolName = !!m.name;
+                          const isToolCall = hasToolName;
+                          const roleClass = isToolCall ? "agent-msg-tool"
+                            : m.role === "tool" ? "agent-msg-tool"
+                            : m.role === "user" ? "agent-msg-user"
+                            : "agent-msg-assistant";
+                          return (
+                            <div key={i} className={`agent-sub-agent-msg agent-msg ${roleClass}${isToolCall ? " turn-tool" : ""}${hasReasoning ? " turn-reasoning" : ""}${m.role === "tool" ? " turn-result" : ""}${m.role === "user" ? " turn-user" : ""}${!isToolCall && m.role === "assistant" ? " turn-text" : ""}`}>
+                              {m.reasoning_content && (
+                                <div className="agent-sub-agent-thought">{m.reasoning_content}</div>
+                              )}
+                              {m.name && (
+                                <div className="agent-sub-agent-tool">
+                                  <i className="codicon codicon-tools" /> {m.name.replace(/_/g, " ")}
+                                </div>
+                              )}
+                              {m.content && !m.name && m.role === "assistant" && (
+                                <div className="agent-sub-agent-text">{m.content}</div>
+                              )}
+                              {m.role === "user" && (
+                                <div className="agent-sub-agent-text agent-sub-agent-user">User: {m.content}</div>
+                              )}
+                              {m.role === "tool" && (
+                                <div className="agent-sub-agent-result">{m.content.slice(0, 200)}</div>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                     )}
                   </div>
