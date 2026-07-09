@@ -1,7 +1,14 @@
 import fs from "fs";
 import path from "path";
+import { createHash } from "crypto";
 
 const BASE_URL = "https://api.deepseek.com/v1";
+
+function computeCacheContextId(systemContent: string | null | undefined): string | undefined {
+  if (!systemContent) return undefined;
+  const hash = createHash("sha1").update(systemContent).digest("hex").slice(0, 24);
+  return `ctx-${hash}-${systemContent.length}`;
+}
 
 // ── Embeddings ──
 // Used by the memory system for semantic search. Returns a Float32Array
@@ -195,7 +202,7 @@ export async function chatDeepSeekTool(
   opts?: { model?: string; apiKey: string },
 ): Promise<ToolCallResult> {
   const sysMsg = messages.find((m) => m.role === "system");
-  const cacheCtx = sysMsg?.content ? `ctx-${Date.now().toString(36)}-${sysMsg.content.length}-${sysMsg.content.slice(0, 40)}` : undefined;
+  const cacheCtx = computeCacheContextId(sysMsg?.content);
   logOutgoing("tool", messages as any[], cacheCtx);
 
   const res = await deepseekFetch(opts?.apiKey || "", {
@@ -294,7 +301,7 @@ export async function* chatDeepSeekToolStream(
 ): AsyncGenerator<StreamChunk> {
   // Compute cache context ID from the system message (prefix for DeepSeek's KV cache)
   const sysMsg = messages.find((m) => m.role === "system");
-  const cacheCtx = sysMsg?.content ? `ctx-${Date.now().toString(36)}-${sysMsg.content.length}-${sysMsg.content.slice(0, 40)}` : undefined;
+  const cacheCtx = computeCacheContextId(sysMsg?.content);
   logOutgoing("stream", messages as any[], cacheCtx);
 
   const res = await deepseekFetch(opts.apiKey, {

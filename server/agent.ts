@@ -3563,15 +3563,20 @@ const agentSessions = new Map<string, AgentState>();
 
 export function createAgentSession(sessionId: string, projectRoot: string, userMessage: string, context: string): AgentState {
   const prev = agentSessions.get(sessionId);
+  if (prev) {
+    prev.projectRoot = projectRoot;
+    prev.iteration = 0;
+    prev.latestSummary = undefined;
+    prev.pendingSubAgent = undefined;
+    prev.messages.push({ role: "user", content: userMessage });
+    agentSessions.set(sessionId, prev);
+    return prev;
+  }
+
   const state: AgentState = {
-    messages: [
-      { role: "user", content: userMessage },
-    ],
+    messages: [{ role: "user", content: userMessage }],
     iteration: 0,
     projectRoot,
-    // Preserve pending todos so the agent knows what's left from the previous turn
-    latestTodos: prev?.latestTodos?.filter((t) => t.status !== "completed" && t.status !== "cancelled"),
-    agentTerminalSessions: prev?.agentTerminalSessions,
   };
   agentSessions.set(sessionId, state);
   return state;

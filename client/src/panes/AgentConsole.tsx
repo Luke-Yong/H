@@ -67,6 +67,7 @@ interface FileChange {
 
 interface ChatThread {
   id: string;
+  sessionId?: string;
   title: string;
   messages: ConsoleMessage[];
   createdAt: number;
@@ -93,7 +94,13 @@ function storageKey(projectPath: string): string {
 function loadThreads(key: string): ChatThread[] {
   try {
     const raw = localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : [];
+    const parsed = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((t: any) => ({
+      ...t,
+      sessionId: typeof t?.sessionId === "string" && t.sessionId ? t.sessionId : String(t?.id || ""),
+      messages: Array.isArray(t?.messages) ? t.messages : [],
+    }));
   } catch { return []; }
 }
 function saveThreads(key: string, threads: ChatThread[]) {
@@ -519,7 +526,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
   const ensureThread = useCallback(() => {
     if (activeThreadId && threads.some((t) => t.id === activeThreadId)) return activeThreadId;
     const id = `thread-${Date.now()}`;
-    const t: ChatThread = { id, title: `Chat ${threads.length + 1}`, messages: [], createdAt: Date.now() };
+    const t: ChatThread = { id, sessionId: id, title: `Chat ${threads.length + 1}`, messages: [], createdAt: Date.now() };
     setThreads((prev) => [...prev, t]);
     setActiveThreadId(id);
     setMessages([]);
@@ -530,7 +537,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
 
   const newTask = useCallback(() => {
     const id = `thread-${Date.now()}`;
-    const t: ChatThread = { id, title: `Chat ${threads.length + 1}`, messages: [], createdAt: Date.now() };
+    const t: ChatThread = { id, sessionId: id, title: `Chat ${threads.length + 1}`, messages: [], createdAt: Date.now() };
     setThreads((prev) => [...prev, t]);
     setActiveThreadId(id);
     setMessages([]);
@@ -554,6 +561,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
   }, [threads]);
 
   const deleteThread = useCallback((id: string) => {
+    const sid = threads.find((t) => t.id === id)?.sessionId || id;
     setThreads((prev) => {
       const next = prev.filter((t) => t.id !== id);
       // Immediately flush to localStorage to prevent stale-data races
@@ -568,8 +576,8 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
       preRoundRef.current = [];
     }
     // Clear server-side agent session for this thread
-    fetch(`/api/chat/agent/sessions/${encodeURIComponent(id)}`, { method: "DELETE" }).catch(() => {});
-  }, [activeThreadId, threadKey]);
+    fetch(`/api/chat/agent/sessions/${encodeURIComponent(sid)}`, { method: "DELETE" }).catch(() => {});
+  }, [activeThreadId, threadKey, threads]);
 
   // Update thread title from first user message — use first sentence as concise summary
   const updateThreadTitle = useCallback((threadId: string, content: string) => {
@@ -825,7 +833,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
     }
   }, [refreshEditor, applyAgentFileChanges, getFsBasePath]);
 
-  const runAgent = useCallback(async (userMessage: string, signal: AbortSignal) => {
+  const runAgent = useCallback(async (threadId: string, userMessage: string, signal: AbortSignal) => {
     const consoleSnapshot = getConsoleContext?.() || "";
     // Append current terminal output if available (from running run_in_terminal commands)
     const termOut = agentTermOutputRef.current || "";
@@ -876,7 +884,8 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
     };
 
     // Start streaming session
-    let sessionId = "";
+    const knownSid = threads.find((t) => t.id === threadId)?.sessionId || threadId;
+    let sessionId = knownSid;
     let toolCallId = "";
     let isPermission = false;
     let agentDone = false;
@@ -886,9 +895,18 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
     const toolIds: string[] = []; // track tool messages within this round
 
     try {
-      await consumeSSE("/api/chat/agent/stream", { message: userMessage, context: fullContext, projectRoot: root, model: selectedModel, apiKey: apiKey || undefined }, async (evt) => {
+      await consumeSSE("/api/chat/agent/stream", { sessionId, message: userMessage, context: fullContext, projectRoot: root, model: selectedModel, apiKey: apiKey || undefined }, async (evt) => {
         if (signal.aborted) return false;
-        sessionId = evt.sessionId || sessionId;
+        if (evt.sessionId && evt.sessionId !== sessionId) {
+          sessionId = evt.sessionId;
+          setThreads((prev) => {
+            const idx = prev.findIndex((t) => t.id === threadId);
+            if (idx === -1) return prev;
+            const next = [...prev];
+            next[idx] = { ...next[idx], sessionId };
+            return next;
+          });
+        }
 
         if (evt.type === "thinking") {
           currentThought += (evt.text || "");
@@ -1003,6 +1021,13 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
           }
           currentThought = "";
           currentText = "";
+          const toolNameStr = String(evt.toolName || "");
+          if (toolNameStr === "task_complete") {
+            return true;
+          }
+          if (toolNameStr === "write_summary") {
+            return true;
+          }
           const id = nextId();
           toolIds.push(id);
           const isSubAgent = !!(evt as any).isSubAgent;
@@ -1042,6 +1067,23 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
         } else if (evt.type === "tool_end") {
           // Switch file changes from streaming to done and auto-apply to editor.
           const tn = evt.toolName;
+          if (tn === "task_complete") {
+            const tr = String(evt.toolResult || "");
+            if (tr && tr !== "OK") {
+              pushRaw(nextId(), { role: "system", content: tr });
+            }
+            return true;
+          }
+          if (tn === "write_summary") {
+            const tr = String(evt.toolResult || "");
+            const looksLikeSummary = /###\s*Changes\s*Made/i.test(tr) && /###\s*Verification/i.test(tr) && /###\s*Outcome/i.test(tr);
+            if (!looksLikeSummary) {
+              const id = nextId();
+              toolIds.push(id);
+              pushRaw(id, { role: "tool", toolName: tn, content: tr, state: undefined });
+            }
+            return true;
+          }
           if (tn === "write_file" || tn === "edit_file") {
             setMessages((prev) => {
               let changed = false;
@@ -1087,7 +1129,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
               }
             }
           }
-          const id = toolIds[toolIds.length - 1];
+          const id = (evt.toolCallId && toolCallMsgIdRef.current.get(evt.toolCallId)) || toolIds[toolIds.length - 1];
           const isTerminal = evt.toolName === "run_in_terminal";
           if (id) {
             setMessages((prev) => {
@@ -1836,7 +1878,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
 
     // Keep loading if a file tool (edit/write/delete) is waiting for Accept/Reject
     setLoading(deferredToolRef.current != null);
-  }, [getConsoleContext, executeBrowserAction, push, getFsBasePath, applyEditorFiles, onRefreshFs]);
+  }, [getConsoleContext, executeBrowserAction, push, getFsBasePath, applyEditorFiles, onRefreshFs, threads]);
 
   // helper: push a message with explicit id
   const pushRaw = useCallback((id: string, msg: Omit<ConsoleMessage, "id" | "when">) => {
@@ -1871,7 +1913,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
     push({ role: "user", content: msg });
 
     try {
-      await runAgent(msg, ctrl.signal);
+      await runAgent(tid, msg, ctrl.signal);
     } catch (err: any) {
       if (err?.name !== "AbortError") push({ role: "assistant", content: `Error: ${String(err)}` });
       setAgentStatus("completed");
@@ -1908,7 +1950,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
   const forkChat = useCallback(() => {
     const id = `thread-${Date.now()}`;
     const usage = effectiveUsage ?? undefined;
-    const t: ChatThread = { id, title: `Fork of ${activeThreadId || "chat"}`, messages: [...messages], createdAt: Date.now(), usage };
+    const t: ChatThread = { id, sessionId: id, title: `Fork of ${activeThreadId || "chat"}`, messages: [...messages], createdAt: Date.now(), usage };
     setThreads((prev) => [...prev, t]);
     setActiveThreadId(id);
     setAgentStatus("idle");

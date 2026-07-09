@@ -1456,31 +1456,68 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     return evalInPage(`
       (() => {
         const vw = window.innerWidth, vh = window.innerHeight;
+        const inViewport = (r) => !(r.width <= 0 || r.height <= 0 || r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw);
+        const posKey = (r) => {
+          const cx = r.left + r.width / 2;
+          const cy = r.top + r.height / 2;
+          const ry = cy / vh;
+          const rx = cx / vw;
+          const row = ry < 0.33 ? 'T' : (ry < 0.66 ? 'M' : 'B');
+          const col = rx < 0.33 ? 'L' : (rx < 0.66 ? 'C' : 'R');
+          return row + col;
+        };
+        const posLabel = (k) => {
+          if (k === 'TL') return 'Top-Left';
+          if (k === 'TC') return 'Top-Center';
+          if (k === 'TR') return 'Top-Right';
+          if (k === 'ML') return 'Middle-Left';
+          if (k === 'MC') return 'Middle-Center';
+          if (k === 'MR') return 'Middle-Right';
+          if (k === 'BL') return 'Bottom-Left';
+          if (k === 'BC') return 'Bottom-Center';
+          if (k === 'BR') return 'Bottom-Right';
+          return k;
+        };
+        const bucketOrder = ['TL','TC','TR','ML','MC','MR','BL','BC','BR'];
+
         const w = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
-        const els = []; let i = 0; let el;
+        const items = []; let domIdx = 0; let el;
         while ((el = w.nextNode())) {
-          const tag = el.tagName.toLowerCase();
           const r = el.getBoundingClientRect();
-          // Skip elements outside the viewport or with zero size
-          if (r.width <= 0 || r.height <= 0 || r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw) continue;
+          if (!inViewport(r)) { domIdx++; continue; }
+          items.push({ el, r, domIdx });
+          domIdx++;
+        }
+
+        items.sort((a, b) => {
+          const dy = a.r.top - b.r.top;
+          if (Math.abs(dy) > 0.5) return dy;
+          const dx = a.r.left - b.r.left;
+          if (Math.abs(dx) > 0.5) return dx;
+          return a.domIdx - b.domIdx;
+        });
+
+        const buckets = Object.create(null);
+        for (const k of bucketOrder) buckets[k] = [];
+
+        const lineFor = (el, r, i) => {
+          const tag = el.tagName.toLowerCase();
           const elDesc = [];
-          // Tag with id and class
           const id = el.id ? '#' + el.id : '';
           const cls = el.className && typeof el.className === 'string' && el.className.trim()
             ? '.' + el.className.trim().split(/\\s+/).slice(0, 2).join('.') : '';
           elDesc.push('<' + tag + id + cls + '>');
 
-          // Visible text (truncated)
-          const text = (el.firstChild && el.firstChild.nodeType === 3 
+          const text = (el.firstChild && el.firstChild.nodeType === 3
             ? el.firstChild.textContent : el.textContent || '').trim().slice(0, 60);
           if (text) elDesc.push('"' + text + '"');
 
-          // Coordinates
           const x = Math.round(r.left), y = Math.round(r.top);
           const rw = Math.round(r.width), rh = Math.round(r.height);
+          const pk = posKey(r);
+          elDesc.push('pos=' + pk);
           elDesc.push('(x:' + x + ' y:' + y + ' ' + rw + 'x' + rh + ')');
 
-          // Interaction hints
           if (tag === 'a' && el.href) elDesc.push('href="' + el.href.slice(0, 60) + '"');
           if (tag === 'button') elDesc.push(el.disabled ? 'disabled' : 'clickable');
           if (tag === 'input') {
@@ -1510,7 +1547,6 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
             if (el.src) elDesc.push('src="' + el.src.slice(0, 50) + '"');
           }
 
-          // ARIA attributes
           const role = el.getAttribute('role');
           if (role) elDesc.push('role=' + role);
           const ariaLabel = el.getAttribute('aria-label');
@@ -1520,11 +1556,9 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
           const ariaSelected = el.getAttribute('aria-selected');
           if (ariaSelected) elDesc.push('aria-selected=' + ariaSelected);
 
-          // tabindex
           const tabIdx = el.getAttribute('tabindex');
           if (tabIdx !== null) elDesc.push('tabindex=' + tabIdx);
 
-          // data-* attributes (common ones)
           for (let a = 0; a < el.attributes.length; a++) {
             const attr = el.attributes[a];
             if (attr.name.startsWith('data-')) {
@@ -1533,16 +1567,30 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
             }
           }
 
-          // Computed cursor hint (heuristic for clickable)
           try {
             const cs = window.getComputedStyle(el);
             if (cs.cursor === 'pointer') elDesc.push('cursor=pointer');
           } catch(_) {}
 
-          els.push('[' + i + '] ' + elDesc.join(' '));
-          i++;
+          return '[' + i + '] ' + elDesc.join(' ');
+        };
+
+        for (let i = 0; i < items.length; i++) {
+          const it = items[i];
+          const pk = posKey(it.r);
+          (buckets[pk] || (buckets[pk] = [])).push(lineFor(it.el, it.r, i));
         }
-        return 'viewport:' + vw + 'x' + vh + '\\n' + els.join('\\n');
+
+        const out = [];
+        out.push('viewport:' + vw + 'x' + vh);
+        out.push('order: top-to-bottom then left-to-right (pos buckets TL..BR)');
+        for (const k of bucketOrder) {
+          const arr = buckets[k];
+          if (!arr || arr.length === 0) continue;
+          out.push('--- ' + posLabel(k) + ' (' + arr.length + ') ---');
+          out.push(arr.join('\\n'));
+        }
+        return out.join('\\n');
       })()
     `);
   }, [evalInPage]);
@@ -1551,13 +1599,26 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     const result = await evalInPage(`
       (() => {
         const vw = window.innerWidth, vh = window.innerHeight;
+        const inViewport = (r) => !(r.width <= 0 || r.height <= 0 || r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw);
         const w = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
-        let i = 0; let el;
+        const items = []; let domIdx = 0; let el;
         while ((el = w.nextNode())) {
           const r = el.getBoundingClientRect();
-          if (r.width <= 0 || r.height <= 0 || r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw) continue;
-          if (i++ !== ${index}) continue;
-          const rect = el.getBoundingClientRect();
+          if (!inViewport(r)) { domIdx++; continue; }
+          items.push({ el, r, domIdx });
+          domIdx++;
+        }
+        items.sort((a, b) => {
+          const dy = a.r.top - b.r.top;
+          if (Math.abs(dy) > 0.5) return dy;
+          const dx = a.r.left - b.r.left;
+          if (Math.abs(dx) > 0.5) return dx;
+          return a.domIdx - b.domIdx;
+        });
+
+        const target = items[${index}];
+        if (!target || !target.el) return 'element not found at index ${index}';
+        const rect = target.el.getBoundingClientRect();
           const cx = rect.left + rect.width / 2;
           const cy = rect.top + rect.height / 2;
           // Constrain coords to viewport (avoid dispatching outside visible area)
@@ -1566,18 +1627,16 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
           const mouseOpts = { clientX: vx, clientY: vy, screenX: vx, screenY: vy, bubbles: true, cancelable: true, button: 0, buttons: 1, view: window };
           const ptrOpts = { clientX: vx, clientY: vy, screenX: vx, screenY: vy, bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', button: 0, buttons: 1, view: window };
           // Try focusing — works for native focusable elements
-          try { if (typeof el.focus === 'function') el.focus(); } catch(_) {}
+          try { if (typeof target.el.focus === 'function') target.el.focus(); } catch(_) {}
           // Dispatch full mouse event sequence with enhanced properties
-          el.dispatchEvent(new PointerEvent('pointerdown', ptrOpts));
-          el.dispatchEvent(new MouseEvent('mousedown', mouseOpts));
-          el.dispatchEvent(new PointerEvent('pointerup', ptrOpts));
-          el.dispatchEvent(new MouseEvent('mouseup', mouseOpts));
-          el.dispatchEvent(new MouseEvent('click', mouseOpts));
+          target.el.dispatchEvent(new PointerEvent('pointerdown', ptrOpts));
+          target.el.dispatchEvent(new MouseEvent('mousedown', mouseOpts));
+          target.el.dispatchEvent(new PointerEvent('pointerup', ptrOpts));
+          target.el.dispatchEvent(new MouseEvent('mouseup', mouseOpts));
+          target.el.dispatchEvent(new MouseEvent('click', mouseOpts));
           // Fallback: native click() for handlers that require isTrusted:true
-          try { el.click(); } catch(_) {}
-          return 'clicked <' + el.tagName.toLowerCase() + '> at index ${index}';
-        }
-        return 'element not found at index ${index}';
+          try { target.el.click(); } catch(_) {}
+          return 'clicked <' + target.el.tagName.toLowerCase() + '> at index ${index}';
       })()
     `);
     // If the click triggered a page navigation (e.g. clicking a link/button that changes URL),
@@ -1595,13 +1654,26 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     const result = await evalInPage(`
       (() => {
         const vw = window.innerWidth, vh = window.innerHeight;
+        const inViewport = (r) => !(r.width <= 0 || r.height <= 0 || r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw);
         const w = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
-        let i = 0; let el;
+        const items = []; let domIdx = 0; let el;
         while ((el = w.nextNode())) {
           const r = el.getBoundingClientRect();
-          if (r.width <= 0 || r.height <= 0 || r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw) continue;
-          if (i++ !== ${index}) continue;
-          const inp = el;
+          if (!inViewport(r)) { domIdx++; continue; }
+          items.push({ el, r, domIdx });
+          domIdx++;
+        }
+        items.sort((a, b) => {
+          const dy = a.r.top - b.r.top;
+          if (Math.abs(dy) > 0.5) return dy;
+          const dx = a.r.left - b.r.left;
+          if (Math.abs(dx) > 0.5) return dx;
+          return a.domIdx - b.domIdx;
+        });
+
+        const target = items[${index}];
+        if (!target || !target.el) return 'element not found at index ${index}';
+        const inp = target.el;
 
           // Click the element first — reactive frameworks (React/Vue) need real mouse events
           const rect = inp.getBoundingClientRect();
@@ -1649,8 +1721,6 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
           }
           inp.dispatchEvent(new Event('change', { bubbles: true }));
           return 'typed "' + ${JSON.stringify(text)} + '" into ' + inp.tagName.toLowerCase() + ' at index ${index}';
-        }
-        return 'element not found at index ${index}';
       })()
     `);
     await new Promise((r) => setTimeout(r, 300));
@@ -1666,7 +1736,6 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
         const vw = window.innerWidth, vh = window.innerHeight;
         lines.push('Viewport: ' + vw + 'x' + vh);
 
-        // Walk ALL elements via TreeWalker — indices match browser_get_dom exactly.
         const isInteractive = function(el) {
           const tag = el.tagName.toLowerCase();
           if (tag === 'a' || tag === 'button' || tag === 'input' || tag === 'select' || tag === 'textarea') return true;
@@ -1677,38 +1746,74 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
           return false;
         };
 
-        const w = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
-        const allEls = [];
-        const interactive = [];
-        let idx = 0;
-        let el;
-        while ((el = w.nextNode()) && idx < 500) {
-          const r = el.getBoundingClientRect();
-          if (r.width <= 0 || r.height <= 0 || r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw) continue;
+        const inViewport = (r) => !(r.width <= 0 || r.height <= 0 || r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw);
+        const posKey = (r) => {
+          const cx = r.left + r.width / 2;
+          const cy = r.top + r.height / 2;
+          const ry = cy / vh;
+          const rx = cx / vw;
+          const row = ry < 0.33 ? 'T' : (ry < 0.66 ? 'M' : 'B');
+          const col = rx < 0.33 ? 'L' : (rx < 0.66 ? 'C' : 'R');
+          return row + col;
+        };
+        const posLabel = (k) => {
+          if (k === 'TL') return 'Top-Left';
+          if (k === 'TC') return 'Top-Center';
+          if (k === 'TR') return 'Top-Right';
+          if (k === 'ML') return 'Middle-Left';
+          if (k === 'MC') return 'Middle-Center';
+          if (k === 'MR') return 'Middle-Right';
+          if (k === 'BL') return 'Bottom-Left';
+          if (k === 'BC') return 'Bottom-Center';
+          if (k === 'BR') return 'Bottom-Right';
+          return k;
+        };
+        const bucketOrder = ['TL','TC','TR','ML','MC','MR','BL','BC','BR'];
 
-          const tag = el.tagName.toLowerCase();
-          const id = el.id ? '#' + el.id : '';
+        const w = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+        const items = []; let domIdx = 0; let el;
+        while ((el = w.nextNode())) {
+          const r = el.getBoundingClientRect();
+          if (!inViewport(r)) { domIdx++; continue; }
+          items.push({ el, r, domIdx });
+          domIdx++;
+        }
+        items.sort((a, b) => {
+          const dy = a.r.top - b.r.top;
+          if (Math.abs(dy) > 0.5) return dy;
+          const dx = a.r.left - b.r.left;
+          if (Math.abs(dx) > 0.5) return dx;
+          return a.domIdx - b.domIdx;
+        });
+
+        const allBuckets = Object.create(null);
+        const interactiveBuckets = Object.create(null);
+        for (const k of bucketOrder) { allBuckets[k] = []; interactiveBuckets[k] = []; }
+
+        for (let idx = 0; idx < items.length && idx < 500; idx++) {
+          const it = items[idx];
+          const tag = it.el.tagName.toLowerCase();
+          const id = it.el.id ? '#' + it.el.id : '';
           let label = '';
           if (tag === 'a') {
-            label = (el.textContent || el.href || '').trim().slice(0, 50);
+            label = (it.el.textContent || it.el.href || '').trim().slice(0, 50);
           } else if (tag === 'button') {
-            label = (el.textContent || el.value || '').trim().slice(0, 50);
+            label = (it.el.textContent || it.el.value || '').trim().slice(0, 50);
           } else if (tag === 'input') {
-            const tp = el.type || 'text';
+            const tp = it.el.type || 'text';
             if (tp === 'submit' || tp === 'button') {
-              label = (el.value || '').trim().slice(0, 30);
+              label = (it.el.value || '').trim().slice(0, 30);
             } else {
-              label = (el.placeholder || el.value || el.name || '').trim().slice(0, 30);
+              label = (it.el.placeholder || it.el.value || it.el.name || '').trim().slice(0, 30);
             }
           } else if (tag === 'select') {
-            const selIdx = el.selectedIndex >= 0 ? el.selectedIndex : 0;
-            label = (el.options[selIdx]?.text || el.value || '').slice(0, 30);
+            const selIdx = it.el.selectedIndex >= 0 ? it.el.selectedIndex : 0;
+            label = (it.el.options[selIdx]?.text || it.el.value || '').slice(0, 30);
           } else if (tag === 'textarea') {
-            label = (el.placeholder || el.value || el.name || '').trim().slice(0, 30);
+            label = (it.el.placeholder || it.el.value || it.el.name || '').trim().slice(0, 30);
           } else {
-            label = (el.textContent || '').trim().slice(0, 60);
+            label = (it.el.textContent || '').trim().slice(0, 60);
           }
-          // Category markers
           const markers = [];
           if (['h1','h2','h3','h4','h5','h6'].includes(tag)) markers.push(tag.toUpperCase());
           if (tag === 'img') markers.push('IMG');
@@ -1716,22 +1821,37 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
           if (tag === 'label') markers.push('LABEL');
           const marker = markers.length ? ' [' + markers.join('/') + ']' : '';
 
-          const shortDesc = '[' + idx + '] <' + tag + id + '>' + marker + (label ? ' "' + label + '"' : '');
-          allEls.push(shortDesc);
-          if (isInteractive(el)) interactive.push(shortDesc);
-          idx++;
+          const pk = posKey(it.r);
+          const shortDesc = '[' + idx + '] <' + tag + id + '>' + ' pos=' + pk + marker + (label ? ' "' + label + '"' : '');
+          (allBuckets[pk] || (allBuckets[pk] = [])).push(shortDesc);
+          if (isInteractive(it.el)) (interactiveBuckets[pk] || (interactiveBuckets[pk] = [])).push(shortDesc);
         }
 
-        if (interactive.length > 0) {
-          lines.push('--- Interactive (' + interactive.length + ') ---');
-          lines.push(interactive.join('\\n'));
+        const flatten = (buckets) => {
+          const out = [];
+          let total = 0;
+          for (const k of bucketOrder) total += (buckets[k]?.length || 0);
+          for (const k of bucketOrder) {
+            const arr = buckets[k];
+            if (!arr || arr.length === 0) continue;
+            out.push('--- ' + posLabel(k) + ' (' + arr.length + ') ---');
+            out.push(arr.join('\\n'));
+          }
+          return { out, total };
+        };
+
+        const interactiveFlat = flatten(interactiveBuckets);
+        if (interactiveFlat.total > 0) {
+          lines.push('--- Interactive (' + interactiveFlat.total + ') ---');
+          lines.push(interactiveFlat.out.join('\\n'));
         }
-        // If total element count is manageable, show everything
-        if (allEls.length <= 200) {
-          lines.push('--- All Elements (' + allEls.length + ') ---');
-          lines.push(allEls.join('\\n'));
+
+        const allFlat = flatten(allBuckets);
+        if (allFlat.total <= 200) {
+          lines.push('--- All Elements (' + allFlat.total + ') ---');
+          lines.push(allFlat.out.join('\\n'));
         } else {
-          lines.push('--- All Elements: ' + allEls.length + ' (use browser_get_dom for full listing) ---');
+          lines.push('--- All Elements: ' + allFlat.total + ' (use browser_get_dom for full listing) ---');
         }
 
         // Error state: visible error text

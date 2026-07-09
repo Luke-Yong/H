@@ -65,13 +65,15 @@ app.post("/api/chat", async (req, res) => {
 import { createAgentSession, getAgentSession, addToolResult, addToolResultStream, deleteAgentSession, agentLoop, agentLoopStream, agentLoopStepByStep, runFsTool, storeCommandOutput, summarizeCommandResult, resumeSubAgent, type AgentState, type AgentResponse, type AgentSseEvent } from "./agent";
 
 app.post("/api/chat/agent", async (req, res) => {
-  const { message, context, projectRoot, apiKey, model } = req.body || {};
+  const { message, context, projectRoot, apiKey, model, sessionId: clientSessionId } = req.body || {};
   if (!message) return res.status(400).json({ error: "Missing message" });
 
   try {
     broadcast({ type: "log", data: `User (agent): ${message}` });
     const root = projectRoot || process.cwd();
-    const sessionId = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const sessionId = typeof clientSessionId === "string" && clientSessionId
+      ? clientSessionId
+      : `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const state = createAgentSession(sessionId, root, message, context || "");
 
     const result = await agentLoop(root, state, context || "", { model, apiKey });
@@ -179,14 +181,16 @@ app.post("/api/chat/agent/continue", async (req, res) => {
 // and may need to call /continue/stream when a browser tool is needed.
 
 app.post("/api/chat/agent/stream", async (req, res) => {
-  const { message, context, projectRoot, model, apiKey, thinking } = req.body || {};
+  const { message, context, projectRoot, model, apiKey, thinking, sessionId: clientSessionId } = req.body || {};
   const effectiveModel = model || "deepseek-chat";
   if (!message) return res.status(400).json({ error: "Missing message" });
 
   try {
     broadcast({ type: "log", data: `User (agent): ${message}` });
     const root = projectRoot || process.cwd();
-    const sessionId = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const sessionId = typeof clientSessionId === "string" && clientSessionId
+      ? clientSessionId
+      : `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const state = createAgentSession(sessionId, root, message, context || "");
 
     // SSE headers
@@ -224,14 +228,16 @@ app.post("/api/chat/agent/stream", async (req, res) => {
 // todo list and forces the agent through each step one at a time via sub-agents.
 
 app.post("/api/chat/agent/stream/stepbystep", async (req, res) => {
-  const { message, context, projectRoot, model, apiKey } = req.body || {};
+  const { message, context, projectRoot, model, apiKey, sessionId: clientSessionId } = req.body || {};
   const effectiveModel = model || "deepseek-chat";
   if (!message) return res.status(400).json({ error: "Missing message" });
 
   try {
     broadcast({ type: "log", data: `User (step-by-step): ${message}` });
     const root = projectRoot || process.cwd();
-    const sessionId = `agent-sbs-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const sessionId = typeof clientSessionId === "string" && clientSessionId
+      ? clientSessionId
+      : `agent-sbs-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const state = createAgentSession(sessionId, root, message, context || "");
 
     // SSE headers
