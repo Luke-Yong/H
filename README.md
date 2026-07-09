@@ -106,7 +106,7 @@ User types goal → AgentConsole
   → AgentConsole sends browser command to EditorPane's webview
   → WebView executes the action, returns result
   → AgentConsole calls POST /api/chat/agent/stream/continue (toolCallId, result)
-  → Loop continues until task_complete
+  → Loop continues until write_summary + task_complete
 ```
 
 ### Agent loop internals
@@ -132,7 +132,7 @@ The agent loop (`agentLoopStream` / `agentLoop` in `server/agent.ts`) orchestrat
 │     ├─ Push tool result message to state.messages            │
 │     └─ Continue to next tool (batch) or next iteration       │
 │                                                              │
-│  4. If no tool calls → task_complete or final text reply     │
+│  4. If no tool calls → final text reply (only when no work was performed), otherwise must write_summary + task_complete │
 │     → Push assistant text message → return phase: "done"     │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -164,8 +164,8 @@ Iteration 2: DeepSeek reads the result, decides to edit
   → state.messages.push({ role: "tool", content: "Wrote ...", tool_call_id: "call_2" })
 
 Iteration 3: DeepSeek is done
-  → state.messages.push({ role: "assistant", content: "Added login endpoint..." })
-  → Calls task_complete → agent returns phase: "done"
+  → Calls write_summary → stores final structured summary
+  → Calls task_complete → agent returns phase: "done" using the stored summary
 ```
 
 Each tool call is always a matched pair: an `assistant` message with `name` containing the tool_calls JSON, followed immediately by a `tool` message with the same `tool_call_id`. `buildOpenAiMessages()` enforces this pairing — unpaired tool calls get synthetic error responses before the request reaches DeepSeek.
@@ -500,13 +500,13 @@ Agent calls run_in_terminal
 | Tool | Description |
 |------|-------------|
 | `write_todos` | Create or update a structured task list to track progress. In step-by-step mode, this is the ONLY tool available during planning — the agent must create a complete plan before any execution begins. |
-| `task_complete` | Signal completion with a **structured summary** using the template: `### Changes Made`, `### Verification`, `### Outcome`. Vague summaries are **rejected**. After sub-agent delegation, **summary lock** blocks `task_complete` until the summary explicitly describes what each sub-agent accomplished — enforced server-side like the pending-todos check. |
-| `delegate_task` | Delegate a sub-task to a specialized sub-agent (browser, code-search, code-writer, researcher) that runs independently with its own context window |
-| `delegate_parallel` | Delegate multiple sub-tasks to run in parallel. Each sub-agent gets its own card with collapsible trace — results appear incrementally as each completes instead of waiting for all to finish |
+| `write_summary` | Write the final **structured summary** using the template: `### Changes Made`, `### Verification`, `### Outcome`. Vague summaries are **rejected**. If `write_todos` was used: the summary must also include a `### Todo Progress` section listing each item's final status. |
+| `task_complete` | Finalize the run. Has no parameters and is **rejected unless `write_summary` has been called**. Also rejected if any todo items are still pending/in_progress. |
+| `delegate_task` | Delegate a sub-task to a specialized sub-agent (browser, code-search, code-writer, researcher) that runs independently with its own context window. Sub-agents run sequentially — each must complete before the next starts. |
 
 ### Multi-Agent Delegation
 
-Harness supports **sub-agent delegation** — the main agent can spawn specialized sub-agents to handle complex sub-tasks in isolation. Each sub-agent gets its own context window, so its conversation history does not bloat the parent agent's context.
+Harness supports **sub-agent delegation** — the main agent can spawn specialized sub-agents to handle complex sub-tasks in isolation. Each sub-agent gets its own context window, so its conversation history does not bloat the parent agent's context. Sub-agents run **sequentially** — each must complete before the next starts, managing RAM usage.
 
 #### Architecture
 
@@ -514,19 +514,27 @@ Harness supports **sub-agent delegation** — the main agent can spawn specializ
 ┌──────────────────────────────────────────────┐
 │  Parent Agent (Orchestrator)                 │
 │  - Breaks down user request with write_todos │
-│  - Calls delegate_task / delegate_parallel   │
-│  - Synthesizes results, calls task_complete  │
-└──────┬──────────────┬────────────────────────┘
-       │              │
-       ▼              ▼
-┌──────────────┐  ┌──────────────┐
-│ Sub-Agent #1 │  │ Browser Agent│
-│ Isolated     │  │ Isolated     │
-│ AgentState   │  │ AgentState   │
-│ Own context  │  │ browser_*    │──► Paused ──► Renderer executes tool
-│ Own tools    │  │ tools only   │◄── Result  ◄── /continue resumes agent
-│ Result → sum │  │ Result → sum │
-└──────────────┘  └──────────────┘
+│  - Calls delegate_task for each sub-task     │
+│  - PAUSES while sub-agent runs               │
+│  - Resumes, synthesizes, writes summary      │
+│  - Calls task_complete                       │
+└──────┬───────────────────────────────────────┘
+       │  delegate_task starts sub-agent
+       │  Sub-agent tools stream LIVE to UI
+       │  (each with sub-agent color coding)
+       ▼
+┌──────────────────────────────────────────────┐
+│  Sub-Agent (isolated AgentState + context)   │
+│  ┌─ tool_start read_file ──► result         │
+│  ├─ tool_start edit_file  ──► result        │
+│  ├─ tool_start run_command ─► result        │
+│  └─ final plain-text report to parent        │
+│  Browser sub-agents pause for renderer       │
+│  results and resume via /continue            │
+└──────────────────────────────────────────────┘
+       │
+       ▼
+Parent resumes ← result pushed to parent's state.messages
 ```
 
 #### Agent Profiles
@@ -546,9 +554,12 @@ Harness supports **sub-agent delegation** — the main agent can spawn specializ
 | **Tool allowlisting** | Sub-agents receive only the tools their profile specifies (e.g. code-search can never write files) |
 | **Headless execution** | Code-search, code-writer, and researcher sub-agents run entirely server-side — no browser or terminal tools |
 | **Browser delegation** | Parent has read-only browser tools only (navigate, info, screenshot, get_dom, console, errors). All interactive actions (click, type, scroll, etc.) MUST go through the browser sub-agent via `delegate_task agent_type: "browser"` |
-| **Summary lock** | After delegation, `task_complete` is blocked until the summary explicitly describes what each sub-agent accomplished — enforced server-side (same as pending-todos check) |
+| **Live streaming** | Sub-agent tool calls stream live to the UI as colored tool cards in real-time. Parent appears paused during delegation. Sub-agent text events are filtered — only tool_start/tool_end cards are shown, preventing message pollution. |
 | **Result summarization** | Sub-agent results are compressed before returning to the parent, preserving context budget |
-| **Parallelism** | `delegate_parallel` runs multiple sub-agents concurrently via `Promise.all` |
+| **Parallelism** | Not supported — sub-agents run sequentially. Each must complete before the next starts, managing RAM usage. The agent should call `delegate_task` multiple times for independent sub-tasks. |
+| **Color coding** | Every tool card has a left-border color: blue (main agent), teal (browser), green (code-search), amber (code-writer), purple (researcher). Makes it easy to identify which agent executed each tool call. |
+| **Agent footer** | Shows "Completed" when the conversation finishes normally (SSE `done` event). Shows "Stopped" only on errors or a 5-minute safety timeout. The footer label corresponds strictly to SSE stream state — not app focus. |
+| **Background operation** | The SSE stream uses `fetch`-based streaming — operates independently of window focus. Agent conversations continue in background with no interruption when the app is minimized or behind other windows. |
 
 #### Usage
 
@@ -614,8 +625,7 @@ Agent: delegate_parallel tasks=[
 
 #### When to use
 
-- **`delegate_task`**: For a single complex sub-task that would take many turns (deep research, feature implementation, multi-file refactoring)
-- **`delegate_parallel`**: For multiple independent sub-tasks that don't depend on each other (parallel research + implementation, multiple unrelated fixes)
+- **`delegate_task`**: For complex sub-tasks that would take many turns (deep research, feature implementation, multi-file refactoring, browser testing). For multiple independent sub-tasks, call `delegate_task` sequentially — each completes before the next starts.
 
 ### IDE-Driven Step-by-Step Execution (Force Todo)
 
@@ -641,7 +651,7 @@ Phase 3: EXECUTE (per step)
     → Code-writer sub-agent spawned with ONLY this step's context
     → Sub-agent has full filesystem + run_command tools (max 50 iters)
     → Streaming tool_start/tool_end events shown in UI
-    → Sub-agent calls task_complete → SSE "step_end" event
+    → Sub-agent returns a final plain-text report → SSE "step_end" event
     → Step marked completed/failed, next step begins
   Previous step results are passed as context to subsequent steps
 
@@ -669,7 +679,7 @@ Phase 4: WRAP-UP
 
 #### Summary Lock
 
-Both default and step-by-step modes enforce **structured summaries** on `task_complete`. The server validates every summary against a required template:
+Harness enforces **structured summaries** on `write_summary`. The server validates every summary against a required template, and rejects `task_complete` unless `write_summary` has been called.
 
 ```
 ### Changes Made
@@ -680,7 +690,7 @@ Both default and step-by-step modes enforce **structured summaries** on `task_co
 - [concise description of what was accomplished]
 ```
 
-Summaries that are too short (< 30 chars), match thought-process patterns (e.g. "I did the task", "OK, completed"), or lack concrete details (no file references, actions, or results) are **rejected**. The agent receives the rejection as a tool error and must call `task_complete` again with a proper summary — the loop continues until a valid summary is provided.
+Summaries that are too short, match thought-process patterns (e.g. "I did the task", "OK, completed"), or lack concrete details (no file references, actions, or results) are **rejected**. The agent receives the rejection as a tool error and must call `write_summary` again with a proper summary.
 
 ### Persistent Memory
 

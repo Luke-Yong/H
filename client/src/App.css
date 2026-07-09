@@ -1461,16 +1461,17 @@ body.resizing iframe { pointer-events: none; }
   padding: 1px 6px; border-radius: 3px;
   background: rgba(0, 122, 204, 0.12); color: rgba(0, 122, 204, 0.9);
 }
-/* Sub-agent (delegate_task) card styling */
-.agent-tool-card-subagent {
-  border-left: 3px solid rgba(140, 100, 220, 0.6);
-}
-.agent-tool-card-subagent .agent-tool-card-name { color: rgba(200, 170, 255, 0.85); }
-/* Step sub-agent tool cards (teal theme to match sub-agent color coding) */
-.agent-tool-card-step-sub {
-  border-left: 3px solid rgba(58, 168, 159, 0.5);
-}
-.agent-tool-card-step-sub .agent-tool-card-name { color: rgba(130, 210, 200, 0.85); }
+/* ── Tool card agent color coding ── */
+.agent-tool-card-main { border-left: 3px solid rgba(0, 122, 204, 0.55); }
+.agent-tool-card-main .agent-tool-card-name { color: rgba(80, 180, 255, 0.85); }
+.agent-tool-card-browser { border-left: 3px solid rgba(58, 168, 159, 0.55); }
+.agent-tool-card-browser .agent-tool-card-name { color: rgba(92, 201, 193, 0.85); }
+.agent-tool-card-code-search { border-left: 3px solid rgba(106, 153, 85, 0.55); }
+.agent-tool-card-code-search .agent-tool-card-name { color: rgba(139, 201, 126, 0.85); }
+.agent-tool-card-code-writer { border-left: 3px solid rgba(226, 183, 20, 0.55); }
+.agent-tool-card-code-writer .agent-tool-card-name { color: rgba(240, 201, 41, 0.85); }
+.agent-tool-card-researcher { border-left: 3px solid rgba(197, 134, 192, 0.55); }
+.agent-tool-card-researcher .agent-tool-card-name { color: rgba(212, 160, 216, 0.85); }
 /* Sub-agent collapsible trace inside tool cards */
 .agent-sub-agent { margin: 4px 0; border: 1px solid rgba(140, 100, 220, 0.2); border-radius: 4px; overflow: hidden; }
 .agent-sub-agent-header {

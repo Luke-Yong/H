@@ -68,27 +68,41 @@ describe("agentLoop", () => {
       .mockResolvedValueOnce(mockResponse({
         toolCalls: [{ name: "write_file", args: { path: "hello.txt", content: "world" } }],
       }))
-      .mockResolvedValueOnce(mockResponse({ text: "File created!" }));
+      .mockResolvedValueOnce(mockResponse({ text: "File created!" }))
+      .mockResolvedValueOnce(mockResponse({
+        toolCalls: [{
+          name: "write_summary",
+          args: {
+            summary: "### Changes Made\n- hello.txt: wrote world\n### Verification\n- Verified file exists on disk\n### Outcome\n- File created!",
+          },
+        }, { name: "task_complete", args: {} }],
+      }));
 
     const state = createAgentSession("s2", tmpDir, "Create hello.txt", "");
     const result = await agentLoop(tmpDir, state, "", { apiKey: "sk-test" });
 
     expect(result.phase).toBe("done");
-    expect(result.reply).toBe("File created!");
+    expect(result.reply).toBe("### Changes Made\n- hello.txt: wrote world\n### Verification\n- Verified file exists on disk\n### Outcome\n- File created!");
     expect(fs.existsSync(path.join(tmpDir, "hello.txt"))).toBe(true);
     expect(fs.readFileSync(path.join(tmpDir, "hello.txt"), "utf-8")).toBe("world");
   });
 
   it("handles task_complete to end the loop immediately", async () => {
     (chatDeepSeekTool as any).mockResolvedValue(mockResponse({
-      toolCalls: [{ name: "task_complete", args: { summary: "All done, created 3 files." } }],
+      toolCalls: [
+        {
+          name: "write_summary",
+          args: { summary: "### Changes Made\n- (mock)\n### Verification\n- (mock)\n### Outcome\n- All done, created 3 files." },
+        },
+        { name: "task_complete", args: {} },
+      ],
     }));
 
     const state = createAgentSession("s3", tmpDir, "Do something", "");
     const result = await agentLoop(tmpDir, state, "", { apiKey: "sk-test" });
 
     expect(result.phase).toBe("done");
-    expect(result.reply).toBe("All done, created 3 files.");
+    expect(result.reply).toBe("### Changes Made\n- (mock)\n### Verification\n- (mock)\n### Outcome\n- All done, created 3 files.");
   });
 
   it("returns browser tool to renderer", async () => {
@@ -134,13 +148,21 @@ describe("agentLoop", () => {
       .mockResolvedValueOnce(mockResponse({
         toolCalls: [{ name: "write_file", args: { path: "b.txt", content: "B" } }],
       }))
-      .mockResolvedValueOnce(mockResponse({ text: "Done with both files." }));
+      .mockResolvedValueOnce(mockResponse({ text: "Done with both files." }))
+      .mockResolvedValueOnce(mockResponse({
+        toolCalls: [{
+          name: "write_summary",
+          args: {
+            summary: "### Changes Made\n- a.txt: wrote A\n- b.txt: wrote B\n### Verification\n- Verified both files exist on disk\n### Outcome\n- Done with both files.",
+          },
+        }, { name: "task_complete", args: {} }],
+      }));
 
     const state = createAgentSession("s7", tmpDir, "Create two files", "");
     const result = await agentLoop(tmpDir, state, "", { apiKey: "sk-test" });
 
     expect(result.phase).toBe("done");
-    expect(result.reply).toBe("Done with both files.");
+    expect(result.reply).toBe("### Changes Made\n- a.txt: wrote A\n- b.txt: wrote B\n### Verification\n- Verified both files exist on disk\n### Outcome\n- Done with both files.");
     expect(fs.existsSync(path.join(tmpDir, "a.txt"))).toBe(true);
     expect(fs.existsSync(path.join(tmpDir, "b.txt"))).toBe(true);
   });
@@ -231,17 +253,24 @@ describe("agentLoopStream", () => {
       };
     })());
 
-    // Second iteration (after tool execution): call task_complete
+    // Second iteration (after tool execution): write_summary then task_complete
     (chatDeepSeekToolStream as any).mockReturnValueOnce((async function* () {
       yield {
         type: "done" as const,
         finalText: null,
         reasoningContent: null,
-        toolCalls: [{
-          id: "call_done",
-          type: "function" as const,
-          function: { name: "task_complete", arguments: '{"summary":"File read."}' },
-        }],
+        toolCalls: [
+          {
+            id: "call_summary",
+            type: "function" as const,
+            function: { name: "write_summary", arguments: '{"summary":"### Changes Made\\n- Read test.txt\\n### Verification\\n- (mock)\\n### Outcome\\n- File read."}' },
+          },
+          {
+            id: "call_done",
+            type: "function" as const,
+            function: { name: "task_complete", arguments: '{}' },
+          },
+        ],
       };
     })());
 

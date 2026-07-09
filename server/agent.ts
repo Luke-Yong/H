@@ -52,6 +52,7 @@ export interface AgentState {
     subState: AgentState;
     config: SubAgentConfig;
     task: string;
+    agentType: string;
     /** The parent's delegate_task tool call ID — pushed to state only when sub-agent is done. */
     parentToolCallId: string;
     parentToolArgs: string;
@@ -65,8 +66,8 @@ export interface AgentState {
   agentTerminalSessions?: { sessionId: string; groupKey: string; command: string }[];
   /** Latest todo list from write_todos — used to detect incomplete tasks at task_complete. */
   latestTodos?: { id: string; text: string; status: string }[];
-  /** True after sub-agent delegation — requires a text summary before task_complete. */
-  needsSummary?: boolean;
+  /** Latest validated summary submitted via write_summary. Required before task_complete. */
+  latestSummary?: string;
 }
 
 // ── Step-by-Step Types ──
@@ -114,7 +115,7 @@ export const SUB_AGENT_PROFILES: Record<string, SubAgentConfig> = {
 - Use browser_scroll to reveal content below the fold.
 - Use browser_wait to wait for specific elements to appear on dynamic pages.
 - Use browser_console / browser_request_errors to check for errors.
-- After analyzing, call task_complete with a structured report: URL, title, key content, what you clicked/typed, results observed, any errors.`,
+- After analyzing, return a structured report in plain text: URL, title, key content, what you clicked/typed, results observed, any errors. Do NOT call task_complete or write_summary.`,
   },
   "code-search": {
     name: "Code Search Agent",
@@ -125,7 +126,7 @@ export const SUB_AGENT_PROFILES: Record<string, SubAgentConfig> = {
 - Never create, edit, or delete files.
 - Use read_file to inspect files, list_files to browse directories, search_files to find files by name, and grep to search file contents.
 - Return a concise report of what you found with exact file paths and line numbers.
-- Call task_complete with your findings as the summary when done.`,
+- Finish by returning your findings in plain text. Do NOT call task_complete or write_summary.`,
   },
   "code-writer": {
     name: "Code Writer Agent",
@@ -138,14 +139,14 @@ export const SUB_AGENT_PROFILES: Record<string, SubAgentConfig> = {
 - Prefer edit_file for targeted changes; use write_file only for new files.
 - After making changes, run the build/tests with run_command to verify.
 - Fix any errors before completing.
-- When done, call task_complete with a structured summary using this exact template:
+- When done, return a structured summary in plain text using this exact template:
 ### Changes Made
 - [file path]: [what was changed]
 ### Verification
 - [build/test/check result]
 ### Outcome
 - [concise description of what was accomplished]
-Do NOT write a thought process or narrative. Use the template.`,
+Do NOT call task_complete or write_summary.`,
   },
   "researcher": {
     name: "Research Agent",
@@ -158,7 +159,7 @@ Do NOT write a thought process or narrative. Use the template.`,
 - Use grep to find where functions, classes, or patterns are used.
 - Use run_command for short queries (git log, npm list, etc.) — but NEVER start servers.
 - Report findings with exact file paths, line numbers, and relevant code snippets.
-- Call task_complete with your research findings as the summary when done.`,
+- Finish by returning your research findings in plain text. Do NOT call task_complete or write_summary.`,
   },
 };
 
@@ -222,6 +223,8 @@ export interface AgentSseEvent {
   allStepResults?: { text: string; status: string; result: string }[];
   /** True when this tool_start/tool_end came from a step sub-agent (for frontend color coding). */
   isSubAgent?: boolean;
+  /** Agent marker for color coding: "main", "browser", "code-search", "code-writer", "researcher". */
+  agentMarker?: string;
 }
 
 // ── Tool registry ──
@@ -341,7 +344,8 @@ export const TOOLS: ToolDef[] = [
       "Kill a terminal session started with run_in_terminal. "
       + "If no index is provided, kills ALL agent-spawned terminals. "
       + "Use index=N to kill a specific terminal (0 = first one spawned, 1 = second, etc.). "
-      + "Use this to stop servers, free ports, or clean up before finishing.",
+      + "Agent-spawned terminals are tracked separately from user/IDE terminals — the count reported only includes agent terminals. "
+      + "Prefer kill_terminal without index to clean up everything before task_complete.",
     parameters: {
       type: "object",
       properties: {
@@ -475,23 +479,34 @@ export const TOOLS: ToolDef[] = [
     parameters: { type: "object", properties: {}, required: [] },
   },
   {
-    name: "task_complete",
+    name: "write_summary",
     description:
-      "Call this when you have finished. Provide a structured SUMMARY using this exact template:\n"
+      "Write the final structured summary for this task. This is REQUIRED before task_complete. Use this exact template:\n"
       + "### Changes Made\n"
       + "- [file path]: [what was changed]\n"
       + "### Verification\n"
       + "- [build/test/check result]\n"
       + "### Outcome\n"
       + "- [concise description of what was accomplished]\n\n"
+      + "If you created a todo list with write_todos, you MUST also include:\n"
+      + "### Todo Progress\n"
+      + "- [id]: [status] — [what was done for this item]\n"
+      + "(repeat for each todo item, listing its final status)\n\n"
       + "Do NOT write a thought process or narrative. Only the template.",
     parameters: {
       type: "object",
       properties: {
-        summary: { type: "string", description: "Structured summary using the template: ### Changes Made, ### Verification, ### Outcome." },
+        summary: { type: "string", description: "Structured summary using the required template." },
       },
       required: ["summary"],
     },
+  },
+  {
+    name: "task_complete",
+    description:
+      "Finalize the task. REQUIRED: call write_summary first, then call task_complete. "
+      + "task_complete has no parameters and will be rejected if write_summary has not been called.",
+    parameters: { type: "object", properties: {}, required: [] },
   },
   {
     name: "delegate_task",
@@ -506,8 +521,7 @@ export const TOOLS: ToolDef[] = [
       + "- 'code-search': find and read code, report findings (read-only, no edits)\n"
       + "- 'code-writer': implement changes, run builds, fix errors\n"
       + "- 'researcher': explore the codebase and answer questions\n"
-      + "Returns a summarized result. Call this multiple times for independent sub-tasks, "
-      + "or use delegate_parallel to run several at once.",
+      + "Returns a summarized result.",
     parameters: {
       type: "object",
       properties: {
@@ -515,35 +529,6 @@ export const TOOLS: ToolDef[] = [
         agent_type: { type: "string", enum: ["browser", "code-search", "code-writer", "researcher"], description: "Type of sub-agent to spawn." },
       },
       required: ["task", "agent_type"],
-    },
-  },
-  {
-    name: "delegate_parallel",
-    description:
-      "Delegate MULTIPLE sub-tasks to specialized sub-agents that run in parallel. "
-      + "Each sub-agent gets its own context window, so results are independent and don't interfere. "
-      + "Use this when you have several independent sub-tasks — for example, researching a codebase "
-      + "while also implementing a feature, or fixing multiple unrelated bugs at once. "
-      + "Available agent types per task: 'code-search', 'code-writer', 'researcher'. "
-      + "Returns combined results from all sub-agents. "
-      + "For a single sub-task, use delegate_task instead.",
-    parameters: {
-      type: "object",
-      properties: {
-        tasks: {
-          type: "array",
-          description: "List of sub-tasks to run in parallel.",
-          items: {
-            type: "object",
-            properties: {
-              task: { type: "string", description: "Description of what this sub-agent should do." },
-              agent_type: { type: "string", enum: ["browser", "code-search", "code-writer", "researcher"], description: "Type of sub-agent for this task." },
-            },
-            required: ["task", "agent_type"],
-          },
-        },
-      },
-      required: ["tasks"],
     },
   },
   {
@@ -1495,9 +1480,9 @@ You have access to tools that let you read/write files, run commands, interact w
 1. **Break the user's request into steps and use \`write_todos\` to plan.** Your first action MUST be to create a todo list. Each item must be a concrete, verifiable step.
 2. **Work through todos one at a time.** Focus ONLY on the current pending/in_progress item. Do not jump ahead or work on multiple items at once.
 3. **Update todos after EVERY step.** After completing a tool call that moves the current item forward, call \`write_todos\` again with the updated status. Mark the item \`completed\` if done, or keep it \`in_progress\`. This keeps the user informed of your progress.
-4. **ALL items must be \`completed\` or \`cancelled\` before you call \`task_complete\`.** \`write_todos\` is a tracking tool, NOT a terminal action — updating todos does not finish the task. You MUST continue to the next item.
+4. **ALL items must be \`completed\` or \`cancelled\` before you can finish.** \`write_todos\` is a tracking tool, NOT a terminal action — updating todos does not finish the task. You MUST continue to the next item.
 5. Use tools one at a time. After each tool call, read the result before deciding the next step.
-6. **When all items are done, call \`task_complete\` with a brief summary.** NEVER stop the conversation without calling \`task_complete\`. Writing todos alone does NOT finish the task.
+6. **When all items are done, call \`write_summary\` (structured template), then call \`task_complete\`.** NEVER stop the conversation without calling \`task_complete\`. Writing todos alone does NOT finish the task.
 7. If you encounter an error, explain what happened and suggest how to fix it.
 8. Keep responses concise — one sentence of reasoning, one tool call.
 9. Do NOT guess browser DOM indices — call \`browser_get_dom\` first.
@@ -1526,10 +1511,7 @@ const BROWSER_USAGE = `### Browser usage
 - Use \`browser_navigate\` to go to a URL, \`browser_info\` to check the current tab state.
 - Use \`browser_screenshot\` to capture page text, \`browser_get_dom\` to inspect indexed elements.
 - Use \`browser_console\` and \`browser_request_errors\` to check for errors or failed requests.
-- **All interactive browser actions** (clicking, typing, scrolling, selecting, pressing keys, uploading files) are ONLY available to the browser sub-agent. You do NOT have these tools — delegate via \`delegate_task agent_type: "browser"\`. The sub-agent returns a concise summary.
-
-### Summary requirement
-- After every sub-agent delegation (\`delegate_task\` or \`delegate_parallel\`), you MUST provide a brief summary of what the sub-agent(s) accomplished before making any further tool calls.`;
+- **All interactive browser actions** (clicking, typing, scrolling, selecting, pressing keys, uploading files) are ONLY available to the browser sub-agent. You do NOT have these tools — delegate via \`delegate_task agent_type: "browser"\`. The sub-agent returns a concise summary.`;
 
 const BUILD_FIX_LOOP = `### Build & fix loop
 CRITICAL: After making ANY code changes, follow this flow to catch and fix errors:
@@ -2038,6 +2020,17 @@ function isVagueSummary(summary: string): string | null {
   return null; // passes validation
 }
 
+function hasToolActivity(state: AgentState): boolean {
+  return state.messages.some((m) => m.role === "tool");
+}
+
+function buildTaskCompleteReminder(state: AgentState, scope: "agent" | "sub-agent"): string {
+  const todoRequirement = state.latestTodos && state.latestTodos.length > 0
+    ? ` Your summary must include a "### Todo Progress" section covering every todo item's final status.`
+    : "";
+  return `Do not end with a plain assistant message. You must call write_summary, then task_complete, to finish this ${scope}.${todoRequirement} If you already wrote a summary in normal text, call write_summary with that summary using the required structured format, then call task_complete.`;
+}
+
 // ── Todo completion guard: detect pending tasks at task_complete ──
 function getPendingTodos(state: AgentState): { id: string; text: string; status: string }[] | null {
   const todos = state.latestTodos;
@@ -2058,8 +2051,101 @@ type SubAgentResult =
   | { phase: "done"; success: boolean; summary: string; iterations: number; subState: AgentState }
   | { phase: "browser_tool"; toolName: string; toolCallId: string; params: Record<string, unknown>; subState: AgentState };
 
+type SubAgentStreamEvent = AgentSseEvent & { agentMarker?: string };
+
 function isBrowserTool(name: string): boolean {
   return BROWSER_TOOLS.has(name);
+}
+
+// Streaming sub-agent: yields tool_start/tool_end events for live UI.
+// Returns a SubAgentResult when complete (done or browser_tool pause).
+async function* runSubAgentStream(
+  parentState: AgentState,
+  task: string,
+  config: SubAgentConfig,
+  agentMarker: string,
+  modelOpts: { model?: string; apiKey: string },
+): AsyncGenerator<SubAgentStreamEvent, SubAgentResult, undefined> {
+  const maxIter = config.maxIterations || 15;
+
+  const subState: AgentState = {
+    messages: [{ role: "user", content: task }],
+    iteration: 0,
+    projectRoot: parentState.projectRoot,
+  };
+
+  const allowedSet = config.tools ? new Set(config.tools) : null;
+  const subTools = config.headless
+    ? TOOLS.filter((t) => (allowedSet ? allowedSet.has(t.name) : true) && !t.name.startsWith("browser_") && t.name !== "run_in_terminal" && t.name !== "task_complete" && t.name !== "write_summary")
+    : allowedSet ? TOOLS.filter((t) => allowedSet.has(t.name) && t.name !== "task_complete" && t.name !== "write_summary") : TOOLS.filter((t) => t.name !== "task_complete" && t.name !== "write_summary");
+
+  const systemPrompt = config.systemPrompt || "";
+  const rc = (reasoning: string | null | undefined) =>
+    reasoning ? { reasoning_content: reasoning } : {};
+  for (let iter = 0; iter < maxIter; iter++) {
+    subState.iteration++;
+    const openaiMessages = buildOpenAiMessagesForSubAgent(subState, systemPrompt);
+    const { text, toolCalls, reasoningContent } = await chatDeepSeekTool(openaiMessages, subTools, modelOpts);
+
+    if (!toolCalls || toolCalls.length === 0) {
+      const reply = text || "Done.";
+      subState.messages.push({ role: "assistant", content: reply, ...rc(reasoningContent) });
+      yield { type: "text", text: reply } as SubAgentStreamEvent;
+      const summary = summarizeSubAgentResult(reply, config.name);
+      return { phase: "done", success: true, summary, iterations: iter + 1, subState };
+    }
+
+    for (const tc of toolCalls) {
+      const fnName = tc.function.name;
+      const params = (() => { try { return JSON.parse(tc.function.arguments); } catch { return {}; } })();
+
+      // Browser tool — pause sub-agent and yield to parent renderer
+      if (isBrowserTool(fnName)) {
+        subState.messages.push({
+          role: "assistant",
+          content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]),
+          name: fnName,
+          ...rc(reasoningContent),
+        });
+        yield { type: "tool_start", toolName: fnName, toolParams: params, toolCallId: tc.id, agentMarker } as SubAgentStreamEvent;
+        return { phase: "browser_tool", toolName: fnName, toolCallId: tc.id, params, subState };
+      }
+
+      // Yield tool_start with agent marker
+      subState.messages.push({
+        role: "assistant",
+        content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]),
+        name: fnName,
+        ...rc(reasoningContent),
+      });
+      yield { type: "tool_start", toolName: fnName, toolParams: params, toolCallId: tc.id, agentMarker } as SubAgentStreamEvent;
+
+      const fsResult = await runFsTool(fnName, params, subState.projectRoot);
+      if (fsResult !== null) {
+        const stored = fnName === "run_command" ? summarizeCommandResult(fsResult, "Sub-agent command") : fsResult;
+        subState.messages.push({ role: "tool", content: stored, tool_call_id: tc.id });
+        yield { type: "tool_end", toolName: fnName, toolCallId: tc.id, toolResult: stored.slice(0, 2000), agentMarker, toolSandbox: fnName === "run_command" ? stored : undefined } as SubAgentStreamEvent;
+      } else if (fnName === "read_problems") {
+        const diag = await runReadProblems(subState.projectRoot);
+        subState.messages.push({ role: "tool", content: diag.summary, tool_call_id: tc.id });
+        yield { type: "tool_end", toolName: fnName, toolCallId: tc.id, toolResult: diag.summary, agentMarker } as SubAgentStreamEvent;
+      } else if (fnName === "task_complete") {
+        const notAllowed = `Tool "${fnName}" is not available to sub-agents. Return your final report as plain text instead.`;
+        subState.messages.push({ role: "tool", content: notAllowed, tool_call_id: tc.id });
+        yield { type: "tool_end", toolName: fnName, toolCallId: tc.id, toolResult: notAllowed, agentMarker } as SubAgentStreamEvent;
+        continue;
+      } else {
+        subState.messages.push({
+          role: "tool",
+          content: `Tool "${fnName}" is not available to sub-agents.`,
+          tool_call_id: tc.id,
+        });
+        yield { type: "tool_end", toolName: fnName, toolCallId: tc.id, toolResult: `Tool "${fnName}" is not available.`, agentMarker } as SubAgentStreamEvent;
+      }
+    }
+  }
+
+  return { phase: "done", success: false, summary: `Sub-agent reached max iterations (${maxIter}).`, iterations: maxIter, subState };
 }
 
 async function runSubAgent(
@@ -2078,8 +2164,8 @@ async function runSubAgent(
 
   const allowedSet = config.tools ? new Set(config.tools) : null;
   const subTools = config.headless
-    ? TOOLS.filter((t) => (allowedSet ? allowedSet.has(t.name) : true) && !t.name.startsWith("browser_") && t.name !== "run_in_terminal")
-    : allowedSet ? TOOLS.filter((t) => allowedSet.has(t.name)) : TOOLS;
+    ? TOOLS.filter((t) => (allowedSet ? allowedSet.has(t.name) : true) && !t.name.startsWith("browser_") && t.name !== "run_in_terminal" && t.name !== "task_complete" && t.name !== "write_summary")
+    : allowedSet ? TOOLS.filter((t) => allowedSet.has(t.name) && t.name !== "task_complete" && t.name !== "write_summary") : TOOLS.filter((t) => t.name !== "task_complete" && t.name !== "write_summary");
 
   const systemPrompt = config.systemPrompt || "";
   const rc = (reasoning: string | null | undefined) =>
@@ -2143,17 +2229,9 @@ async function runSubAgent(
         const diag = await runReadProblems(subState.projectRoot);
         subState.messages.push({ role: "tool", content: diag.summary, tool_call_id: tc.id });
       } else if (fnName === "task_complete") {
-        const summary = String(params.summary || "Task completed.");
-        const validationError = isVagueSummary(summary);
-        if (validationError) {
-          subState.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(reasoningContent) });
-          subState.messages.push({ role: "tool", content: validationError, tool_call_id: tc.id });
-          subState.messages.push({ role: "user", content: `Your task_complete summary was rejected: ${validationError}\nPlease call task_complete again with a proper structured summary.` });
-          continue;
-        }
-        subState.messages.push({ role: "tool", content: "OK", tool_call_id: tc.id });
-        const final = summarizeSubAgentResult(summary, config.name);
-        return { phase: "done", success: true, summary: final, iterations: iter + 1, subState };
+        const notAllowed = `Tool "${fnName}" is not available to sub-agents. Return your final report as plain text instead.`;
+        subState.messages.push({ role: "tool", content: notAllowed, tool_call_id: tc.id });
+        continue;
       } else {
         subState.messages.push({
           role: "tool",
@@ -2182,8 +2260,8 @@ export async function resumeSubAgent(
 
   const allowedSet = config.tools ? new Set(config.tools) : null;
   const subTools = config.headless
-    ? TOOLS.filter((t) => (allowedSet ? allowedSet.has(t.name) : true) && !t.name.startsWith("browser_") && t.name !== "run_in_terminal")
-    : allowedSet ? TOOLS.filter((t) => allowedSet.has(t.name)) : TOOLS;
+    ? TOOLS.filter((t) => (allowedSet ? allowedSet.has(t.name) : true) && !t.name.startsWith("browser_") && t.name !== "run_in_terminal" && t.name !== "task_complete" && t.name !== "write_summary")
+    : allowedSet ? TOOLS.filter((t) => allowedSet.has(t.name) && t.name !== "task_complete" && t.name !== "write_summary") : TOOLS.filter((t) => t.name !== "task_complete" && t.name !== "write_summary");
 
   const systemPrompt = config.systemPrompt || "";
   const rc = (reasoning: string | null | undefined) =>
@@ -2242,17 +2320,9 @@ export async function resumeSubAgent(
         const diag = await runReadProblems(subState.projectRoot);
         subState.messages.push({ role: "tool", content: diag.summary, tool_call_id: tc.id });
       } else if (fnName === "task_complete") {
-        const summary = String(params.summary || "Task completed.");
-        const validationError = isVagueSummary(summary);
-        if (validationError) {
-          subState.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(reasoningContent) });
-          subState.messages.push({ role: "tool", content: validationError, tool_call_id: tc.id });
-          subState.messages.push({ role: "user", content: `Your task_complete summary was rejected: ${validationError}\nPlease call task_complete again with a proper structured summary.` });
-          continue;
-        }
-        subState.messages.push({ role: "tool", content: "OK", tool_call_id: tc.id });
-        const final = summarizeSubAgentResult(summary, config.name);
-        return { phase: "done", success: true, summary: final, iterations: iter + 1, subState };
+        const notAllowed = `Tool "${fnName}" is not available to sub-agents. Return your final report as plain text instead.`;
+        subState.messages.push({ role: "tool", content: notAllowed, tool_call_id: tc.id });
+        continue;
       } else {
         subState.messages.push({ role: "tool", content: `Tool "${fnName}" is not available to sub-agents.`, tool_call_id: tc.id });
       }
@@ -2433,25 +2503,11 @@ async function* runStepSubAgent(
         ...(finalReasoning ? { reasoning_content: finalReasoning } : {}),
       });
 
-      // task_complete — validate summary before accepting
-      if (fnName === "task_complete") {
-        const summary = String(params.summary || "Task completed.");
-        const validationError = isVagueSummary(summary);
-        if (validationError) {
-          // Reject vague summary — agent must rewrite
-          subState.messages.push({ role: "tool", content: validationError, tool_call_id: tc.id });
-          subState.messages.push({ role: "user", content: `Your task_complete summary was rejected: ${validationError}\nPlease call task_complete again with a proper structured summary.` });
-          yield { type: "tool_end", toolName: fnName, toolResult: `REJECTED: ${validationError}` };
-          continue;
-        }
-        subState.messages.push({ role: "tool", content: "OK", tool_call_id: tc.id });
-        const final = summarizeSubAgentResult(summary, config.name);
-        yield { type: "tool_end", toolName: fnName, toolResult: final };
-        yield {
-          type: "text", text: summary,
-          stepComplete: { success: true, summary: final, iterations: iter + 1 },
-        } as StepSubAgentSseEvent;
-        return;
+      if (fnName === "task_complete" || fnName === "write_summary") {
+        const notAllowed = `Tool "${fnName}" is not available in step-by-step sub-agents. Return your final report as plain text instead.`;
+        subState.messages.push({ role: "tool", content: notAllowed, tool_call_id: tc.id });
+        yield { type: "tool_end", toolName: fnName, toolResult: notAllowed };
+        continue;
       }
 
       const fsResult = await runFsTool(fnName, params, subState.projectRoot);
@@ -2627,7 +2683,7 @@ export async function* agentLoopStepByStep(
             ? `\n\n### What's been done so far (previous steps):\n${allResults.map((r, i) => `Step ${i + 1}: ${r.text} → ${r.status === "completed" ? "COMPLETED" : "FAILED"}\n  Result: ${r.result.slice(0, 500)}`).join("\n\n")}`
             : "";
 
-          const stepTask = `## Overall Task\n${context}\n\n## Current Step (${stepIdx + 1}/${lockedTodos.length})\n${todo.text}${prevResults}\n\n### Instructions\nFocus ONLY on this step. Read relevant files, make the necessary changes, run verification commands if applicable, then call task_complete with a summary of what you did.`;
+          const stepTask = `## Overall Task\n${context}\n\n## Current Step (${stepIdx + 1}/${lockedTodos.length})\n${todo.text}${prevResults}\n\n### Instructions\nFocus ONLY on this step. Read relevant files, make the necessary changes, run verification commands if applicable, then return a concise plain-text report of what you did and the result. Do NOT call task_complete or write_summary.`;
 
           yield {
             type: "step_begin",
@@ -2644,9 +2700,10 @@ export async function* agentLoopStepByStep(
             // Run the step sub-agent with streaming
             for await (const stepEvent of runStepSubAgent(state, stepTask, stepConfig, { model: modelOpts?.model, apiKey })) {
               // Forward tool_start, tool_end, text, thinking events to the client.
-              // Tag tool events with isSubAgent so the frontend color-codes them.
+              // Tag tool events with agent marker for color coding.
+              const stepAgentType = todo.agentType || "code-writer";
               if (stepEvent.type === "tool_start" || stepEvent.type === "tool_end") {
-                yield { ...stepEvent, isSubAgent: true } as AgentSseEvent;
+                yield { ...stepEvent, isSubAgent: true, agentMarker: stepAgentType } as AgentSseEvent;
               } else if (stepEvent.type === "thinking" || stepEvent.type === "text") {
                 yield stepEvent;
               }
@@ -2790,16 +2847,38 @@ export async function agentLoop(
         continue;
       }
 
-      // task_complete — reject if needs summary or pending todos exist
-      if (fnName === "task_complete") {
-        if (state.needsSummary) {
-          const rejectMsg = "Cannot complete: your summary must explicitly describe what the sub-agent(s) accomplished. Include specific results from each delegated sub-agent in your task_complete summary, then call task_complete again.";
+      // write_summary — validate and store the final summary (required before task_complete)
+      if (fnName === "write_summary") {
+        const summary = String(params.summary || "");
+        if (state.latestTodos && state.latestTodos.length > 0) {
+          const hasTodoProgress = /###\s*Todo\s*Progress/i.test(summary);
+          if (!hasTodoProgress) {
+            const todoItems = state.latestTodos
+              .map((t: { id: string; text: string; status: string }) => `  ${t.id}: [${t.status}] ${t.text}`)
+              .join("\n");
+            const rejectMsg = `Your write_summary summary must include a "### Todo Progress" section listing each todo item's final status. Your current todos:\n${todoItems}\n\nCall write_summary again with the full template including ### Todo Progress.`;
+            state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc2(reasoningContent) });
+            state.messages.push({ role: "tool", content: rejectMsg, tool_call_id: tc.id });
+            state.messages.push({ role: "user", content: rejectMsg });
+            continue;
+          }
+        }
+        const validationError = isVagueSummary(summary);
+        if (validationError) {
           state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc2(reasoningContent) });
-          state.messages.push({ role: "tool", content: rejectMsg, tool_call_id: tc.id });
-          state.messages.push({ role: "user", content: rejectMsg });
-          state.needsSummary = false;
+          state.messages.push({ role: "tool", content: validationError, tool_call_id: tc.id });
+          state.messages.push({ role: "user", content: `Your write_summary summary was rejected: ${validationError}\nPlease call write_summary again with a proper structured summary.` });
           continue;
         }
+        state.latestSummary = summary;
+        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc2(reasoningContent) });
+        state.messages.push({ role: "tool", content: "OK", tool_call_id: tc.id });
+        executedTools.push({ name: fnName, result: "OK" });
+        continue;
+      }
+
+      // task_complete — reject if pending todos exist; also requires write_summary first
+      if (fnName === "task_complete") {
         const pending = getPendingTodos(state);
         if (pending) {
           const pendingList = pending.map((t) => `  [${t.status}] ${t.text}`).join("\n");
@@ -2809,17 +2888,16 @@ export async function agentLoop(
           state.messages.push({ role: "user", content: `Your task_complete was rejected because you still have pending tasks. Call write_todos to update them (mark as completed or cancelled), then call task_complete again.` });
           continue;
         }
-        const summary = String(params.summary || "Task completed.");
-        const validationError = isVagueSummary(summary);
-        if (validationError) {
+        if (!state.latestSummary) {
+          const rejectMsg = `Cannot complete: missing summary. Call write_summary first (with the structured template), then call task_complete.`;
           state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc2(reasoningContent) });
-          state.messages.push({ role: "tool", content: validationError, tool_call_id: tc.id });
-          state.messages.push({ role: "user", content: `Your task_complete summary was rejected: ${validationError}\nPlease call task_complete again with a proper structured summary.` });
+          state.messages.push({ role: "tool", content: rejectMsg, tool_call_id: tc.id });
+          state.messages.push({ role: "user", content: rejectMsg });
           continue;
         }
         state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc2(reasoningContent) });
         state.messages.push({ role: "tool", content: "OK", tool_call_id: tc.id });
-        return { phase: "done", reply: summary, messages: state.messages, executedTools };
+        return { phase: "done", reply: state.latestSummary, messages: state.messages, executedTools };
       }
 
       // kill_terminal: kill agent-spawned terminal sessions
@@ -2835,7 +2913,7 @@ export async function agentLoop(
             sessions.splice(requestedIndex, 1);
             resultMsg = `Killed terminal [${requestedIndex}]: ${s.command.slice(0, 80)}`;
           } else {
-            resultMsg = `No terminal at index ${requestedIndex}. Currently ${sessions.length} agent terminal${sessions.length !== 1 ? "s" : ""} (indices 0–${Math.max(0, sessions.length - 1)}).`;
+            resultMsg = `No agent terminal at index ${requestedIndex}. Only ${sessions.length} agent-spawned terminal${sessions.length !== 1 ? "s" : ""} exist (indices 0–${Math.max(0, sessions.length - 1)}). Use kill_terminal without an index to kill all.`;
           }
         } else {
           let killed = 0;
@@ -2857,13 +2935,15 @@ export async function agentLoop(
 
       // ── Sub-agent delegation ──
       if (fnName === "delegate_task") {
-        const cfg = SUB_AGENT_PROFILES[String(params.agent_type || "")] || SUB_AGENT_PROFILES["code-search"];
+        const agentType = String(params.agent_type || "code-search");
+        const cfg = SUB_AGENT_PROFILES[agentType] || SUB_AGENT_PROFILES["code-search"];
         const subResult = await runSubAgent(state, String(params.task || ""), cfg, { model: modelOpts?.model, apiKey: apiKey! });
         if (subResult.phase === "browser_tool") {
           state.pendingSubAgent = {
             subState: subResult.subState,
             config: cfg,
             task: String(params.task || ""),
+            agentType,
             parentToolCallId: tc.id,
             parentToolArgs: tc.function.arguments,
             parentReasoning: reasoningContent ?? undefined,
@@ -2876,45 +2956,6 @@ export async function agentLoop(
         state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc2(reasoningContent) });
         state.messages.push({ role: "tool", content: resultText, tool_call_id: tc.id });
         executedTools.push({ name: fnName, result: resultText.slice(0, 1000) });
-        state.needsSummary = true;
-        continue;
-      }
-
-      if (fnName === "delegate_parallel") {
-        const tasks = (params.tasks || []) as Array<{ task: string; agent_type: string }>;
-        // Launch all sub-agents in parallel, tracking which task each result came from.
-        const promises = tasks.map((t, idx) => {
-          const cfg = SUB_AGENT_PROFILES[t.agent_type] || SUB_AGENT_PROFILES["code-search"];
-          return runSubAgent(state, t.task, cfg, { model: modelOpts?.model, apiKey: apiKey! })
-            .then(result => ({ idx, task: t.task, agentType: t.agent_type, result, config: cfg }));
-        });
-        const results = await Promise.all(promises);
-        // Sort back to original task order
-        results.sort((a, b) => a.idx - b.idx);
-
-        // If any sub-agent yielded a browser tool, pause (first one wins)
-        const browserYield = results.find((r) => r.result.phase === "browser_tool");
-        if (browserYield && browserYield.result.phase === "browser_tool") {
-          state.pendingSubAgent = {
-            subState: browserYield.result.subState,
-            config: browserYield.config,
-            task: browserYield.task,
-            parentToolCallId: tc.id,
-            parentToolArgs: tc.function.arguments,
-            parentReasoning: reasoningContent ?? undefined,
-          };
-          browserTool = { name: browserYield.result.toolName, id: browserYield.result.toolCallId, params: browserYield.result.params };
-          browserBreakIdx = i;
-          break;
-        }
-        const combined = results
-          .map((r, i) => `[${i + 1}] ${r.config.name}: ${r.result.phase === "done" ? r.result.summary : "Interrupted"}`)
-          .join("\n");
-        const resultText = `${results.length} sub-agents completed.\n${combined}`;
-        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc2(reasoningContent) });
-        state.messages.push({ role: "tool", content: resultText, tool_call_id: tc.id });
-        executedTools.push({ name: fnName, result: resultText.slice(0, 1000) });
-        state.needsSummary = true;
         continue;
       }
 
@@ -2943,6 +2984,10 @@ export async function agentLoop(
   // No tool calls — final text reply.
   if (text) {
     state.messages.push({ role: "assistant", content: text, ...rc2(reasoningContent) });
+  }
+  if (hasToolActivity(state) || (state.latestTodos && state.latestTodos.length > 0)) {
+    state.messages.push({ role: "user", content: buildTaskCompleteReminder(state, "agent") });
+    return agentLoop(projectRoot, state, "", modelOpts);
   }
   return { phase: "done", reply: text || "Task completed.", messages: state.messages };
 }
@@ -3052,6 +3097,10 @@ export async function* agentLoopStream(
       const reply = finalText || "OK.";
       state.messages.push({ role: "assistant", content: reply, ...rc(finalReasoning) });
       yield { type: "text", text: reply };
+      if (hasToolActivity(state) || (state.latestTodos && state.latestTodos.length > 0)) {
+        state.messages.push({ role: "user", content: buildTaskCompleteReminder(state, "agent") });
+        continue;
+      }
       yield { type: "done", reply, usage: makeUsage(iter + 1) };
       return;
     }
@@ -3103,7 +3152,7 @@ export async function* agentLoopStream(
             killed = 1;
             resultMsg = `Killed terminal [${requestedIndex}]: ${s.command.slice(0, 80)}`;
           } else {
-            resultMsg = `No terminal at index ${requestedIndex}. Currently ${sessions.length} agent terminal${sessions.length !== 1 ? "s" : ""} (indices 0–${Math.max(0, sessions.length - 1)}).`;
+            resultMsg = `No agent terminal at index ${requestedIndex}. Only ${sessions.length} agent-spawned terminal${sessions.length !== 1 ? "s" : ""} exist (indices 0–${Math.max(0, sessions.length - 1)}). Use kill_terminal without an index to kill all.`;
           }
         } else {
           // Kill all
@@ -3285,17 +3334,47 @@ export async function* agentLoopStream(
         continue;
       }
 
-      // task_complete — reject if pending todos exist
-      if (fnName === "task_complete") {
-        if (state.needsSummary) {
-          const rejectMsg = "Cannot complete: your summary must explicitly describe what the sub-agent(s) accomplished. Include specific results from each delegated sub-agent in your task_complete summary, then call task_complete again.";
+      // write_summary — validate and store the final summary (required before task_complete)
+      if (fnName === "write_summary") {
+        yield { type: "tool_start", toolName: fnName, toolParams: params, toolCallId: tc.id };
+        const summary = String(params.summary || "");
+        if (state.latestTodos && state.latestTodos.length > 0) {
+          const hasTodoProgress = /###\s*Todo\s*Progress/i.test(summary);
+          if (!hasTodoProgress) {
+            const todoItems = state.latestTodos.map((t: { id: string; text: string; status: string }) => `  ${t.id}: [${t.status}] ${t.text}`).join("\n");
+            const rejectMsg = `Your write_summary summary must include a "### Todo Progress" section listing each todo item's final status. Your current todos:\n${todoItems}\n\nCall write_summary again with the full template including ### Todo Progress.`;
+            state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
+            state.messages.push({ role: "tool", content: rejectMsg, tool_call_id: tc.id });
+            state.messages.push({ role: "user", content: rejectMsg });
+            yield { type: "tool_end", toolName: fnName, toolCallId: tc.id, toolResult: rejectMsg };
+            continue;
+          }
+        }
+        const validationError = isVagueSummary(summary);
+        if (validationError) {
           state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
-          state.messages.push({ role: "tool", content: rejectMsg, tool_call_id: tc.id });
-          state.messages.push({ role: "user", content: rejectMsg });
-          state.needsSummary = false;
-          yield { type: "tool_end", toolName: fnName, toolResult: rejectMsg };
+          state.messages.push({ role: "tool", content: validationError, tool_call_id: tc.id });
+          state.messages.push({ role: "user", content: `Your write_summary summary was rejected: ${validationError}\nPlease call write_summary again with a proper structured summary.` });
+          yield { type: "tool_end", toolName: fnName, toolCallId: tc.id, toolResult: validationError };
           continue;
         }
+        state.latestSummary = summary;
+        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
+        state.messages.push({ role: "tool", content: "OK", tool_call_id: tc.id });
+        yield {
+          type: "tool_end",
+          toolName: fnName,
+          toolCallId: tc.id,
+          toolResult: summary.slice(0, 2000),
+          executedTools: [{ name: fnName, result: "OK" }],
+        };
+        executedTools.push({ name: fnName, result: "OK" });
+        continue;
+      }
+
+      // task_complete — reject if pending todos exist; also requires write_summary first
+      if (fnName === "task_complete") {
+        yield { type: "tool_start", toolName: fnName, toolParams: params, toolCallId: tc.id };
         const pending = getPendingTodos(state);
         if (pending) {
           const pendingList = pending.map((t) => `  [${t.status}] ${t.text}`).join("\n");
@@ -3303,59 +3382,85 @@ export async function* agentLoopStream(
           state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
           state.messages.push({ role: "tool", content: rejectMsg, tool_call_id: tc.id });
           state.messages.push({ role: "user", content: `Your task_complete was rejected because you still have pending tasks. Call write_todos to update them (mark as completed or cancelled), then call task_complete again.` });
-          yield { type: "tool_end", toolName: fnName, toolResult: rejectMsg };
+          yield { type: "tool_end", toolName: fnName, toolCallId: tc.id, toolResult: rejectMsg };
           continue;
         }
-        const summary = String(params.summary || "Task completed.");
-        const validationError = isVagueSummary(summary);
-        if (validationError) {
+        if (!state.latestSummary) {
+          const rejectMsg = `Cannot complete: missing summary. Call write_summary first (with the structured template), then call task_complete.`;
           state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
-          state.messages.push({ role: "tool", content: validationError, tool_call_id: tc.id });
-          state.messages.push({ role: "user", content: `Your task_complete summary was rejected: ${validationError}\nPlease call task_complete again with a proper structured summary.` });
-          yield { type: "tool_end", toolName: fnName, toolResult: validationError };
+          state.messages.push({ role: "tool", content: rejectMsg, tool_call_id: tc.id });
+          state.messages.push({ role: "user", content: rejectMsg });
+          yield { type: "tool_end", toolName: fnName, toolCallId: tc.id, toolResult: rejectMsg };
           continue;
         }
         state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
         state.messages.push({ role: "tool", content: "OK", tool_call_id: tc.id });
-        yield { type: "done", reply: summary, usage: makeUsage(iter + 1) };
+        yield { type: "tool_end", toolName: fnName, toolCallId: tc.id, toolResult: "OK" };
+        yield { type: "done", reply: state.latestSummary, usage: makeUsage(iter + 1) };
         return;
       }
 
-      // ── Sub-agent delegation (streaming) ──
+      // ── Sub-agent delegation (streaming — live tool cards) ──
       if (fnName === "delegate_task") {
-        yield { type: "tool_start", toolName: fnName, toolParams: params };
-        const cfg = SUB_AGENT_PROFILES[String(params.agent_type || "")] || SUB_AGENT_PROFILES["code-search"];
-        const subResult = await runSubAgent(state, String(params.task || ""), cfg, { model: modelOpts?.model, apiKey: apiKey! });
-        if (subResult.phase === "browser_tool") {
-          state.pendingSubAgent = {
-          subState: subResult.subState,
-          config: cfg,
-          task: String(params.task || ""),
-          parentToolCallId: tc.id,
-          parentToolArgs: tc.function.arguments,
-          parentReasoning: finalReasoning ?? undefined,
-        };
-        yield {
-          type: "browser_tool",
-          toolName: subResult.toolName,
-          toolParams: subResult.params,
-          toolCallId: subResult.toolCallId,
-          sessionId,
-          executedTools,
-          subAgentParentToolCallId: tc.id,
-        };
-        return;
+        const agentType = String(params.agent_type || "code-search");
+        const cfg = SUB_AGENT_PROFILES[agentType] || SUB_AGENT_PROFILES["code-search"];
+        yield { type: "tool_start", toolName: fnName, toolParams: params, toolCallId: tc.id, agentMarker: agentType };
+        
+        // Run sub-agent with live streaming — each tool call yields a tool_start/tool_end
+        const streamResult = runSubAgentStream(state, String(params.task || ""), cfg, agentType, { model: modelOpts?.model, apiKey: apiKey! });
+        
+        let subResult: SubAgentResult;
+        // Forward all sub-agent events to the frontend
+        while (true) {
+          const { value, done } = await streamResult.next();
+          if (done) {
+            subResult = value as SubAgentResult;
+            break;
+          }
+          // Forward sub-agent tool events — agentMarker is already set.
+          // Skip text events from sub-agents to avoid polluting the parent's message flow.
+          if (value.type === "tool_start" || value.type === "tool_end") {
+            yield value;
+          } else if (value.type === "browser_tool") {
+            // browser_tool from sub-agent: treat same as parent browser_tool
+            yield value;
+          }
         }
-        const resultText = `[${cfg.name}] Completed in ${subResult.iterations} turns.\n${subResult.summary}`;
+        
+        if (subResult!.phase === "browser_tool") {
+          state.pendingSubAgent = {
+            subState: subResult!.subState,
+            config: cfg,
+            task: String(params.task || ""),
+            agentType,
+            parentToolCallId: tc.id,
+            parentToolArgs: tc.function.arguments,
+            parentReasoning: finalReasoning ?? undefined,
+          };
+          yield {
+            type: "browser_tool",
+            toolName: subResult!.toolName,
+            toolParams: subResult!.params,
+            toolCallId: subResult!.toolCallId,
+            sessionId,
+            executedTools,
+            subAgentParentToolCallId: tc.id,
+            agentMarker: agentType,
+          };
+          return;
+        }
+        const resultText = `[${cfg.name}] Completed in ${subResult!.iterations} turns.\n${subResult!.summary}`;
         state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
         state.messages.push({ role: "tool", content: resultText, tool_call_id: tc.id });
         yield {
           type: "tool_end",
           toolName: fnName,
+          toolCallId: tc.id,
           toolResult: resultText.slice(0, 2000),
+          agentMarker: agentType,
           executedTools: [{ name: fnName, result: resultText.slice(0, 500) }],
           subAgentName: cfg.name,
-          subAgentMessages: subResult.subState.messages.map((m: AgentMessage) => ({
+          subAgentMessages: subResult!.subState.messages.map((m: AgentMessage) => ({
             role: m.role,
             content: m.content || "",
             name: m.name,
@@ -3363,81 +3468,6 @@ export async function* agentLoopStream(
           })),
         };
         executedTools.push({ name: fnName, result: resultText.slice(0, 1000) });
-        state.needsSummary = true;
-        continue;
-      }
-
-      if (fnName === "delegate_parallel") {
-        const tasks = (params.tasks || []) as Array<{ task: string; agent_type: string }>;
-
-        // Launch all sub-agents in parallel.
-        const promises = tasks.map((t, idx) => {
-          const cfg = SUB_AGENT_PROFILES[t.agent_type] || SUB_AGENT_PROFILES["code-search"];
-          return runSubAgent(state, t.task, cfg, { model: modelOpts?.model, apiKey: apiKey! })
-            .then(result => ({ idx, task: t.task, agentType: t.agent_type, result, config: cfg }));
-        });
-
-        // Yield individual sub-agent cards as each completes.
-        const results: { idx: number; task: string; agentType: string; result: SubAgentResult; config: SubAgentConfig }[] = [];
-        for (const p of promises) {
-          const r = await p;
-          results.push(r);
-
-          if (r.result.phase === "done") {
-            const resultText = `[${r.config.name}] Completed in ${r.result.iterations} turns.\n${r.result.summary}`;
-            yield {
-              type: "tool_start",
-              toolName: "delegate_task",
-              toolParams: { task: r.task.slice(0, 100), agent_type: r.agentType },
-            };
-            yield {
-              type: "tool_end",
-              toolName: "delegate_task",
-              toolResult: resultText.slice(0, 2000),
-              subAgentName: r.config.name,
-              subAgentMessages: r.result.subState.messages.map((m: AgentMessage) => ({
-                role: m.role,
-                content: m.content || "",
-                name: m.name,
-                reasoning_content: m.reasoning_content,
-              })),
-            };
-          } else {
-            yield { type: "text", text: `[${r.config.name}] Needs browser interaction — pausing.` };
-          }
-        }
-
-        // Sort back to original task order
-        results.sort((a, b) => a.idx - b.idx);
-
-        const browserYield = results.find((r) => r.result.phase === "browser_tool");
-        if (browserYield && browserYield.result.phase === "browser_tool") {
-          state.pendingSubAgent = {
-            subState: browserYield.result.subState,
-            config: browserYield.config,
-            task: browserYield.task,
-            parentToolCallId: tc.id,
-            parentToolArgs: tc.function.arguments,
-            parentReasoning: finalReasoning ?? undefined,
-          };
-          yield {
-            type: "browser_tool",
-            toolName: browserYield.result.toolName,
-            toolParams: browserYield.result.params,
-            toolCallId: browserYield.result.toolCallId,
-            sessionId,
-            executedTools,
-          };
-          return;
-        }
-        const combined = results
-          .map((r, i) => `[${i + 1}] ${r.config.name}: ${r.result.phase === "done" ? r.result.summary : "Interrupted"}`)
-          .join("\n");
-        const resultText = `${results.length} sub-agents completed.\n${combined}`;
-        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
-        state.messages.push({ role: "tool", content: resultText, tool_call_id: tc.id });
-        executedTools.push({ name: fnName, result: resultText.slice(0, 1000) });
-        state.needsSummary = true;
         continue;
       }
 

@@ -71,8 +71,9 @@ describe("Tool definitions - Schema validation", () => {
     expect(names).toContain("browser_navigate");
     expect(names).toContain("browser_screenshot");
     expect(names).toContain("browser_get_dom");
-    expect(names).toContain("browser_click");
-    expect(names).toContain("browser_type");
+    expect(names).toContain("browser_console");
+    expect(names).toContain("browser_request_errors");
+    expect(names).toContain("browser_info");
 
     // Diagnostics
     expect(names).toContain("read_problems");
@@ -80,6 +81,7 @@ describe("Tool definitions - Schema validation", () => {
 
     // Control
     expect(names).toContain("write_todos");
+    expect(names).toContain("write_summary");
     expect(names).toContain("task_complete");
   });
 });

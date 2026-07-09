@@ -302,6 +302,9 @@ export function killSession(groupKey: string, sessionId: string) {
     } else {
       s.proc?.kill();
     }
+    if (s.ws.readyState === WebSocket.OPEN) {
+      s.ws.send(`term:exit:${sessionId}:-1`);
+    }
   }
   removeSession(groupKey, sessionId);
 }

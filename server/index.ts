@@ -307,6 +307,8 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
           toolCallId: subResult.toolCallId,
           toolParams: subResult.params,
           subAgentParentToolCallId: psa.parentToolCallId,
+          agentMarker: psa.agentType,
+          isSubAgent: true,
           sessionId,
         })}\n\n`);
         res.end();

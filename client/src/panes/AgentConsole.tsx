@@ -9,6 +9,7 @@ interface ConsoleMessage {
   role: "user" | "assistant" | "tool" | "system";
   content: string;
   when: number;
+  toolCallId?: string;
   toolName?: string;
   toolParams?: Record<string, unknown>;
   thought?: string;
@@ -31,6 +32,8 @@ interface ConsoleMessage {
   subAgentMessages?: { role: string; content: string; name?: string; reasoning_content?: string }[];
   /** Sub-agent display name. */
   subAgentName?: string;
+  /** Agent marker for color coding: "main", "browser", "code-search", "code-writer", "researcher". */
+  agentMarker?: string;
 }
 
 interface TodoItem {
@@ -176,6 +179,9 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
   const agentTermOutputRef = useRef<string>("");
   // Track the local message ID of the most recent delegate_task tool card
   const delegateTaskCardIdRef = useRef<string | null>(null);
+  const toolCallMsgIdRef = useRef<Map<string, string>>(new Map());
+  const activeDelegationMarkerRef = useRef<string | null>(null);
+  const activeDelegationDepthRef = useRef(0);
   // Deferred destructive file tool: after file auto-executes, diff is shown. User must Accept/Reject before agent continues.
   const deferredToolRef = useRef<{ sessionId: string; toolCallId: string; filePath: string; name: string; originalContent: string | null } | null>(null);
   const continueDeferredRef = useRef<((accepted: boolean, sessionId: string, toolCallId: string) => Promise<void>) | null>(null);
@@ -695,11 +701,11 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
     }
   }, [messages]);
 
-  // Safety: if loading is stuck true for 30 s with no new messages, force it off
-  // so the footer can appear (covers server-side errors that don't send done).
+  // Safety: if loading is stuck for 5 min with no new messages, force it off.
+  // Sub-agents (especially browser with 100 iterations) can run for minutes.
   useEffect(() => {
     if (!loading) return;
-    const timer = setTimeout(() => { setLoading(false); setAgentStatus("stopped"); }, 30_000);
+    const timer = setTimeout(() => { setLoading(false); setAgentStatus("stopped"); }, 300_000);
     return () => clearTimeout(timer);
   }, [loading, messages.length]);
 
@@ -792,7 +798,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
   }, []);
 
   // ── Streaming agent loop ──
-  const streamToolRef = useRef<Map<string, { name: string; params: Record<string, unknown> }>>(new Map());
+  const streamToolRef = useRef<Map<string, { name: string; params: Record<string, unknown>; agentMarker?: string }>>(new Map());
   const fileChangesRef = useRef<FileChange[]>([]);
   const pendingFileChangesRef = useRef<FileChange[]>([]); // survives tool_start clear → used in tool_end
   const todosRef = useRef<TodoItem[]>([]);
@@ -829,6 +835,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
     const root = getFsBasePath?.() || "";
     agentDoneRef.current = false;
     streamToolRef.current = new Map();
+    toolCallMsgIdRef.current = new Map();
     fileChangesRef.current = [];
     pendingFileChangesRef.current = [];
     todosRef.current = [];
@@ -998,7 +1005,9 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
           currentText = "";
           const id = nextId();
           toolIds.push(id);
-          streamToolRef.current.set(id, { name: evt.toolName, params: evt.toolParams || {} });
+          const isSubAgent = !!(evt as any).isSubAgent;
+          const marker = (evt as any).agentMarker || activeDelegationMarkerRef.current || (isSubAgent ? "code-writer" : "main");
+          streamToolRef.current.set(id, { name: evt.toolName, params: evt.toolParams || {}, agentMarker: marker });
           // Create the card immediately — command line will be visible right away.
           // Open file in Monaco for file tools (close tab for delete to release handle)
           const FILE_EDIT_TOOLS = ["write_file", "edit_file", "delete_file", "rename_file"];
@@ -1015,16 +1024,19 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
             }
           }
           flushSync(() => {
-            const isSubAgent = !!(evt as any).isSubAgent;
             pushRaw(id, {
-              role: "tool", content: "", toolName: evt.toolName, toolParams: evt.toolParams,
+              role: "tool", content: "", toolName: evt.toolName, toolParams: evt.toolParams, toolCallId: evt.toolCallId,
               state: "waiting",
               sandboxOutput: evt.toolName === "run_command" ? "" : undefined,
               tokenCount: fcTokenSaved as number | undefined,
+              agentMarker: marker,
               ...(isSubAgent ? { subAgentName: "Sub-agent" } : {}),
             });
+            if (evt.toolCallId) toolCallMsgIdRef.current.set(evt.toolCallId, id);
             if (evt.toolName === "delegate_task") {
               delegateTaskCardIdRef.current = id;
+              activeDelegationDepthRef.current += 1;
+              activeDelegationMarkerRef.current = marker;
             }
             });
         } else if (evt.type === "tool_end") {
@@ -1093,6 +1105,11 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
               }
               return next;
             });
+          }
+          if (evt.toolName === "delegate_task") {
+            activeDelegationDepthRef.current = Math.max(0, activeDelegationDepthRef.current - 1);
+            if (activeDelegationDepthRef.current === 0) activeDelegationMarkerRef.current = null;
+            delegateTaskCardIdRef.current = null;
           }
           // Bridge: show "Thinking..." between tools so the state indicator never vanishes
           if (!assistantMsgId && !isTerminal) {
@@ -1174,12 +1191,14 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
           currentText = "";
           // Reuse the existing tool card from tool_start if this tool was already tracked
           const tn = evt.toolName || "";
-          const existingId = toolIds.length > 0 ? toolIds[toolIds.length - 1] : null;
+          const existingId = (evt.toolCallId && toolCallMsgIdRef.current.get(evt.toolCallId)) || (toolIds.length > 0 ? toolIds[toolIds.length - 1] : null);
           const reuseExisting = existingId && streamToolRef.current.get(existingId)?.name === tn;
           const id = reuseExisting ? existingId : nextId();
           if (!reuseExisting) toolIds.push(id);
-          streamToolRef.current.set(id, { name: tn, params: evt.toolParams || {} });
-          pushRaw(id, { role: "tool", content: "", toolName: tn, toolParams: evt.toolParams, state: "waiting" });
+          const marker = (evt as any).agentMarker || (reuseExisting ? streamToolRef.current.get(id)?.agentMarker : undefined) || activeDelegationMarkerRef.current || "main";
+          streamToolRef.current.set(id, { name: tn, params: evt.toolParams || {}, agentMarker: marker });
+          pushRaw(id, { role: "tool", content: "", toolName: tn, toolParams: evt.toolParams, toolCallId: evt.toolCallId, state: "waiting", agentMarker: marker });
+          if (evt.toolCallId) toolCallMsgIdRef.current.set(evt.toolCallId, id);
           return false; // stop consuming this SSE stream
         } else if (evt.type === "done") {
           if (assistantMsgId) {
@@ -1303,7 +1322,9 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
           currentText = "";
           const id = nextId();
           toolIds.push(id);
-          streamToolRef.current.set(id, { name: tn, params: evt.toolParams || {} });
+          const isSubAgent2 = !!(evt as any).isSubAgent;
+          const marker2 = (evt as any).agentMarker || activeDelegationMarkerRef.current || (isSubAgent2 ? "code-writer" : "main");
+          streamToolRef.current.set(id, { name: tn, params: evt.toolParams || {}, agentMarker: marker2 });
           // Look up token count from the file-change just flushed above
           const fp = String(evt.toolParams?.path || evt.toolParams?.oldPath || "");
           const fcTokenCount = fp ? fcTokenByPathRef.current.get(fp) : undefined;
@@ -1321,8 +1342,8 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
               openEditorFile?.(p);
             }
           }
-          const isSubAgent2 = !!(evt as any).isSubAgent;
-          pushRaw(id, { role: "tool", content: "", toolName: tn, toolParams: evt.toolParams, state: "waiting", sandboxOutput: tn === "run_command" ? "" : undefined, tokenCount: fcTokenCount, ...(isSubAgent2 ? { subAgentName: "Sub-agent" } : {}) });
+           pushRaw(id, { role: "tool", content: "", toolName: tn, toolParams: evt.toolParams, toolCallId: evt.toolCallId, state: "waiting", sandboxOutput: tn === "run_command" ? "" : undefined, tokenCount: fcTokenCount, agentMarker: marker2, ...(isSubAgent2 ? { subAgentName: "Sub-agent" } : {}) });
+          if (evt.toolCallId) toolCallMsgIdRef.current.set(evt.toolCallId, id);
           // For run_in_terminal: store refs so permission_required and terminal bridge can find the card
           if (tn === "run_in_terminal") {
             agentTermMsgIdRef.current = id;
@@ -1353,6 +1374,11 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
               }
               return next;
             });
+          }
+          if (evt.toolName === "delegate_task") {
+            activeDelegationDepthRef.current = Math.max(0, activeDelegationDepthRef.current - 1);
+            if (activeDelegationDepthRef.current === 0) activeDelegationMarkerRef.current = null;
+            delegateTaskCardIdRef.current = null;
           }
           // Bridge: show "Thinking..." between tools so the state indicator never vanishes
           if (!assistantMsgId) {
@@ -1517,12 +1543,14 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
           fileChangesRef.current = [];
           todosRef.current = [];
           // Reuse the existing tool card from tool_start if this tool was already tracked
-          const existingId = toolIds.length > 0 ? toolIds[toolIds.length - 1] : null;
+          const existingId = (evt.toolCallId && toolCallMsgIdRef.current.get(evt.toolCallId)) || (toolIds.length > 0 ? toolIds[toolIds.length - 1] : null);
           const reuseExisting = existingId && streamToolRef.current.get(existingId)?.name === tn;
           const id = reuseExisting ? existingId : nextId();
           if (!reuseExisting) toolIds.push(id);
-          streamToolRef.current.set(id, { name: tn, params: evt.toolParams || {} });
-          pushRaw(id, { role: "tool", content: "", toolName: tn, toolParams: evt.toolParams, state: "waiting" });
+          const marker = (evt as any).agentMarker || (reuseExisting ? streamToolRef.current.get(id)?.agentMarker : undefined) || activeDelegationMarkerRef.current || "main";
+          streamToolRef.current.set(id, { name: tn, params: evt.toolParams || {}, agentMarker: marker });
+          pushRaw(id, { role: "tool", content: "", toolName: tn, toolParams: evt.toolParams, toolCallId: evt.toolCallId, state: "waiting", agentMarker: marker });
+          if (evt.toolCallId) toolCallMsgIdRef.current.set(evt.toolCallId, id);
           isPermission = false;
           return false; // stop — resume via while loop
         }
@@ -1778,7 +1806,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
       // Only process browser tools here.  File tools (rename_file, write_file,
       // etc.) are handled by acceptFile → continueDeferredRef — don't try to
       // execute them via executeBrowserAction.
-      const lastToolId = toolIds[toolIds.length - 1];
+      const lastToolId = toolCallId ? toolCallMsgIdRef.current.get(toolCallId) || toolIds[toolIds.length - 1] : toolIds[toolIds.length - 1];
       const toolData = lastToolId ? streamToolRef.current.get(lastToolId) : undefined;
       const isBrowser = toolData?.name?.startsWith("browser_");
       if (isBrowser) {
@@ -1817,7 +1845,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
       const idx = prev.findIndex((m) => m.id === id);
       if (idx >= 0) {
         const next = [...prev];
-        next[idx] = { ...msg, id, when: Date.now() };
+        next[idx] = { ...next[idx], ...msg, id, when: Date.now() };
         return next;
       }
       return [...prev, { ...msg, id, when: Date.now() }];
@@ -2499,7 +2527,7 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
             )}
             {/* Tool execution card */}
             {msg.role === "tool" && msg.toolName && (
-              <div key={`${msg.id}-tool`} className={`agent-tool-card${msg.toolName === "delegate_task" ? " agent-tool-card-subagent" : msg.subAgentName && msg.toolName !== "delegate_task" ? " agent-tool-card-step-sub" : ""}${msg.state === "waiting" ? " streaming" : ""}`}>
+              <div key={`${msg.id}-tool`} className={`agent-tool-card agent-tool-card-${msg.agentMarker || "main"}${msg.state === "waiting" ? " streaming" : ""}`}>
                 <div className="agent-tool-card-header">
                   {msg.state === "waiting" ? <span className="agent-spinner" /> : <i className="codicon codicon-check" />}
                   <i className={`codicon codicon-${msg.toolName === "delegate_task" ? "hubot" : msg.toolName.startsWith("browser_") ? "globe" : msg.toolName === "run_in_terminal" ? "terminal" : msg.toolName === "read_file" ? "file-code" : msg.toolName === "grep" ? "search" : msg.toolName === "list_files" || msg.toolName === "search_files" ? "folder-opened" : "tools"}`} />
@@ -2819,7 +2847,7 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
           <div className="agent-footer">
             <div className="agent-footer-status">
               <i className={`codicon codicon-${agentStatus === "stopped" ? "debug-stop" : "check-all"}`} />
-              {agentStatus === "stopped" ? "Manually Stopped" : "Completed"}
+              {agentStatus === "stopped" ? "Stopped" : "Completed"}
             </div>
             {(() => {
               const est = effectiveUsage?.estimatedTokens ?? 0;
