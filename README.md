@@ -66,7 +66,7 @@ The Node.js Express server on **port 3001** is the backbone. It owns all backend
 |---|---|---|
 | HTTP API | `server/index.ts` | REST endpoints for filesystem CRUD, git status/commit/diff, project detection, system stats, and agent chat (blocking + SSE streaming + step-by-step) |
 | Agent loop | `server/agent.ts` | Tool-calling orchestration: receives user messages, sends tool definitions to DeepSeek, executes filesystem/terminal tools, manages browser tool handoff, compacts conversation history |
-| DeepSeek bridge | `server/deepseek.ts` | Raw DeepSeek API calls — chat, tool-calling, and SSE streaming — with prefix-cache tracking |
+| DeepSeek bridge | `server/deepseek.ts` | Raw DeepSeek API calls — chat, tool-calling, and SSE streaming — with prefix-cache tracking plus API-backed usage and cache-token reporting |
 | LSP bridge | `server/lsp.ts` | Spawns language servers over stdio, forwards diagnostics to the client, handles completions and hover |
 | Terminal manager | `server/terminalManager.ts` | Creates per-session shell processes (PTY via `node-pty` or pipe fallback), routes I/O between client WebSocket messages and child process stdio, auto-detects localhost URLs in terminal output |
 | Browser proxy | `server/index.ts` (`/_browser`) | Reverse-proxies external URLs through the server so the client iframe stays same-origin, strips `X-Frame-Options` headers, injects a restrictive CSP |
@@ -1221,9 +1221,26 @@ DeepSeek API supports **automatic prefix caching**: when consecutive requests sh
 Harness leverages this in two ways:
 
 - **Stable system messages**: Because `buildSystemPrompt()` produces the same output for the same context, the system message stays stable across turns where the detected project stack doesn't change. DeepSeek hits the prefix cache automatically for these consecutive calls.
-- **Cache tracking**: `server/deepseek.ts` computes a context ID from the system message content and logs cache metrics (`cacheRequests`, `cacheHits`) to `.harness-debug/` for observability.
+- **Local heuristic tracking**: `server/deepseek.ts` computes a context ID from the system message content and logs a best-effort `HIT` / `MISS` line based on whether the current system-prompt hash matches the previous request.
+- **API-backed cache usage**: Harness also reads the actual DeepSeek `usage` payload and extracts:
+  - `prompt_tokens`
+  - `completion_tokens`
+  - `total_tokens`
+  - `prompt_cache_hit_tokens`
+  - `prompt_cache_miss_tokens`
 
-No extra API parameters are needed — DeepSeek handles prefix caching transparently on the server side.
+For streamed tool-calling requests, `server/deepseek.ts` enables `stream_options.include_usage` so the final SSE chunk includes usage data. That produces a console log like:
+
+```text
+[cache-api] stream model=deepseek-v4-flash prompt=1234 completion=456 total=1690 cache_hit_tokens=900 cache_miss_tokens=334 hit_rate=73%
+```
+
+Important distinction:
+
+- The old `[cache] ... HIT/MISS ...` line is a **local Harness heuristic** based on prompt-hash reuse.
+- The new `[cache-api] ...` line is based on **actual DeepSeek API usage fields**.
+
+No extra cache-control API parameters are needed — DeepSeek handles prefix caching transparently on the server side.
 
 ### 3. Rolling History Compaction
 
@@ -1263,6 +1280,29 @@ This cuts repeated replay of large terminal/compiler logs while keeping the raw 
 
 The agent footer shows a live estimate of context usage: `~N / M tokens (X%) · T turns`. This is calculated on the server each agent turn and sent to the client via the SSE `done` event.
 
+Harness now also sends cumulative **DeepSeek API usage** in that same `done` payload when available:
+
+- `requestCount`
+- `promptTokens`
+- `completionTokens`
+- `totalTokens`
+- `promptCacheHitTokens`
+- `promptCacheMissTokens`
+
+The footer keeps the ring based on the local estimated-context value, and adds cache status when the API returned cache usage. The compact label becomes:
+
+```text
+X% · Tt · cYY%
+```
+
+Where `cYY%` is the cumulative cache hit rate derived from:
+
+```text
+promptCacheHitTokens / (promptCacheHitTokens + promptCacheMissTokens)
+```
+
+The footer tooltip includes the fuller API totals: request count, prompt/completion/total tokens, and cache hit/miss token counts.
+
 #### How it's calculated
 
 `estimateStateTokens()` in `server/agent.ts` walks every field of every message:
@@ -1281,7 +1321,7 @@ totalChars =
 estimatedTokens = round(totalChars / 4)
 ```
 
-Each turn, `buildOpenAiMessages()` calls `estimateStateTokens()` to check against `HISTORY_COMPACTION_TRIGGER_TOKENS` (10,000). The final estimate is also sent to the client via the SSE `done` event for the usage ring in the footer.
+Each turn, `buildOpenAiMessages()` calls `estimateStateTokens()` to check against `HISTORY_COMPACTION_TRIGGER_TOKENS` (10,000). The final estimate is also sent to the client via the SSE `done` event for the usage ring in the footer. Separately, the server accumulates actual DeepSeek API usage across the run and attaches those totals to the same `usage` object.
 
 #### Accuracy
 
@@ -1292,6 +1332,7 @@ Each turn, `buildOpenAiMessages()` calls `estimateStateTokens()` to check agains
 | **`reasoning_content`** | Counted. DeepSeek R1/reasoner models produce verbose chain-of-thought. |
 | **Console context** | NOT counted. The IDE's diagnostic/terminal context is small and passed separately for ITR selection. |
 | **NOT_EXECUTED injections** | NOT counted. These are injected by `buildOpenAiMessages` at API-call time and not stored in `state.messages`. |
+| **API token usage** | Separate from the estimate. Comes from DeepSeek's `usage` payload and may not appear if the provider omits usage for a given response. |
 
 #### Context limit
 

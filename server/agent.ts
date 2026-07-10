@@ -8,7 +8,7 @@
 //
 // Conversation state is held in memory keyed by session id.
 
-import { chatDeepSeekTool, chatDeepSeekToolStream, generateEmbedding } from "./deepseek";
+import { chatDeepSeekTool, chatDeepSeekToolStream, generateEmbedding, type DeepSeekApiUsage } from "./deepseek";
 import { getMemoryStore } from "./memory";
 import { killSession, getLastCreatedSessionId } from "./terminalManager";
 import fs from "fs";
@@ -68,6 +68,8 @@ export interface AgentState {
   latestTodos?: { id: string; text: string; status: string }[];
   /** Latest validated summary submitted via write_summary. Required before task_complete. */
   latestSummary?: string;
+  /** Cumulative DeepSeek API usage across the current run. */
+  apiUsageTotals?: DeepSeekApiUsage & { requestCount: number };
 }
 
 // ── Step-by-Step Types ──
@@ -204,7 +206,17 @@ export interface AgentSseEvent {
   /** Warning message (on warning — shown to user as a system notice). */
   warning?: string;
   /** Usage stats (on done). */
-  usage?: { estimatedTokens: number; contextLimit: number; turns: number };
+  usage?: {
+    estimatedTokens: number;
+    contextLimit: number;
+    turns: number;
+    requestCount?: number;
+    promptTokens?: number;
+    completionTokens?: number;
+    totalTokens?: number;
+    promptCacheHitTokens?: number;
+    promptCacheMissTokens?: number;
+  };
   /** The shell command that needs permission (on permission_required). */
   permissionCommand?: string;
   /** Whether background=true was set (on permission_required, for /continue). */
@@ -225,6 +237,26 @@ export interface AgentSseEvent {
   isSubAgent?: boolean;
   /** Agent marker for color coding: "main", "browser", "code-search", "code-writer", "researcher". */
   agentMarker?: string;
+}
+
+function addApiUsage(state: AgentState, usage: DeepSeekApiUsage | undefined) {
+  if (!usage) return;
+  const prev = state.apiUsageTotals || {
+    requestCount: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+    promptCacheHitTokens: 0,
+    promptCacheMissTokens: 0,
+  };
+  state.apiUsageTotals = {
+    requestCount: prev.requestCount + 1,
+    promptTokens: prev.promptTokens + usage.promptTokens,
+    completionTokens: prev.completionTokens + usage.completionTokens,
+    totalTokens: prev.totalTokens + usage.totalTokens,
+    promptCacheHitTokens: prev.promptCacheHitTokens + usage.promptCacheHitTokens,
+    promptCacheMissTokens: prev.promptCacheMissTokens + usage.promptCacheMissTokens,
+  };
 }
 
 // ── Tool registry ──
@@ -2565,6 +2597,12 @@ export async function* agentLoopStepByStep(
     estimatedTokens: 0,
     contextLimit: MODEL_CONTEXT_LIMIT,
     turns,
+    requestCount: state.apiUsageTotals?.requestCount || 0,
+    promptTokens: state.apiUsageTotals?.promptTokens || 0,
+    completionTokens: state.apiUsageTotals?.completionTokens || 0,
+    totalTokens: state.apiUsageTotals?.totalTokens || 0,
+    promptCacheHitTokens: state.apiUsageTotals?.promptCacheHitTokens || 0,
+    promptCacheMissTokens: state.apiUsageTotals?.promptCacheMissTokens || 0,
   });
 
   // ── Helper: attach reasoning_content ──
@@ -2600,6 +2638,7 @@ export async function* agentLoopStepByStep(
     let finalText: string | null = null;
     let finalReasoning: string | null = null;
     let finalToolCalls: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }> | null = null;
+    let finalApiUsage: DeepSeekApiUsage | undefined;
 
     for await (const chunk of stream) {
       if (chunk.type === "thinking") {
@@ -2610,8 +2649,10 @@ export async function* agentLoopStepByStep(
         finalText = chunk.finalText ?? null;
         finalReasoning = chunk.reasoningContent ?? null;
         finalToolCalls = chunk.toolCalls ?? null;
+        finalApiUsage = chunk.usage;
       }
     }
+    addApiUsage(state, finalApiUsage);
 
     if (!finalToolCalls || finalToolCalls.length === 0) {
       // Agent didn't call any tool — push the text response and inject a reminder
@@ -3038,6 +3079,12 @@ export async function* agentLoopStream(
     estimatedTokens: finalEstTokens,
     contextLimit: modelContextLimit,
     turns,
+    requestCount: state.apiUsageTotals?.requestCount || 0,
+    promptTokens: state.apiUsageTotals?.promptTokens || 0,
+    completionTokens: state.apiUsageTotals?.completionTokens || 0,
+    totalTokens: state.apiUsageTotals?.totalTokens || 0,
+    promptCacheHitTokens: state.apiUsageTotals?.promptCacheHitTokens || 0,
+    promptCacheMissTokens: state.apiUsageTotals?.promptCacheMissTokens || 0,
   });
 
   // ── Helper: attach reasoning_content if this is a reasoning model ──
@@ -3071,6 +3118,7 @@ export async function* agentLoopStream(
     let finalText: string | null = null;
     let finalReasoning: string | null = null;
     let finalToolCalls: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }> | null = null;
+    let finalApiUsage: DeepSeekApiUsage | undefined;
 
     for await (const chunk of stream) {
       if (chunk.type === "thinking") {
@@ -3081,9 +3129,11 @@ export async function* agentLoopStream(
         finalText = chunk.finalText ?? null;
         finalReasoning = chunk.reasoningContent ?? null;
         finalToolCalls = chunk.toolCalls ?? null;
+        finalApiUsage = chunk.usage;
         streamDone = true;
       }
     }
+    addApiUsage(state, finalApiUsage);
 
     if (!streamDone) {
       yield { type: "error", error: "Stream interrupted" };
@@ -3568,6 +3618,7 @@ export function createAgentSession(sessionId: string, projectRoot: string, userM
     prev.iteration = 0;
     prev.latestSummary = undefined;
     prev.pendingSubAgent = undefined;
+    prev.apiUsageTotals = undefined;
     prev.messages.push({ role: "user", content: userMessage });
     agentSessions.set(sessionId, prev);
     return prev;
@@ -3577,6 +3628,7 @@ export function createAgentSession(sessionId: string, projectRoot: string, userM
     messages: [{ role: "user", content: userMessage }],
     iteration: 0,
     projectRoot,
+    apiUsageTotals: undefined,
   };
   agentSessions.set(sessionId, state);
   return state;

@@ -71,7 +71,19 @@ interface ChatThread {
   title: string;
   messages: ConsoleMessage[];
   createdAt: number;
-  usage?: { estimatedTokens: number; contextLimit: number; turns: number };
+  usage?: UsageStats;
+}
+
+interface UsageStats {
+  estimatedTokens: number;
+  contextLimit: number;
+  turns: number;
+  requestCount?: number;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  promptCacheHitTokens?: number;
+  promptCacheMissTokens?: number;
 }
 
 let _mid = 0;
@@ -178,7 +190,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
   const [expandedSubAgents, setExpandedSubAgents] = useState<Set<string>>(new Set());
   // Agent completion footer state
   const [agentStatus, setAgentStatus] = useState<"idle" | "completed" | "stopped">("idle");
-  const [agentUsage, setAgentUsage] = useState<{ estimatedTokens: number; contextLimit: number; turns: number } | null>(null);
+  const [agentUsage, setAgentUsage] = useState<UsageStats | null>(null);
   // Track which terminal outputs are collapsed (keyed by message id)
   const [collapsedOutputs, setCollapsedOutputs] = useState<Set<string>>(new Set());
   // Track agent terminal output streaming from the bridge
@@ -2614,6 +2626,13 @@ function MarkdownPreview({ text, msgId }: { text: string; msgId: string }) {
 
 const iconForRole = (r: string) => r === "user" ? "account" : r === "assistant" ? "sparkle" : r === "tool" ? "tools" : "info";
 const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Generating...", waiting: "Wait a moment...", file_viewing: "Reading file..." } as Record<string, string>)[s] || "";
+const getCacheSummary = (usage: UsageStats | null | undefined) => {
+  const hit = usage?.promptCacheHitTokens ?? 0;
+  const miss = usage?.promptCacheMissTokens ?? 0;
+  const total = hit + miss;
+  const pct = total > 0 ? Math.round((hit / total) * 100) : null;
+  return { hit, miss, total, pct };
+};
 
   // ── UI ──
 
@@ -3091,11 +3110,24 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
               const est = effectiveUsage?.estimatedTokens ?? 0;
               const ctx = effectiveUsage?.contextLimit ?? 128_000;
               const pct = Math.min(100, (est / ctx) * 100);
+              const cache = getCacheSummary(effectiveUsage);
               const radius = 8;
               const circumference = 2 * Math.PI * radius;
               const offset = circumference - (pct / 100) * circumference;
+              const titleParts = [
+                `${est.toLocaleString()} estimated tokens`,
+                `${effectiveUsage?.turns ?? 0} turns`,
+                `${ctx.toLocaleString()} context limit (${Math.round(pct)}%)`,
+              ];
+              if (effectiveUsage?.requestCount) titleParts.push(`${effectiveUsage.requestCount} DeepSeek requests`);
+              if ((effectiveUsage?.totalTokens ?? 0) > 0) {
+                titleParts.push(`${(effectiveUsage?.promptTokens ?? 0).toLocaleString()} prompt · ${(effectiveUsage?.completionTokens ?? 0).toLocaleString()} completion · ${(effectiveUsage?.totalTokens ?? 0).toLocaleString()} total API tokens`);
+              }
+              if (cache.total > 0 && cache.pct != null) {
+                titleParts.push(`cache ${cache.pct}% hit rate · ${cache.hit.toLocaleString()} hit tokens · ${cache.miss.toLocaleString()} miss tokens`);
+              }
               return (
-                <div className="agent-footer-usage" title={`${est.toLocaleString()} estimated tokens · ${effectiveUsage?.turns ?? 0} turns · ${ctx.toLocaleString()} context limit (${Math.round(pct)}%)`}>
+                <div className="agent-footer-usage" title={titleParts.join(" · ")}>
                   <svg className="agent-footer-usage-ring" width="20" height="20" viewBox="0 0 20 20">
                     <circle className="agent-footer-usage-ring-bg" cx="10" cy="10" r={radius} />
                     <circle
@@ -3106,7 +3138,7 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
                     />
                   </svg>
                   <span className="agent-footer-usage-text">
-                    {Math.round(pct)}% &middot; {effectiveUsage?.turns ?? 0}t
+                    {Math.round(pct)}% &middot; {effectiveUsage?.turns ?? 0}t{cache.total > 0 && cache.pct != null ? ` · c${cache.pct}%` : ""}
                   </span>
                 </div>
               );

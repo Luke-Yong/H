@@ -4,6 +4,14 @@ import { createHash } from "crypto";
 
 const BASE_URL = "https://api.deepseek.com/v1";
 
+export interface DeepSeekApiUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  promptCacheHitTokens: number;
+  promptCacheMissTokens: number;
+}
+
 function computeCacheContextId(systemContent: string | null | undefined): string | undefined {
   if (!systemContent) return undefined;
   const hash = createHash("sha1").update(systemContent).digest("hex").slice(0, 24);
@@ -53,6 +61,43 @@ let lastCacheContextId = "";
 let cacheHitCount = 0;
 let cacheRequestCount = 0;
 let cacheMissCount = 0;
+
+function normalizeUsage(raw: any): DeepSeekApiUsage | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const promptTokens = Number(raw.prompt_tokens ?? raw.input_tokens ?? 0);
+  const completionTokens = Number(raw.completion_tokens ?? raw.output_tokens ?? 0);
+  const totalTokens = Number(raw.total_tokens ?? (promptTokens + completionTokens));
+  const promptCacheHitTokens = Number(raw.prompt_cache_hit_tokens ?? raw.cache_read_input_tokens ?? 0);
+  const promptCacheMissTokens = Number(raw.prompt_cache_miss_tokens ?? raw.cache_creation_input_tokens ?? 0);
+  if (
+    !Number.isFinite(promptTokens)
+    && !Number.isFinite(completionTokens)
+    && !Number.isFinite(totalTokens)
+    && !Number.isFinite(promptCacheHitTokens)
+    && !Number.isFinite(promptCacheMissTokens)
+  ) {
+    return undefined;
+  }
+  return {
+    promptTokens: Number.isFinite(promptTokens) ? promptTokens : 0,
+    completionTokens: Number.isFinite(completionTokens) ? completionTokens : 0,
+    totalTokens: Number.isFinite(totalTokens) ? totalTokens : 0,
+    promptCacheHitTokens: Number.isFinite(promptCacheHitTokens) ? promptCacheHitTokens : 0,
+    promptCacheMissTokens: Number.isFinite(promptCacheMissTokens) ? promptCacheMissTokens : 0,
+  };
+}
+
+function logApiUsage(kind: string, model: string, usage: DeepSeekApiUsage | undefined, cacheContextId?: string) {
+  if (!usage) return;
+  const cacheTotal = usage.promptCacheHitTokens + usage.promptCacheMissTokens;
+  const hitPct = cacheTotal > 0 ? Math.round((usage.promptCacheHitTokens / cacheTotal) * 100) : 0;
+  console.log(
+    `[cache-api] ${kind} model=${model} prompt=${usage.promptTokens} completion=${usage.completionTokens} total=${usage.totalTokens}`
+    + ` cache_hit_tokens=${usage.promptCacheHitTokens} cache_miss_tokens=${usage.promptCacheMissTokens} hit_rate=${hitPct}%`
+    + ` ctx=${(cacheContextId || "").slice(0, 30)}`,
+  );
+}
+
 async function deepseekFetch(
   apiKey: string,
   body: Record<string, unknown>,
@@ -189,6 +234,8 @@ export interface ToolCallResult {
   text: string | null;
   /** Accumulated reasoning_content from the assistant. DeepSeek requires this passed back. */
   reasoningContent: string | null;
+  /** Actual DeepSeek API usage for this request, including cache token metrics when available. */
+  usage?: DeepSeekApiUsage;
   toolCalls: Array<{
     id: string;
     type: "function";
@@ -219,9 +266,12 @@ export async function chatDeepSeekTool(
 
   const data: any = await res.json();
   const choice = data.choices?.[0]?.message;
+  const usage = normalizeUsage(data.usage);
+  logApiUsage("block", String(opts?.model || "deepseek-chat"), usage, cacheCtx);
   return {
     text: choice?.content || null,
     reasoningContent: choice?.reasoning_content || null,
+    usage,
     toolCalls: choice?.tool_calls || null,
   };
 }
@@ -237,6 +287,8 @@ export interface StreamChunk {
   finalText?: string | null;
   /** Final accumulated reasoning_content (on done). DeepSeek requires this passed back. */
   reasoningContent?: string | null;
+  /** Actual DeepSeek API usage for this request, including cache token metrics when available. */
+  usage?: DeepSeekApiUsage;
   /** Final tool calls (on done). */
   toolCalls?: Array<{
     id: string;
@@ -315,14 +367,20 @@ export async function* chatDeepSeekToolStream(
     temperature: 0.1,
     max_tokens: 8192,
     stream: true,
+    stream_options: { include_usage: true },
   }, cacheCtx);
 
   let fullText = "";
   let fullReasoning = "";
   let hasReasoning = false;
   const toolCalls: Map<number, { id: string; name: string; args: string }> = new Map();
+  let finalUsage: DeepSeekApiUsage | undefined;
 
   for await (const chunk of parseSSE(res)) {
+    const usage = normalizeUsage(chunk.usage);
+    if (usage) {
+      finalUsage = usage;
+    }
     const delta: any = chunk.choices?.[0]?.delta;
     if (!delta) continue;
 
@@ -371,6 +429,8 @@ export async function* chatDeepSeekToolStream(
     finalText: fullText || null,
     // Only set reasoningContent if the model actually returned reasoning chunks
     reasoningContent: hasReasoning && fullReasoning ? fullReasoning : null,
+    usage: finalUsage,
     toolCalls: finalToolCalls,
   };
+  logApiUsage("stream", String(opts.model || "deepseek-chat"), finalUsage, cacheCtx);
 }
