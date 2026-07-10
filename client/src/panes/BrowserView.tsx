@@ -97,6 +97,250 @@ const VIEWPORT_PRESETS: ViewportPreset[] = [
   { id: "fold-matex6-main", label: "Mate X6 Unfolded 747 x 813", width: 747, height: 813 },
 ];
 
+const DOM_INDEXING_HELPERS = String.raw`
+const HARNESS_BUCKET_ORDER = ['TL', 'TC', 'TR', 'ML', 'MC', 'MR', 'BL', 'BC', 'BR'];
+const harnessNormalizeText = (value, maxLen) => {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  return typeof maxLen === 'number' && maxLen > 0 && text.length > maxLen ? text.slice(0, maxLen) : text;
+};
+const harnessQuoteText = (value, maxLen) => '"' + harnessNormalizeText(value, maxLen).replace(/"/g, "'") + '"';
+const harnessInViewport = (r, vw, vh) => !(r.width <= 0 || r.height <= 0 || r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw);
+const harnessIsCollapsed = (el) => {
+  if (!el || el.nodeType !== 1) return true;
+  if (el.hasAttribute('hidden') || el.getAttribute('aria-hidden') === 'true' || el.hasAttribute('inert')) return true;
+  if (el.getAttribute('aria-expanded') === 'false' && !harnessPrimaryLabel(el)) return true;
+  let cur = el;
+  while (cur && cur !== document.body && cur !== document.documentElement) {
+    if (cur.hasAttribute && (cur.hasAttribute('hidden') || cur.getAttribute('aria-hidden') === 'true' || cur.hasAttribute('inert'))) return true;
+    if (cur.tagName && cur.tagName.toLowerCase() === 'details' && !cur.open) {
+      let summary = null;
+      try { summary = cur.querySelector(':scope > summary'); } catch (_) { summary = cur.querySelector('summary'); }
+      if (!summary || (el !== summary && !summary.contains(el))) return true;
+    }
+    try {
+      const cs = window.getComputedStyle(cur);
+      if (
+        cs.display === 'none'
+        || cs.visibility === 'hidden'
+        || cs.contentVisibility === 'hidden'
+        || Number(cs.opacity || '1') < 0.05
+        || cs.maxHeight === '0px'
+      ) return true;
+      if ((cs.overflow === 'hidden' || cs.overflowY === 'hidden') && Number.parseFloat(cs.maxHeight || '0') === 0) return true;
+    } catch (_) {}
+    cur = cur.parentElement;
+  }
+  return false;
+};
+const harnessSamplePoints = (r, vw, vh) => {
+  const padX = Math.max(1, Math.min(6, r.width / 4));
+  const padY = Math.max(1, Math.min(6, r.height / 4));
+  const clampX = (v) => Math.max(0, Math.min(v, Math.max(0, vw - 1)));
+  const clampY = (v) => Math.max(0, Math.min(v, Math.max(0, vh - 1)));
+  return [
+    [clampX(r.left + r.width / 2), clampY(r.top + r.height / 2)],
+    [clampX(r.left + padX), clampY(r.top + padY)],
+    [clampX(r.right - padX), clampY(r.top + padY)],
+    [clampX(r.left + padX), clampY(r.bottom - padY)],
+    [clampX(r.right - padX), clampY(r.bottom - padY)],
+  ];
+};
+const harnessIsOccluded = (el, r, vw, vh) => {
+  if (r.width < 2 || r.height < 2) return true;
+  const samples = harnessSamplePoints(r, vw, vh);
+  let visibleHits = 0;
+  for (let i = 0; i < samples.length; i++) {
+    const pt = samples[i];
+    const topEl = document.elementFromPoint(pt[0], pt[1]);
+    if (!topEl) continue;
+    if (topEl === el || el.contains(topEl) || topEl.contains(el)) {
+      visibleHits++;
+      if (visibleHits > 0) return false;
+    }
+  }
+  return true;
+};
+const harnessPosKey = (r, vw, vh) => {
+  const cx = r.left + r.width / 2;
+  const cy = r.top + r.height / 2;
+  const ry = cy / Math.max(vh, 1);
+  const rx = cx / Math.max(vw, 1);
+  const row = ry < 0.33 ? 'T' : (ry < 0.66 ? 'M' : 'B');
+  const col = rx < 0.33 ? 'L' : (rx < 0.66 ? 'C' : 'R');
+  return row + col;
+};
+const harnessPosLabel = (k) => {
+  if (k === 'TL') return 'Top-Left';
+  if (k === 'TC') return 'Top-Center';
+  if (k === 'TR') return 'Top-Right';
+  if (k === 'ML') return 'Middle-Left';
+  if (k === 'MC') return 'Middle-Center';
+  if (k === 'MR') return 'Middle-Right';
+  if (k === 'BL') return 'Bottom-Left';
+  if (k === 'BC') return 'Bottom-Center';
+  if (k === 'BR') return 'Bottom-Right';
+  return k;
+};
+const harnessPrimaryLabel = (el) => {
+  const tag = el.tagName.toLowerCase();
+  const candidates = [];
+  const push = (value) => {
+    const text = harnessNormalizeText(value, 80);
+    if (text) candidates.push(text);
+  };
+  push(el.getAttribute('aria-label'));
+  push(el.getAttribute('title'));
+  if (typeof el.labels !== 'undefined' && el.labels) {
+    for (let i = 0; i < el.labels.length; i++) push(el.labels[i].textContent);
+  }
+  if (el.id) {
+    try {
+      const escaped = window.CSS && typeof window.CSS.escape === 'function' ? window.CSS.escape(el.id) : el.id;
+      const label = document.querySelector('label[for="' + escaped + '"]');
+      if (label) push(label.textContent);
+    } catch (_) {}
+  }
+  if (tag === 'input') {
+    push(el.placeholder);
+    push(el.name);
+    push(el.value);
+  } else if (tag === 'textarea') {
+    push(el.placeholder);
+    push(el.name);
+    push(el.value);
+  } else if (tag === 'select') {
+    const selIdx = typeof el.selectedIndex === 'number' && el.selectedIndex >= 0 ? el.selectedIndex : 0;
+    push(el.options && el.options[selIdx] ? el.options[selIdx].text : '');
+    push(el.value);
+  } else if (tag === 'img') {
+    push(el.alt);
+  } else if (tag === 'a' && el.href) {
+    push(el.textContent);
+    push(el.href);
+  } else {
+    push(el.textContent);
+  }
+  return candidates[0] || '';
+};
+const harnessAncestorContext = (el) => {
+  const parts = [];
+  let cur = el.parentElement;
+  let depth = 0;
+  while (cur && cur !== document.body && cur !== document.documentElement && depth < 6 && parts.length < 2) {
+    const tag = cur.tagName.toLowerCase();
+    const role = (cur.getAttribute('role') || '').toLowerCase();
+    const id = cur.id ? '#' + cur.id : '';
+    const cls = cur.className && typeof cur.className === 'string'
+      ? cur.className.trim().split(/\s+/).filter(Boolean).slice(0, 2).join('.')
+      : '';
+    const classPart = cls ? '.' + cls : '';
+    const marker = [tag, role, id, cls].join(' ');
+    const interestingTag = /^(form|dialog|section|article|aside|nav|main|header|footer|table|tr|li|ul|ol|fieldset)$/i.test(tag);
+    const interestingRole = /^(dialog|form|navigation|main|region|complementary|banner|tabpanel|tablist|listbox|menu|grid|row|toolbar|list|listitem)$/i.test(role);
+    const interestingClass = /(modal|dialog|drawer|panel|card|form|menu|nav|toolbar|sidebar|content|table|row|list|grid|section)/i.test(marker);
+    if (interestingTag || interestingRole || interestingClass || cur.getAttribute('aria-label')) {
+      const label = harnessPrimaryLabel(cur);
+      parts.push((tag + id + classPart) + (label ? ' ' + harnessQuoteText(label, 50) : ''));
+    }
+    cur = cur.parentElement;
+    depth++;
+  }
+  return parts.join(' <= ');
+};
+const harnessActionableRank = (el) => {
+  const tag = el.tagName.toLowerCase();
+  const role = (el.getAttribute('role') || '').toLowerCase();
+  if (el.disabled || el.getAttribute('aria-disabled') === 'true') return -1;
+  if (tag === 'input' && String(el.type || '').toLowerCase() === 'hidden') return -1;
+  if (harnessIsCollapsed(el)) return -1;
+  try {
+    const cs = window.getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden' || cs.pointerEvents === 'none') return -1;
+  } catch (_) {}
+  let rank = 0;
+  if (tag === 'button' || tag === 'select' || tag === 'textarea' || tag === 'summary') rank = 6;
+  else if (tag === 'input') rank = 6;
+  else if (tag === 'a' && (el.href || harnessPrimaryLabel(el))) rank = 5;
+  else if (tag === 'label' && (el.getAttribute('for') || el.control)) rank = 5;
+  else if (/^(button|link|tab|menuitem|option|checkbox|radio|switch|textbox|combobox|listbox|slider|spinbutton)$/.test(role)) rank = 5;
+  else if (el.getAttribute('contenteditable') === '' || el.getAttribute('contenteditable') === 'true') rank = 5;
+  if (el.onclick || el.getAttribute('onclick')) rank = Math.max(rank, 4);
+  const tabIdx = el.getAttribute('tabindex');
+  if (tabIdx !== null && Number(tabIdx) >= 0) rank = Math.max(rank, 3);
+  try {
+    const cs = window.getComputedStyle(el);
+    if (cs.cursor === 'pointer') rank = Math.max(rank, 3);
+  } catch (_) {}
+  return rank;
+};
+const harnessShouldInclude = (el, actionable, label) => {
+  if (actionable) return true;
+  const tag = el.tagName.toLowerCase();
+  const role = el.getAttribute('role');
+  if (role) return true;
+  if (tag === 'img' || tag === 'label' || /^h[1-6]$/.test(tag)) return true;
+  if (tag === 'input' || tag === 'select' || tag === 'textarea' || tag === 'button' || tag === 'a') return true;
+  if (label) return true;
+  if (el.id) return true;
+  return false;
+};
+const harnessCollectItems = (options) => {
+  const opts = options || {};
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const actionableFirst = opts.actionableFirst !== false;
+  const actionableOnly = !!opts.actionableOnly;
+  const w = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+  const items = [];
+  let domIdx = 0;
+  let el;
+  while ((el = w.nextNode())) {
+    const r = el.getBoundingClientRect();
+    if (!harnessInViewport(r, vw, vh)) {
+      domIdx++;
+      continue;
+    }
+    if (harnessIsCollapsed(el) || harnessIsOccluded(el, r, vw, vh)) {
+      domIdx++;
+      continue;
+    }
+    const actionableRank = harnessActionableRank(el);
+    const actionable = actionableRank > 0;
+    const label = harnessPrimaryLabel(el);
+    if (actionableOnly && !actionable) {
+      domIdx++;
+      continue;
+    }
+    if (!harnessShouldInclude(el, actionable, label)) {
+      domIdx++;
+      continue;
+    }
+    items.push({
+      el,
+      r,
+      domIdx,
+      actionable,
+      actionableRank,
+      pk: harnessPosKey(r, vw, vh),
+      label,
+      ancestor: harnessAncestorContext(el),
+    });
+    domIdx++;
+  }
+  items.sort((a, b) => {
+    if (actionableFirst && a.actionable !== b.actionable) return a.actionable ? -1 : 1;
+    if (actionableFirst && a.actionableRank !== b.actionableRank) return b.actionableRank - a.actionableRank;
+    const dy = a.r.top - b.r.top;
+    if (Math.abs(dy) > 0.5) return dy;
+    const dx = a.r.left - b.r.left;
+    if (Math.abs(dx) > 0.5) return dx;
+    return a.domIdx - b.domIdx;
+  });
+  return { vw, vh, bucketOrder: HARNESS_BUCKET_ORDER, items };
+};
+`;
+
 type BrowserGuest = HTMLElement & {
   src?: string;
   getURL?: () => string;
@@ -1455,68 +1699,31 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   const getIndexedDom = useCallback(async (): Promise<string> => {
     return evalInPage(`
       (() => {
-        const vw = window.innerWidth, vh = window.innerHeight;
-        const inViewport = (r) => !(r.width <= 0 || r.height <= 0 || r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw);
-        const posKey = (r) => {
-          const cx = r.left + r.width / 2;
-          const cy = r.top + r.height / 2;
-          const ry = cy / vh;
-          const rx = cx / vw;
-          const row = ry < 0.33 ? 'T' : (ry < 0.66 ? 'M' : 'B');
-          const col = rx < 0.33 ? 'L' : (rx < 0.66 ? 'C' : 'R');
-          return row + col;
-        };
-        const posLabel = (k) => {
-          if (k === 'TL') return 'Top-Left';
-          if (k === 'TC') return 'Top-Center';
-          if (k === 'TR') return 'Top-Right';
-          if (k === 'ML') return 'Middle-Left';
-          if (k === 'MC') return 'Middle-Center';
-          if (k === 'MR') return 'Middle-Right';
-          if (k === 'BL') return 'Bottom-Left';
-          if (k === 'BC') return 'Bottom-Center';
-          if (k === 'BR') return 'Bottom-Right';
-          return k;
-        };
-        const bucketOrder = ['TL','TC','TR','ML','MC','MR','BL','BC','BR'];
-
-        const w = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
-        const items = []; let domIdx = 0; let el;
-        while ((el = w.nextNode())) {
-          const r = el.getBoundingClientRect();
-          if (!inViewport(r)) { domIdx++; continue; }
-          items.push({ el, r, domIdx });
-          domIdx++;
-        }
-
-        items.sort((a, b) => {
-          const dy = a.r.top - b.r.top;
-          if (Math.abs(dy) > 0.5) return dy;
-          const dx = a.r.left - b.r.left;
-          if (Math.abs(dx) > 0.5) return dx;
-          return a.domIdx - b.domIdx;
-        });
-
+        ${DOM_INDEXING_HELPERS}
+        const collected = harnessCollectItems({ actionableFirst: true });
+        const vw = collected.vw, vh = collected.vh;
+        const bucketOrder = collected.bucketOrder;
+        const items = collected.items;
         const buckets = Object.create(null);
         for (const k of bucketOrder) buckets[k] = [];
 
-        const lineFor = (el, r, i) => {
+        const lineFor = (item, i) => {
+          const el = item.el;
+          const r = item.r;
           const tag = el.tagName.toLowerCase();
           const elDesc = [];
           const id = el.id ? '#' + el.id : '';
           const cls = el.className && typeof el.className === 'string' && el.className.trim()
             ? '.' + el.className.trim().split(/\\s+/).slice(0, 2).join('.') : '';
           elDesc.push('<' + tag + id + cls + '>');
-
-          const text = (el.firstChild && el.firstChild.nodeType === 3
-            ? el.firstChild.textContent : el.textContent || '').trim().slice(0, 60);
-          if (text) elDesc.push('"' + text + '"');
+          if (item.actionable) elDesc.push('actionable');
+          if (item.label) elDesc.push(harnessQuoteText(item.label, 60));
 
           const x = Math.round(r.left), y = Math.round(r.top);
           const rw = Math.round(r.width), rh = Math.round(r.height);
-          const pk = posKey(r);
-          elDesc.push('pos=' + pk);
+          elDesc.push('pos=' + item.pk);
           elDesc.push('(x:' + x + ' y:' + y + ' ' + rw + 'x' + rh + ')');
+          if (item.ancestor) elDesc.push('within=' + harnessQuoteText(item.ancestor, 110));
 
           if (tag === 'a' && el.href) elDesc.push('href="' + el.href.slice(0, 60) + '"');
           if (tag === 'button') elDesc.push(el.disabled ? 'disabled' : 'clickable');
@@ -1577,17 +1784,16 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
 
         for (let i = 0; i < items.length; i++) {
           const it = items[i];
-          const pk = posKey(it.r);
-          (buckets[pk] || (buckets[pk] = [])).push(lineFor(it.el, it.r, i));
+          (buckets[it.pk] || (buckets[it.pk] = [])).push(lineFor(it, i));
         }
 
         const out = [];
         out.push('viewport:' + vw + 'x' + vh);
-        out.push('order: top-to-bottom then left-to-right (pos buckets TL..BR)');
+        out.push('order: actionable elements first, then top-to-bottom then left-to-right (pos buckets TL..BR)');
         for (const k of bucketOrder) {
           const arr = buckets[k];
           if (!arr || arr.length === 0) continue;
-          out.push('--- ' + posLabel(k) + ' (' + arr.length + ') ---');
+          out.push('--- ' + harnessPosLabel(k) + ' (' + arr.length + ') ---');
           out.push(arr.join('\\n'));
         }
         return out.join('\\n');
@@ -1598,24 +1804,8 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   const clickElement = useCallback(async (index: number): Promise<string> => {
     const result = await evalInPage(`
       (() => {
-        const vw = window.innerWidth, vh = window.innerHeight;
-        const inViewport = (r) => !(r.width <= 0 || r.height <= 0 || r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw);
-        const w = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
-        const items = []; let domIdx = 0; let el;
-        while ((el = w.nextNode())) {
-          const r = el.getBoundingClientRect();
-          if (!inViewport(r)) { domIdx++; continue; }
-          items.push({ el, r, domIdx });
-          domIdx++;
-        }
-        items.sort((a, b) => {
-          const dy = a.r.top - b.r.top;
-          if (Math.abs(dy) > 0.5) return dy;
-          const dx = a.r.left - b.r.left;
-          if (Math.abs(dx) > 0.5) return dx;
-          return a.domIdx - b.domIdx;
-        });
-
+        ${DOM_INDEXING_HELPERS}
+        const items = harnessCollectItems({ actionableFirst: true }).items;
         const target = items[${index}];
         if (!target || !target.el) return 'element not found at index ${index}';
         const rect = target.el.getBoundingClientRect();
@@ -1653,24 +1843,8 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   const typeIntoElement = useCallback(async (index: number, text: string) => {
     const result = await evalInPage(`
       (() => {
-        const vw = window.innerWidth, vh = window.innerHeight;
-        const inViewport = (r) => !(r.width <= 0 || r.height <= 0 || r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw);
-        const w = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
-        const items = []; let domIdx = 0; let el;
-        while ((el = w.nextNode())) {
-          const r = el.getBoundingClientRect();
-          if (!inViewport(r)) { domIdx++; continue; }
-          items.push({ el, r, domIdx });
-          domIdx++;
-        }
-        items.sort((a, b) => {
-          const dy = a.r.top - b.r.top;
-          if (Math.abs(dy) > 0.5) return dy;
-          const dx = a.r.left - b.r.left;
-          if (Math.abs(dx) > 0.5) return dx;
-          return a.domIdx - b.domIdx;
-        });
-
+        ${DOM_INDEXING_HELPERS}
+        const items = harnessCollectItems({ actionableFirst: true }).items;
         const target = items[${index}];
         if (!target || !target.el) return 'element not found at index ${index}';
         const inp = target.el;
@@ -1730,61 +1904,15 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   const getPageSnapshot = useCallback(async (): Promise<string> => {
     return evalInPage(`
       (() => {
+        ${DOM_INDEXING_HELPERS}
         const lines = [];
         lines.push('URL: ' + window.location.href);
         lines.push('Title: ' + document.title);
-        const vw = window.innerWidth, vh = window.innerHeight;
+        const collected = harnessCollectItems({ actionableFirst: true });
+        const vw = collected.vw, vh = collected.vh;
+        const bucketOrder = collected.bucketOrder;
+        const items = collected.items;
         lines.push('Viewport: ' + vw + 'x' + vh);
-
-        const isInteractive = function(el) {
-          const tag = el.tagName.toLowerCase();
-          if (tag === 'a' || tag === 'button' || tag === 'input' || tag === 'select' || tag === 'textarea') return true;
-          if (el.getAttribute('role')) return true;
-          if (el.getAttribute('tabindex') !== null) return true;
-          if (el.getAttribute('onclick') || el.onclick) return true;
-          try { if (window.getComputedStyle(el).cursor === 'pointer') return true; } catch(_) {}
-          return false;
-        };
-
-        const inViewport = (r) => !(r.width <= 0 || r.height <= 0 || r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw);
-        const posKey = (r) => {
-          const cx = r.left + r.width / 2;
-          const cy = r.top + r.height / 2;
-          const ry = cy / vh;
-          const rx = cx / vw;
-          const row = ry < 0.33 ? 'T' : (ry < 0.66 ? 'M' : 'B');
-          const col = rx < 0.33 ? 'L' : (rx < 0.66 ? 'C' : 'R');
-          return row + col;
-        };
-        const posLabel = (k) => {
-          if (k === 'TL') return 'Top-Left';
-          if (k === 'TC') return 'Top-Center';
-          if (k === 'TR') return 'Top-Right';
-          if (k === 'ML') return 'Middle-Left';
-          if (k === 'MC') return 'Middle-Center';
-          if (k === 'MR') return 'Middle-Right';
-          if (k === 'BL') return 'Bottom-Left';
-          if (k === 'BC') return 'Bottom-Center';
-          if (k === 'BR') return 'Bottom-Right';
-          return k;
-        };
-        const bucketOrder = ['TL','TC','TR','ML','MC','MR','BL','BC','BR'];
-
-        const w = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
-        const items = []; let domIdx = 0; let el;
-        while ((el = w.nextNode())) {
-          const r = el.getBoundingClientRect();
-          if (!inViewport(r)) { domIdx++; continue; }
-          items.push({ el, r, domIdx });
-          domIdx++;
-        }
-        items.sort((a, b) => {
-          const dy = a.r.top - b.r.top;
-          if (Math.abs(dy) > 0.5) return dy;
-          const dx = a.r.left - b.r.left;
-          if (Math.abs(dx) > 0.5) return dx;
-          return a.domIdx - b.domIdx;
-        });
 
         const allBuckets = Object.create(null);
         const interactiveBuckets = Object.create(null);
@@ -1792,39 +1920,21 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
 
         for (let idx = 0; idx < items.length && idx < 500; idx++) {
           const it = items[idx];
-          const tag = it.el.tagName.toLowerCase();
+          const el = it.el;
+          const tag = el.tagName.toLowerCase();
           const id = it.el.id ? '#' + it.el.id : '';
-          let label = '';
-          if (tag === 'a') {
-            label = (it.el.textContent || it.el.href || '').trim().slice(0, 50);
-          } else if (tag === 'button') {
-            label = (it.el.textContent || it.el.value || '').trim().slice(0, 50);
-          } else if (tag === 'input') {
-            const tp = it.el.type || 'text';
-            if (tp === 'submit' || tp === 'button') {
-              label = (it.el.value || '').trim().slice(0, 30);
-            } else {
-              label = (it.el.placeholder || it.el.value || it.el.name || '').trim().slice(0, 30);
-            }
-          } else if (tag === 'select') {
-            const selIdx = it.el.selectedIndex >= 0 ? it.el.selectedIndex : 0;
-            label = (it.el.options[selIdx]?.text || it.el.value || '').slice(0, 30);
-          } else if (tag === 'textarea') {
-            label = (it.el.placeholder || it.el.value || it.el.name || '').trim().slice(0, 30);
-          } else {
-            label = (it.el.textContent || '').trim().slice(0, 60);
-          }
+          const label = harnessNormalizeText(it.label, 60);
           const markers = [];
           if (['h1','h2','h3','h4','h5','h6'].includes(tag)) markers.push(tag.toUpperCase());
           if (tag === 'img') markers.push('IMG');
           if (tag === 'li') markers.push('LI');
           if (tag === 'label') markers.push('LABEL');
+          if (it.actionable) markers.push('ACTION');
           const marker = markers.length ? ' [' + markers.join('/') + ']' : '';
-
-          const pk = posKey(it.r);
-          const shortDesc = '[' + idx + '] <' + tag + id + '>' + ' pos=' + pk + marker + (label ? ' "' + label + '"' : '');
-          (allBuckets[pk] || (allBuckets[pk] = [])).push(shortDesc);
-          if (isInteractive(it.el)) (interactiveBuckets[pk] || (interactiveBuckets[pk] = [])).push(shortDesc);
+          const within = it.ancestor ? ' within=' + harnessQuoteText(it.ancestor, 80) : '';
+          const shortDesc = '[' + idx + '] <' + tag + id + '>' + ' pos=' + it.pk + marker + (label ? ' ' + harnessQuoteText(label, 60) : '') + within;
+          (allBuckets[it.pk] || (allBuckets[it.pk] = [])).push(shortDesc);
+          if (it.actionable) (interactiveBuckets[it.pk] || (interactiveBuckets[it.pk] = [])).push(shortDesc);
         }
 
         const flatten = (buckets) => {
@@ -1834,7 +1944,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
           for (const k of bucketOrder) {
             const arr = buckets[k];
             if (!arr || arr.length === 0) continue;
-            out.push('--- ' + posLabel(k) + ' (' + arr.length + ') ---');
+            out.push('--- ' + harnessPosLabel(k) + ' (' + arr.length + ') ---');
             out.push(arr.join('\\n'));
           }
           return { out, total };
@@ -1842,16 +1952,16 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
 
         const interactiveFlat = flatten(interactiveBuckets);
         if (interactiveFlat.total > 0) {
-          lines.push('--- Interactive (' + interactiveFlat.total + ') ---');
+          lines.push('--- Interactive (' + interactiveFlat.total + ', actionable-first) ---');
           lines.push(interactiveFlat.out.join('\\n'));
         }
 
         const allFlat = flatten(allBuckets);
         if (allFlat.total <= 200) {
-          lines.push('--- All Elements (' + allFlat.total + ') ---');
+          lines.push('--- All Elements (' + allFlat.total + ', actionable-first) ---');
           lines.push(allFlat.out.join('\\n'));
         } else {
-          lines.push('--- All Elements: ' + allFlat.total + ' (use browser_get_dom for full listing) ---');
+          lines.push('--- All Elements: ' + allFlat.total + ' (actionable-first; use browser_get_dom for full listing) ---');
         }
 
         // Error state: visible error text
@@ -2001,13 +2111,11 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   const rightClickElement = useCallback(async (index: number): Promise<string> => {
     return evalInPage(`
       (() => {
-        const vw = window.innerWidth, vh = window.innerHeight;
-        const w = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
-        let i = 0; let el;
-        while ((el = w.nextNode())) {
-          const r = el.getBoundingClientRect();
-          if (r.width <= 0 || r.height <= 0 || r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw) continue;
-          if (i++ !== ${index}) continue;
+        ${DOM_INDEXING_HELPERS}
+        const items = harnessCollectItems({ actionableFirst: true }).items;
+        const target = items[${index}];
+        if (target && target.el) {
+          const el = target.el;
           const rect = el.getBoundingClientRect();
           const cx = rect.left + rect.width / 2;
           const cy = rect.top + rect.height / 2;
@@ -2035,10 +2143,11 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   const hoverElement = useCallback(async (index: number): Promise<string> => {
     return evalInPage(`
       (() => {
-        const w = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
-        let i = 0; let el;
-        while ((el = w.nextNode())) { if (i++ === ${index}) break; }
-        if (!el) return 'Element not found at index ${index}.';
+        ${DOM_INDEXING_HELPERS}
+        const items = harnessCollectItems({ actionableFirst: true }).items;
+        const target = items[${index}];
+        if (!target || !target.el) return 'Element not found at index ${index}.';
+        const el = target.el;
         const rect = el.getBoundingClientRect();
         const cx = rect.left + rect.width / 2;
         const cy = rect.top + rect.height / 2;
@@ -2104,10 +2213,11 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     const serialized = JSON.stringify(fileDatas);
     return evalInPage(`
       (() => {
-        const w = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
-        let i = 0; let el;
-        while ((el = w.nextNode())) { if (i++ === ${index}) break; }
-        if (!el) return 'Element not found at index ${index}.';
+        ${DOM_INDEXING_HELPERS}
+        const items = harnessCollectItems({ actionableFirst: true }).items;
+        const target = items[${index}];
+        if (!target || !target.el) return 'Element not found at index ${index}.';
+        const el = target.el;
         if (el.tagName !== 'INPUT' || el.type !== 'file') return 'Element is not a file input.';
 
         const fileDatas = ${serialized};
@@ -2143,10 +2253,11 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     const l = label != null ? JSON.stringify(label) : "null";
     return evalInPage(`
       (() => {
-        const w = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
-        let i = 0; let el;
-        while ((el = w.nextNode())) { if (i++ === ${index}) break; }
-        if (!el) return 'Element not found at index ${index}.';
+        ${DOM_INDEXING_HELPERS}
+        const items = harnessCollectItems({ actionableFirst: true }).items;
+        const target = items[${index}];
+        if (!target || !target.el) return 'Element not found at index ${index}.';
+        const el = target.el;
         if (el.tagName !== 'SELECT') return 'Element at index ${index} is <' + el.tagName.toLowerCase() + '>, not a <select>. Tip: for custom dropdowns (not native <select>), use browser_click on the trigger, then browser_wait + browser_get_dom to find options, then browser_click on the desired option.';
         const sel = el;
 

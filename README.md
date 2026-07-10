@@ -477,8 +477,8 @@ Agent calls run_in_terminal
 |------|-------|-------------|
 | `browser_navigate` | Parent + Sub | Navigate to a URL (http/https only). Creates a new browser tab if none exists, or navigates the active tab. Waits for the browser view to mount before returning (up to 2s). |
 | `browser_info` | Parent + Sub | Get current browser tab state: URL, page title, load status, and open tab count. |
-| `browser_screenshot` | Parent + Sub | Get a text snapshot of the current page (URL, title, viewport, visible elements, form fields, buttons, errors) grouped by viewport position buckets so the agent can disambiguate similar items. |
-| `browser_get_dom` | Parent + Sub | Get indexed visible DOM elements with stable top-to-bottom/left-to-right ordering, pixel coordinates, and viewport position buckets (`TL`..`BR`). The returned indices are the same ones used by `browser_click` and `browser_type`. |
+| `browser_screenshot` | Parent + Sub | Get a text snapshot of the current page (URL, title, viewport, visible elements, form fields, buttons, errors) grouped by viewport position buckets. Items are shown in actionable-first order, include nearest ancestor context when useful, and filter out collapsed/hidden/occluded elements so the agent can disambiguate similar items more reliably. |
+| `browser_get_dom` | Parent + Sub | Get indexed visible DOM elements with actionable-first ordering, stable visual ordering inside each group, pixel coordinates, viewport position buckets (`TL`..`BR`), and nearest ancestor context (`within="..."`). Collapsed/hidden/occluded elements are filtered out. The returned indices are the same ones used by `browser_click`, `browser_type`, `browser_select`, and other index-based browser actions. |
 | `browser_console` | Parent + Sub | Get the last 50 console entries (log, warn, error, dialogs) to check for JS errors |
 | `browser_request_errors` | Parent + Sub | Get failed network requests (4xx/5xx/CORS) to verify API calls and resource loads |
 | `browser_click` | **Sub-agent only** | Click by DOM index or pixel coordinates. Dispatches full pointer/mouse event sequence. |
@@ -598,7 +598,8 @@ Parent: delegate_task task="Go to http://localhost:3000/login,
 → [Browser Agent] browser_get_dom
   → Renderer returns indexed elements grouped by
     Top-Left / Top-Center / ... / Bottom-Right
-    with stable visual ordering
+    with actionable-first ordering, stable visual ordering,
+    and `within="..."` ancestor context
 → [Browser Agent] browser_click index=12  (email input in Middle-Center bucket)
   → Renderer clicks → input focused
 → [Browser Agent] browser_type index=12 text="admin"
@@ -607,8 +608,10 @@ Parent: delegate_task task="Go to http://localhost:3000/login,
 → [Browser Agent] browser_type index=15 text="pass123"
 → [Browser Agent] browser_click index=18  (Sign In button)
 → [Browser Agent] browser_screenshot
-  → Renderer returns a grouped page snapshot; sees
-    "Welcome, admin!" in the main content area
+  → Renderer returns a grouped page snapshot with
+    actionable-first interactive items, ancestor context,
+    and collapsed/occluded elements filtered out
+  → Sees "Welcome, admin!" in the main content area
 
 → [Browser Agent] Completed in 10 turns.
   Login test: SUCCESS. Navigated to login page,
@@ -909,7 +912,7 @@ The agent knows how to diagnose and fix errors for each language stack. Below is
 | Syntax check (all files) | `run_command` | `python -m compileall .` |
 | Run tests | `run_command` | `python -m pytest` |
 | Install dependencies | `run_command` | `pip install -r requirements.txt` or `pip install <pkg>` |
-| Flask/Django runtime errors | `browser_screenshot` or `browser_get_dom` | Flask debug mode shows full tracebacks in the browser; the position buckets help distinguish nav chrome from the actual error pane |
+| Flask/Django runtime errors | `browser_screenshot` or `browser_get_dom` | Flask debug mode shows full tracebacks in the browser; the position buckets plus `within="..."` ancestor context help distinguish nav chrome from the actual error pane |
 | HTTP errors from backend | `browser_request_errors` | Check for 500 errors and CORS issues |
 | Find where a function is defined | `grep` | `def <name>` or `class <Name>` |
 | Read stack traces | `read_file` | Open the failing file at the line from the traceback |
@@ -977,7 +980,7 @@ The agent knows how to diagnose and fix errors for each language stack. Below is
 
 1. **Start the server** (`run_in_terminal`) — user must Allow
 2. **Check for build errors** (`run_command`) — fixes go through `edit_file` / `write_file`
-3. **Verify the page loads** (`browser_info` → `browser_screenshot` / `browser_get_dom`, then use the position buckets and stable indices to target the right element)
+3. **Verify the page loads** (`browser_info` → `browser_screenshot` / `browser_get_dom`, then use the position buckets, actionable-first ordering, and `within="..."` ancestor context to target the right element)
 4. **Check browser runtime errors** (`browser_console`, `browser_request_errors`)
 5. **Read relevant source files** (`read_file`) before making fixes
 6. **Make targeted edits** (`edit_file` — just send the lines that change)

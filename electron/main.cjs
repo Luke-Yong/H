@@ -14,6 +14,20 @@ let locationRefreshPromise = null;
 let locationRefreshTimer = null;
 const geoOverrideDebounce = new Map();
 
+function showFatalStartupError(error) {
+  const message = error instanceof Error ? (error.stack || error.message) : String(error);
+  try { console.error("[harness-startup]", message); } catch {}
+  try { dialog.showErrorBox("Harness failed to start", message); } catch {}
+}
+
+process.on("unhandledRejection", (error) => {
+  showFatalStartupError(error);
+});
+
+process.on("uncaughtException", (error) => {
+  showFatalStartupError(error);
+});
+
 function reportDebugMain(hypothesisId, location, msg, data) {
   fetch("http://127.0.0.1:7777/event", {
     method: "POST",
@@ -97,6 +111,16 @@ async function waitForUrl(url, timeoutMs) {
 function startEmbeddedServer() {
   process.env.HARNESS_DESKTOP = "1";
   process.env.HARNESS_SERVE_CLIENT = "1";
+  if (process.resourcesPath && process.platform === "win32") {
+    process.env.ESBUILD_BINARY_PATH = path.join(
+      process.resourcesPath,
+      "app.asar.unpacked",
+      "node_modules",
+      "@esbuild",
+      "win32-x64",
+      "esbuild.exe"
+    );
+  }
 
   const tsx = require("tsx/cjs/api");
   const api = tsx.register({ namespace: "harness-electron" });

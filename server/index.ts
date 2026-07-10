@@ -36,8 +36,13 @@ const broadcast = (event: { type: string; data: unknown }) => {
 
 // Forward server console.log to renderer DevTools via WebSocket
 const _origLog = console.log;
+const shouldWriteServerStdout = process.env.HARNESS_DESKTOP !== "1";
 console.log = (...args: any[]) => {
-  _origLog(...args);
+  if (shouldWriteServerStdout) {
+    try {
+      _origLog(...args);
+    } catch {}
+  }
   try {
     broadcast({ type: "server_log", data: args.map((a) => (typeof a === "string" ? a : String(a))).join(" ") });
   } catch {}
@@ -1352,7 +1357,7 @@ app.get("/api/mcp/sse", (req, res) => {
 });
 
 // ── Serve client (desktop / production) ──
-const clientDist = path.resolve(process.cwd(), "client", "dist");
+const clientDist = path.resolve(__dirname, "..", "client", "dist");
 if (process.env.HARNESS_SERVE_CLIENT === "1" && fs.existsSync(path.join(clientDist, "index.html"))) {
   app.use(express.static(clientDist));
   app.get(/^\/(?!api\/|ws\/?|_browser\/?).*/, (_req, res) => {

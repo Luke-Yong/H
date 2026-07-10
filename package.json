@@ -1,8 +1,12 @@
 {
   "name": "harness",
   "version": "1.0.0",
+  "description": "AI-powered coding workspace with Monaco Editor, DeepSeek agent loop, built-in browser, and sub-agent delegation",
   "private": true,
   "main": "electron/main.cjs",
+  "author": {
+    "name": "Luke Yong"
+  },
   "scripts": {
     "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
     "dev:server": "npx tsx watch server/index.ts",
@@ -12,7 +16,7 @@
     "desktop:pack": "npm run desktop:build && electron-builder --win",
     "install:all": "npm install && cd client && npm install",
     "rebuild:pty": "electron-rebuild -f -w node-pty",
-    "postinstall": "node -e \"const { spawnSync } = require('child_process'); const r = spawnSync('npx', ['electron-rebuild','-f','-w','node-pty'], { stdio: 'inherit', shell: true }); if (r.status !== 0) { console.warn('node-pty rebuild failed; terminal will fall back to pipe mode.'); }\"",
+    "postinstall": "node -e \"try { const { spawnSync } = require('child_process'); const r = spawnSync('npx', ['electron-rebuild','-f','-w','node-pty'], { stdio: 'inherit', shell: true }); if (r.status !== 0) { console.warn('node-pty rebuild failed; terminal will fall back to pipe mode.'); } } catch(e) { console.warn('node-pty rebuild skipped; terminal will fall back to pipe mode.'); }\"",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage"
@@ -24,6 +28,15 @@
     "node-pty": "^1.1.0-beta33",
     "tsx": "^4.19.0",
     "ws": "^8.18.0"
+  },
+  "build": {
+    "npmRebuild": false,
+    "asarUnpack": [
+      "node_modules/@esbuild/**/*"
+    ],
+    "win": {
+      "signAndEditExecutable": false
+    }
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
