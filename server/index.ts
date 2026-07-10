@@ -469,9 +469,39 @@ app.options("/api/chat/agent/sessions/:threadId", (_req, res) => { res.sendStatu
 
 // ── File system API ──
 function safePath(userPath: string): string {
+  if (!userPath || !String(userPath).trim()) {
+    throw Object.assign(new Error("Missing path"), { code: "EINVAL" });
+  }
   const resolved = path.resolve(userPath);
   // Basic safety: don't allow going above root drive for now
   return resolved;
+}
+
+function statusForFsError(err: any): number {
+  const code = err?.code;
+  if (code === "ENOENT") return 404;
+  if (code === "EINVAL") return 400;
+  if (code === "EACCES" || code === "EPERM") return 403;
+  return 500;
+}
+
+function readFileResilient(resolved: string): Buffer {
+  const delays = [0, 40, 120, 250];
+  let lastErr: any;
+  for (const wait of delays) {
+    if (wait) {
+      const until = Date.now() + wait;
+      while (Date.now() < until) { /* brief sync backoff for Windows rename/lock races */ }
+    }
+    try {
+      return fs.readFileSync(resolved);
+    } catch (err: any) {
+      lastErr = err;
+      const code = err?.code;
+      if (code !== "ENOENT" && code !== "EPERM" && code !== "EACCES" && code !== "EBUSY") throw err;
+    }
+  }
+  throw lastErr;
 }
 
 // Write a file, tolerating transient Windows lock errors (EPERM/EACCES/EBUSY)
@@ -545,7 +575,7 @@ app.get("/api/fs/list-recursive", (req, res) => {
 app.get("/api/fs/read", (req, res) => {
   try {
     const filePath = safePath(req.query.path as string);
-    const raw = fs.readFileSync(filePath);
+    const raw = readFileResilient(filePath);
     try {
       const { content, encoding } = detectAndDecode(raw);
       res.json({ path: filePath, content, encoding });
@@ -554,7 +584,7 @@ app.get("/api/fs/read", (req, res) => {
       res.json({ path: filePath, content: "", encoding: "binary", base64: raw.toString("base64") });
     }
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    res.status(statusForFsError(err)).json({ error: String(err), code: (err as any)?.code || "UNKNOWN" });
   }
 });
 
@@ -562,11 +592,11 @@ app.get("/api/fs/read-encoding", (req, res) => {
   try {
     const filePath = safePath(req.query.path as string);
     const encoding = (req.query.encoding as string) || "utf-8";
-    const raw = fs.readFileSync(filePath);
+    const raw = readFileResilient(filePath);
     const content = decodeWithEncoding(raw, encoding);
     res.json({ path: filePath, content, encoding });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    res.status(statusForFsError(err)).json({ error: String(err), code: (err as any)?.code || "UNKNOWN" });
   }
 });
 

@@ -107,6 +107,7 @@ User types goal → AgentConsole
   → WebView executes the action, returns result
   → AgentConsole calls POST /api/chat/agent/stream/continue (toolCallId, result)
   → Loop continues until write_summary + task_complete
+  → Successful write_summary is shown once in agent-body as markdown preview
 ```
 
 ### Agent loop internals
@@ -133,7 +134,7 @@ The agent loop (`agentLoopStream` / `agentLoop` in `server/agent.ts`) orchestrat
 │     └─ Continue to next tool (batch) or next iteration       │
 │                                                              │
 │  4. If no tool calls → final text reply (only when no work was performed), otherwise must write_summary + task_complete │
-│     → Push assistant text message → return phase: "done"     │
+│     → write_summary stores the final summary, AgentConsole renders it once in `agent-body`, then `task_complete` returns phase: "done" │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -165,6 +166,8 @@ Iteration 2: DeepSeek reads the result, decides to edit
 
 Iteration 3: DeepSeek is done
   → Calls write_summary → stores final structured summary
+  → AgentConsole renders that summary once as an assistant message in `agent-body`
+    using markdown preview (`###` headings, lists, inline code)
   → Calls task_complete → agent returns phase: "done" using the stored summary
 ```
 
@@ -500,8 +503,8 @@ Agent calls run_in_terminal
 | Tool | Description |
 |------|-------------|
 | `write_todos` | Create or update a structured task list to track progress. In step-by-step mode, this is the ONLY tool available during planning — the agent must create a complete plan before any execution begins. |
-| `write_summary` | Write the final **structured summary** using the template: `### Changes Made`, `### Verification`, `### Outcome`. Vague summaries are **rejected**. If `write_todos` was used: the summary must also include a `### Todo Progress` section listing each item's final status. |
-| `task_complete` | Finalize the run. Has no parameters and is **rejected unless `write_summary` has been called**. Also rejected if any todo items are still pending/in_progress. |
+| `write_summary` | Write the final **structured summary** using the template: `### Changes Made`, `### Verification`, `### Outcome`. Vague summaries are **rejected**. If `write_todos` was used: the summary must also include a `### Todo Progress` section listing each item's final status. On success, the UI renders the summary once in `agent-body` as markdown preview instead of as a tool card. |
+| `task_complete` | Finalize the run. Has no parameters and is **rejected unless `write_summary` has been called**. Also rejected if any todo items are still pending/in_progress. The SSE `done` reply reuses the stored summary, but the client dedupes it so the final summary is not rendered twice. |
 | `delegate_task` | Delegate a sub-task to a specialized sub-agent (browser, code-search, code-writer, researcher) that runs independently with its own context window. Sub-agents run sequentially — each must complete before the next starts. |
 
 ### Multi-Agent Delegation

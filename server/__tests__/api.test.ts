@@ -113,7 +113,8 @@ describe("API Endpoints", () => {
   describe("GET /api/fs/read", () => {
     it("requires a path query parameter", async () => {
       const res = await request(app).get("/api/fs/read");
-      expect(res.status).toBe(500);
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe("EINVAL");
     });
   });
 

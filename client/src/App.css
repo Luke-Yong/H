@@ -1955,6 +1955,40 @@ details[open] .agent-thought-summary::before { transform: rotate(90deg); }
 }
 
 .agent-text { font-size: 12px; line-height: 1.5; color: var(--text); }
+.agent-md-preview { display: block; }
+.agent-md-preview > :first-child { margin-top: 0; }
+.agent-md-preview > :last-child { margin-bottom: 0; }
+.agent-md-heading {
+  margin: 10px 0 6px;
+  font-weight: 700;
+  line-height: 1.3;
+  color: var(--text);
+}
+.agent-md-h1 { font-size: 18px; }
+.agent-md-h2 { font-size: 16px; }
+.agent-md-h3 { font-size: 14px; }
+.agent-md-h4,
+.agent-md-h5,
+.agent-md-h6 { font-size: 13px; }
+.agent-md-p {
+  margin: 0 0 8px;
+  white-space: pre-wrap;
+}
+.agent-md-list {
+  margin: 0 0 8px 18px;
+  padding: 0;
+}
+.agent-md-list li {
+  margin: 2px 0;
+}
+.agent-md-inline-code {
+  font-family: var(--mono-font, monospace);
+  font-size: 11px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #d7ba7d;
+}
 
 /* ── Speech bubble for user messages ── */
 .agent-msg-user .agent-body {

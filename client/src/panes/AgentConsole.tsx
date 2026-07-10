@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState, useCallback, useMemo } from "react";
+import { useRef, useEffect, useState, useCallback, useMemo, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import type { AgentTerminalBridge } from "./AgentTerminalBridge";
 
@@ -807,6 +807,8 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
 
   // ── Streaming agent loop ──
   const streamToolRef = useRef<Map<string, { name: string; params: Record<string, unknown>; agentMarker?: string }>>(new Map());
+  const writeSummaryRef = useRef<Map<string, { summary: string; isSubAgent: boolean; agentMarker?: string }>>(new Map());
+  const lastRenderedSummaryRef = useRef<string>("");
   const fileChangesRef = useRef<FileChange[]>([]);
   const pendingFileChangesRef = useRef<FileChange[]>([]); // survives tool_start clear → used in tool_end
   const todosRef = useRef<TodoItem[]>([]);
@@ -1026,6 +1028,12 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
             return true;
           }
           if (toolNameStr === "write_summary") {
+            const writeSummaryKey = String(evt.toolCallId || "__latest__");
+            writeSummaryRef.current.set(writeSummaryKey, {
+              summary: String(evt.toolParams?.summary || ""),
+              isSubAgent: !!(evt as any).isSubAgent,
+              agentMarker: (evt as any).agentMarker || activeDelegationMarkerRef.current || ((evt as any).isSubAgent ? "code-writer" : "main"),
+            });
             return true;
           }
           const id = nextId();
@@ -1076,8 +1084,21 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
           }
           if (tn === "write_summary") {
             const tr = String(evt.toolResult || "");
+            const writeSummaryKey = String(evt.toolCallId || "__latest__");
+            const storedSummary = writeSummaryRef.current.get(writeSummaryKey);
+            writeSummaryRef.current.delete(writeSummaryKey);
             const looksLikeSummary = /###\s*Changes\s*Made/i.test(tr) && /###\s*Verification/i.test(tr) && /###\s*Outcome/i.test(tr);
-            if (!looksLikeSummary) {
+            if (looksLikeSummary) {
+              const summaryText = (storedSummary?.summary || tr).trim();
+              if (summaryText && !storedSummary?.isSubAgent) {
+                lastRenderedSummaryRef.current = summaryText.replace(/\r\n/g, "\n");
+                pushRaw(nextId(), {
+                  role: "assistant",
+                  content: summaryText,
+                  agentMarker: storedSummary?.agentMarker || "main",
+                });
+              }
+            } else {
               const id = nextId();
               toolIds.push(id);
               pushRaw(id, { role: "tool", toolName: tn, content: tr, state: undefined });
@@ -1262,7 +1283,10 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
           currentThought = "";
           currentText = "";
           if (evt.reply && !assistantMsgId) {
-            push({ role: "assistant", content: evt.reply, thought: currentThought, fileChanges: fileChangesRef.current.length > 0 ? [...fileChangesRef.current] : undefined, todos: todosRef.current.length > 0 ? [...todosRef.current] : undefined });
+            const normalizedReply = String(evt.reply).replace(/\r\n/g, "\n").trim();
+            if (!normalizedReply || normalizedReply !== lastRenderedSummaryRef.current.trim()) {
+              push({ role: "assistant", content: evt.reply, thought: currentThought, fileChanges: fileChangesRef.current.length > 0 ? [...fileChangesRef.current] : undefined, todos: todosRef.current.length > 0 ? [...todosRef.current] : undefined });
+            }
           }
           setAgentStatus("completed");
           if (evt.usage) {
@@ -1362,6 +1386,18 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
           }
           currentThought = "";
           currentText = "";
+          if (tn === "task_complete") {
+            return true;
+          }
+          if (tn === "write_summary") {
+            const writeSummaryKey = String(evt.toolCallId || "__latest__");
+            writeSummaryRef.current.set(writeSummaryKey, {
+              summary: String(evt.toolParams?.summary || ""),
+              isSubAgent: !!(evt as any).isSubAgent,
+              agentMarker: (evt as any).agentMarker || activeDelegationMarkerRef.current || ((evt as any).isSubAgent ? "code-writer" : "main"),
+            });
+            return true;
+          }
           const id = nextId();
           toolIds.push(id);
           const isSubAgent2 = !!(evt as any).isSubAgent;
@@ -1396,6 +1432,36 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
 
         if (evt.type === "tool_end") {
           const DESTRUCTIVE = ["edit_file"];
+          if (tn === "task_complete") {
+            const tr = String(evt.toolResult || "");
+            if (tr && tr !== "OK") {
+              pushRaw(nextId(), { role: "system", content: tr });
+            }
+            return true;
+          }
+          if (tn === "write_summary") {
+            const tr = String(evt.toolResult || "");
+            const writeSummaryKey = String(evt.toolCallId || "__latest__");
+            const storedSummary = writeSummaryRef.current.get(writeSummaryKey);
+            writeSummaryRef.current.delete(writeSummaryKey);
+            const looksLikeSummary = /###\s*Changes\s*Made/i.test(tr) && /###\s*Verification/i.test(tr) && /###\s*Outcome/i.test(tr);
+            if (looksLikeSummary) {
+              const summaryText = (storedSummary?.summary || tr).trim();
+              if (summaryText && !storedSummary?.isSubAgent) {
+                lastRenderedSummaryRef.current = summaryText.replace(/\r\n/g, "\n");
+                pushRaw(nextId(), {
+                  role: "assistant",
+                  content: summaryText,
+                  agentMarker: storedSummary?.agentMarker || "main",
+                });
+              }
+            } else {
+              const id = nextId();
+              toolIds.push(id);
+              pushRaw(id, { role: "tool", toolName: tn, content: tr, state: undefined });
+            }
+            return true;
+          }
           // Update the last tool card (the one most recently started)
           const id = toolIds[toolIds.length - 1];
           if (id) {
@@ -1515,7 +1581,10 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
               return next;
             });
           } else if (evt.reply) {
-            push({ role: "assistant", content: evt.reply, thought: currentThought });
+            const normalizedReply = String(evt.reply).replace(/\r\n/g, "\n").trim();
+            if (!normalizedReply || normalizedReply !== lastRenderedSummaryRef.current.trim()) {
+              push({ role: "assistant", content: evt.reply, thought: currentThought });
+            }
           }
           // Clear stale state indicators on all assistant/tool messages
           setMessages((prev) =>
@@ -1907,6 +1976,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
     setAgentStatus("idle");
     setAgentUsage(null);
     setThumbsFeedback(null);
+    lastRenderedSummaryRef.current = "";
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     preRoundRef.current = messages;
@@ -2420,6 +2490,128 @@ function CollapsedCode({ text, msgId }: { text: string; msgId: string }) {
     })}</>;
 }
 
+function normalizeAssistantMarkdown(text: string): string {
+  let normalized = text.replace(/\r\n/g, "\n").trim();
+  const summaryHeadingRe = /###\s*(Changes\s*Made|Verification|Outcome|Todo\s*Progress)\b/gi;
+  if (summaryHeadingRe.test(normalized)) {
+    normalized = normalized.replace(/\s+(###\s*(?:Changes\s*Made|Verification|Outcome|Todo\s*Progress)\b)/gi, "\n\n$1");
+    normalized = normalized.replace(
+      /(###\s*(?:Changes\s*Made|Verification|Outcome|Todo\s*Progress)[^\n]*?)\s+-\s+/gi,
+      (_m, heading) => `${String(heading).trim()}\n- `,
+    );
+  }
+  return normalized;
+}
+
+function renderInlineMarkdown(text: string, keyPrefix: string): ReactNode[] {
+  const parts = text.split(/(`[^`]+`|\*\*[^*]+\*\*)/g);
+  return parts.filter(Boolean).map((part, i) => {
+    if (/^`[^`]+`$/.test(part)) {
+      return <code key={`${keyPrefix}-code-${i}`} className="agent-md-inline-code">{part.slice(1, -1)}</code>;
+    }
+    if (/^\*\*[^*]+\*\*$/.test(part)) {
+      return <strong key={`${keyPrefix}-strong-${i}`}>{part.slice(2, -2)}</strong>;
+    }
+    return <span key={`${keyPrefix}-text-${i}`}>{part}</span>;
+  });
+}
+
+function MarkdownPreview({ text, msgId }: { text: string; msgId: string }) {
+  const lines = normalizeAssistantMarkdown(text).split("\n");
+  const blocks: ReactNode[] = [];
+
+  for (let i = 0; i < lines.length;) {
+    const raw = lines[i] ?? "";
+    const line = raw.trimEnd();
+    const trimmed = line.trim();
+
+    if (!trimmed) {
+      i++;
+      continue;
+    }
+
+    const fence = trimmed.match(/^```(\w+)?$/);
+    if (fence) {
+      const codeLines: string[] = [];
+      let j = i + 1;
+      while (j < lines.length && !lines[j].trim().startsWith("```")) {
+        codeLines.push(lines[j]);
+        j++;
+      }
+      blocks.push(
+        <pre key={`${msgId}-pre-${i}`} className="agent-code"><code>{codeLines.join("\n")}</code></pre>,
+      );
+      i = j < lines.length ? j + 1 : lines.length;
+      continue;
+    }
+
+    const heading = trimmed.match(/^(#{1,6})\s+(.*)$/);
+    if (heading) {
+      const level = heading[1].length;
+      blocks.push(
+        <div key={`${msgId}-h-${i}`} className={`agent-md-heading agent-md-h${level}`}>
+          {renderInlineMarkdown(heading[2].trim(), `${msgId}-h-${i}`)}
+        </div>,
+      );
+      i++;
+      continue;
+    }
+
+    if (/^[-*]\s+/.test(trimmed)) {
+      const items: string[] = [];
+      let j = i;
+      while (j < lines.length && /^[-*]\s+/.test(lines[j].trim())) {
+        items.push(lines[j].trim().replace(/^[-*]\s+/, ""));
+        j++;
+      }
+      blocks.push(
+        <ul key={`${msgId}-ul-${i}`} className="agent-md-list">
+          {items.map((item, idx) => (
+            <li key={`${msgId}-ul-${i}-${idx}`}>{renderInlineMarkdown(item, `${msgId}-ul-${i}-${idx}`)}</li>
+          ))}
+        </ul>,
+      );
+      i = j;
+      continue;
+    }
+
+    if (/^\d+\.\s+/.test(trimmed)) {
+      const items: string[] = [];
+      let j = i;
+      while (j < lines.length && /^\d+\.\s+/.test(lines[j].trim())) {
+        items.push(lines[j].trim().replace(/^\d+\.\s+/, ""));
+        j++;
+      }
+      blocks.push(
+        <ol key={`${msgId}-ol-${i}`} className="agent-md-list agent-md-olist">
+          {items.map((item, idx) => (
+            <li key={`${msgId}-ol-${i}-${idx}`}>{renderInlineMarkdown(item, `${msgId}-ol-${i}-${idx}`)}</li>
+          ))}
+        </ol>,
+      );
+      i = j;
+      continue;
+    }
+
+    const para: string[] = [trimmed];
+    let j = i + 1;
+    while (j < lines.length) {
+      const next = lines[j].trim();
+      if (!next || /^#{1,6}\s+/.test(next) || /^[-*]\s+/.test(next) || /^\d+\.\s+/.test(next) || /^```/.test(next)) break;
+      para.push(next);
+      j++;
+    }
+    blocks.push(
+      <p key={`${msgId}-p-${i}`} className="agent-md-p">
+        {renderInlineMarkdown(para.join(" "), `${msgId}-p-${i}`)}
+      </p>,
+    );
+    i = j;
+  }
+
+  return <div className="agent-md-preview">{blocks}</div>;
+}
+
 const iconForRole = (r: string) => r === "user" ? "account" : r === "assistant" ? "sparkle" : r === "tool" ? "tools" : "info";
 const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Generating...", waiting: "Wait a moment...", file_viewing: "Reading file..." } as Record<string, string>)[s] || "";
 
@@ -2779,7 +2971,11 @@ const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Gener
                 <span className="agent-role-icon"><i className={`codicon codicon-${iconForRole(msg.role)}`} /></span>
                 <div className="agent-content">
                   <div className="agent-text">
-                    {msg.role === "user" ? <CollapsedCode text={msg.content} msgId={msg.id} /> : msg.content}
+                    {msg.role === "user"
+                      ? <CollapsedCode text={msg.content} msgId={msg.id} />
+                      : msg.role === "assistant"
+                        ? <MarkdownPreview text={msg.content} msgId={msg.id} />
+                        : msg.content}
                   </div>
                   {msg.role === "user" && (
                     <div className="agent-msg-actions">
