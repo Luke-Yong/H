@@ -170,18 +170,6 @@ const harnessPosKey = (r, vw, vh) => {
   const col = rx < 0.33 ? 'L' : (rx < 0.66 ? 'C' : 'R');
   return row + col;
 };
-const harnessPosLabel = (k) => {
-  if (k === 'TL') return 'Top-Left';
-  if (k === 'TC') return 'Top-Center';
-  if (k === 'TR') return 'Top-Right';
-  if (k === 'ML') return 'Middle-Left';
-  if (k === 'MC') return 'Middle-Center';
-  if (k === 'MR') return 'Middle-Right';
-  if (k === 'BL') return 'Bottom-Left';
-  if (k === 'BC') return 'Bottom-Center';
-  if (k === 'BR') return 'Bottom-Right';
-  return k;
-};
 const harnessPrimaryLabel = (el) => {
   const tag = el.tagName.toLowerCase();
   const candidates = [];
@@ -285,11 +273,73 @@ const harnessShouldInclude = (el, actionable, label) => {
   if (el.id) return true;
   return false;
 };
+// ── Standardized grid formatter ──
+// Produces position-stable indexed output with rigid field order:
+//   NN|tag#id[type] "label" FLAGS x,y:WxH ^ctx
+// FLAGS (space-separated, alphabetically ordered):
+//   A=clickable A+=interactive checked disabled readonly required
+const harnessBuildFlags = (el, actionableRank) => {
+  const flags = [];
+  if (actionableRank >= 6) flags.push('A+');
+  else if (actionableRank > 0) flags.push('A');
+  if (el.disabled) flags.push('disabled');
+  const tag = el.tagName.toLowerCase();
+  if (tag === 'input') {
+    const itype = (el.type || 'text').toLowerCase();
+    if (itype === 'checkbox' || itype === 'radio') {
+      if (el.checked) flags.push('checked');
+    }
+    if (el.readOnly) flags.push('readonly');
+    if (el.required) flags.push('required');
+  }
+  return flags.join(' ');
+};
+const harnessBuildGridLine = (item, index) => {
+  const el = item.el;
+  const r = item.r;
+  const tag = el.tagName.toLowerCase();
+  const idPart = el.id ? '#' + el.id : '';
+  let tagPart = tag + idPart;
+  if (tag === 'input') {
+    const itype = (el.type || 'text').toLowerCase();
+    tagPart = tag + idPart + '[' + itype + ']';
+  }
+  const labelPart = harnessQuoteText(item.label || '', 72);
+  const flagsPart = harnessBuildFlags(el, item.actionableRank);
+  const x = Math.round(r.left);
+  const y = Math.round(r.top);
+  const w = Math.round(r.width);
+  const h = Math.round(r.height);
+  const posPart = x + ',' + y + ':' + w + 'x' + h;
+  const ctxPart = item.ancestor ? ' ^' + item.ancestor : '';
+  // Pad index to 3 chars for alignment
+  const idxStr = String(index);
+  const pad = idxStr.length < 3 ? ' '.repeat(3 - idxStr.length) : '';
+  return pad + idxStr + '|' + tagPart + ' ' + labelPart + (flagsPart ? ' ' + flagsPart : '') + ' ' + posPart + ctxPart;
+};
+const harnessBuildGrid = (items, vw, vh) => {
+  const buckets = Object.create(null);
+  for (let i = 0; i < HARNESS_BUCKET_ORDER.length; i++) buckets[HARNESS_BUCKET_ORDER[i]] = [];
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    buckets[it.pk].push(harnessBuildGridLine(it, i));
+  }
+  const lines = [];
+  lines.push('V:' + vw + 'x' + vh);
+  lines.push('---');
+  for (let i = 0; i < HARNESS_BUCKET_ORDER.length; i++) {
+    const k = HARNESS_BUCKET_ORDER[i];
+    const arr = buckets[k];
+    if (!arr || arr.length === 0) continue;
+    lines.push(k + '|' + arr.length);
+    for (let j = 0; j < arr.length; j++) lines.push(arr[j]);
+  }
+  return lines.join('\\n');
+};
 const harnessCollectItems = (options) => {
   const opts = options || {};
   const vw = window.innerWidth;
   const vh = window.innerHeight;
-  const actionableFirst = opts.actionableFirst !== false;
   const actionableOnly = !!opts.actionableOnly;
   const w = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
   const items = [];
@@ -328,9 +378,10 @@ const harnessCollectItems = (options) => {
     });
     domIdx++;
   }
+  // Pure position-stable sort: top-to-bottom, then left-to-right, then DOM order.
+  // No actionability priority — indices are predictable from geometry alone.
+  // The agent uses A/A+ flags to find interactive elements.
   items.sort((a, b) => {
-    if (actionableFirst && a.actionable !== b.actionable) return a.actionable ? -1 : 1;
-    if (actionableFirst && a.actionableRank !== b.actionableRank) return b.actionableRank - a.actionableRank;
     const dy = a.r.top - b.r.top;
     if (Math.abs(dy) > 0.5) return dy;
     const dx = a.r.left - b.r.left;
@@ -1700,103 +1751,8 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     return evalInPage(`
       (() => {
         ${DOM_INDEXING_HELPERS}
-        const collected = harnessCollectItems({ actionableFirst: true });
-        const vw = collected.vw, vh = collected.vh;
-        const bucketOrder = collected.bucketOrder;
-        const items = collected.items;
-        const buckets = Object.create(null);
-        for (const k of bucketOrder) buckets[k] = [];
-
-        const lineFor = (item, i) => {
-          const el = item.el;
-          const r = item.r;
-          const tag = el.tagName.toLowerCase();
-          const elDesc = [];
-          const id = el.id ? '#' + el.id : '';
-          const cls = el.className && typeof el.className === 'string' && el.className.trim()
-            ? '.' + el.className.trim().split(/\\s+/).slice(0, 2).join('.') : '';
-          elDesc.push('<' + tag + id + cls + '>');
-          if (item.actionable) elDesc.push('actionable');
-          if (item.label) elDesc.push(harnessQuoteText(item.label, 60));
-
-          const x = Math.round(r.left), y = Math.round(r.top);
-          const rw = Math.round(r.width), rh = Math.round(r.height);
-          elDesc.push('pos=' + item.pk);
-          elDesc.push('(x:' + x + ' y:' + y + ' ' + rw + 'x' + rh + ')');
-          if (item.ancestor) elDesc.push('within=' + harnessQuoteText(item.ancestor, 110));
-
-          if (tag === 'a' && el.href) elDesc.push('href="' + el.href.slice(0, 60) + '"');
-          if (tag === 'button') elDesc.push(el.disabled ? 'disabled' : 'clickable');
-          if (tag === 'input') {
-            const itype = el.type || 'text';
-            const inpInfo = ['type=' + itype];
-            if (el.name) inpInfo.push('name="' + el.name + '"');
-            if (el.placeholder) inpInfo.push('placeholder="' + el.placeholder + '"');
-            if (el.value) inpInfo.push('value="' + String(el.value).slice(0, 30) + '"');
-            if (el.disabled) inpInfo.push('disabled');
-            if (el.readOnly) inpInfo.push('readonly');
-            if (itype === 'checkbox' || itype === 'radio') inpInfo.push(el.checked ? 'checked' : 'unchecked');
-            elDesc.push(inpInfo.join(' '));
-          }
-          if (tag === 'select') {
-            const selVal = el.options && el.options[el.selectedIndex] ? el.options[el.selectedIndex].text : '';
-            elDesc.push('value="' + (selVal || el.value || '').slice(0, 30) + '"');
-            if (el.disabled) elDesc.push('disabled');
-          }
-          if (tag === 'textarea') {
-            if (el.name) elDesc.push('name="' + el.name + '"');
-            if (el.placeholder) elDesc.push('placeholder="' + el.placeholder + '"');
-            if (el.value) elDesc.push('value="' + String(el.value).slice(0, 30) + '"');
-            if (el.disabled) elDesc.push('disabled');
-          }
-          if (tag === 'img') {
-            if (el.alt) elDesc.push('alt="' + el.alt.slice(0, 40) + '"');
-            if (el.src) elDesc.push('src="' + el.src.slice(0, 50) + '"');
-          }
-
-          const role = el.getAttribute('role');
-          if (role) elDesc.push('role=' + role);
-          const ariaLabel = el.getAttribute('aria-label');
-          if (ariaLabel) elDesc.push('aria-label="' + ariaLabel.slice(0, 40) + '"');
-          const ariaExpanded = el.getAttribute('aria-expanded');
-          if (ariaExpanded) elDesc.push('aria-expanded=' + ariaExpanded);
-          const ariaSelected = el.getAttribute('aria-selected');
-          if (ariaSelected) elDesc.push('aria-selected=' + ariaSelected);
-
-          const tabIdx = el.getAttribute('tabindex');
-          if (tabIdx !== null) elDesc.push('tabindex=' + tabIdx);
-
-          for (let a = 0; a < el.attributes.length; a++) {
-            const attr = el.attributes[a];
-            if (attr.name.startsWith('data-')) {
-              elDesc.push(attr.name + '="' + String(attr.value).slice(0, 30) + '"');
-              if (elDesc.length > 12) break;
-            }
-          }
-
-          try {
-            const cs = window.getComputedStyle(el);
-            if (cs.cursor === 'pointer') elDesc.push('cursor=pointer');
-          } catch(_) {}
-
-          return '[' + i + '] ' + elDesc.join(' ');
-        };
-
-        for (let i = 0; i < items.length; i++) {
-          const it = items[i];
-          (buckets[it.pk] || (buckets[it.pk] = [])).push(lineFor(it, i));
-        }
-
-        const out = [];
-        out.push('viewport:' + vw + 'x' + vh);
-        out.push('order: actionable elements first, then top-to-bottom then left-to-right (pos buckets TL..BR)');
-        for (const k of bucketOrder) {
-          const arr = buckets[k];
-          if (!arr || arr.length === 0) continue;
-          out.push('--- ' + harnessPosLabel(k) + ' (' + arr.length + ') ---');
-          out.push(arr.join('\\n'));
-        }
-        return out.join('\\n');
+        const collected = harnessCollectItems({});
+        return harnessBuildGrid(collected.items, collected.vw, collected.vh);
       })()
     `);
   }, [evalInPage]);
@@ -1805,7 +1761,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     const result = await evalInPage(`
       (() => {
         ${DOM_INDEXING_HELPERS}
-        const items = harnessCollectItems({ actionableFirst: true }).items;
+        const items = harnessCollectItems({}).items;
         const target = items[${index}];
         if (!target || !target.el) return 'element not found at index ${index}';
         const rect = target.el.getBoundingClientRect();
@@ -1844,7 +1800,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     const result = await evalInPage(`
       (() => {
         ${DOM_INDEXING_HELPERS}
-        const items = harnessCollectItems({ actionableFirst: true }).items;
+        const items = harnessCollectItems({}).items;
         const target = items[${index}];
         if (!target || !target.el) return 'element not found at index ${index}';
         const inp = target.el;
@@ -1908,60 +1864,15 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
         const lines = [];
         lines.push('URL: ' + window.location.href);
         lines.push('Title: ' + document.title);
-        const collected = harnessCollectItems({ actionableFirst: true });
-        const vw = collected.vw, vh = collected.vh;
-        const bucketOrder = collected.bucketOrder;
+        const collected = harnessCollectItems({});
         const items = collected.items;
-        lines.push('Viewport: ' + vw + 'x' + vh);
+        const vw = collected.vw, vh = collected.vh;
 
-        const allBuckets = Object.create(null);
-        const interactiveBuckets = Object.create(null);
-        for (const k of bucketOrder) { allBuckets[k] = []; interactiveBuckets[k] = []; }
-
-        for (let idx = 0; idx < items.length && idx < 500; idx++) {
-          const it = items[idx];
-          const el = it.el;
-          const tag = el.tagName.toLowerCase();
-          const id = it.el.id ? '#' + it.el.id : '';
-          const label = harnessNormalizeText(it.label, 60);
-          const markers = [];
-          if (['h1','h2','h3','h4','h5','h6'].includes(tag)) markers.push(tag.toUpperCase());
-          if (tag === 'img') markers.push('IMG');
-          if (tag === 'li') markers.push('LI');
-          if (tag === 'label') markers.push('LABEL');
-          if (it.actionable) markers.push('ACTION');
-          const marker = markers.length ? ' [' + markers.join('/') + ']' : '';
-          const within = it.ancestor ? ' within=' + harnessQuoteText(it.ancestor, 80) : '';
-          const shortDesc = '[' + idx + '] <' + tag + id + '>' + ' pos=' + it.pk + marker + (label ? ' ' + harnessQuoteText(label, 60) : '') + within;
-          (allBuckets[it.pk] || (allBuckets[it.pk] = [])).push(shortDesc);
-          if (it.actionable) (interactiveBuckets[it.pk] || (interactiveBuckets[it.pk] = [])).push(shortDesc);
-        }
-
-        const flatten = (buckets) => {
-          const out = [];
-          let total = 0;
-          for (const k of bucketOrder) total += (buckets[k]?.length || 0);
-          for (const k of bucketOrder) {
-            const arr = buckets[k];
-            if (!arr || arr.length === 0) continue;
-            out.push('--- ' + harnessPosLabel(k) + ' (' + arr.length + ') ---');
-            out.push(arr.join('\\n'));
-          }
-          return { out, total };
-        };
-
-        const interactiveFlat = flatten(interactiveBuckets);
-        if (interactiveFlat.total > 0) {
-          lines.push('--- Interactive (' + interactiveFlat.total + ', actionable-first) ---');
-          lines.push(interactiveFlat.out.join('\\n'));
-        }
-
-        const allFlat = flatten(allBuckets);
-        if (allFlat.total <= 200) {
-          lines.push('--- All Elements (' + allFlat.total + ', actionable-first) ---');
-          lines.push(allFlat.out.join('\\n'));
-        } else {
-          lines.push('--- All Elements: ' + allFlat.total + ' (actionable-first; use browser_get_dom for full listing) ---');
+        // Grid of elements (capped at 500)
+        const capped = items.slice(0, 500);
+        lines.push(harnessBuildGrid(capped, vw, vh));
+        if (items.length > 500) {
+          lines.push('NOTE: ' + (items.length - 500) + ' more elements not shown. Use browser_get_dom for full listing.');
         }
 
         // Error state: visible error text
@@ -2112,7 +2023,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     return evalInPage(`
       (() => {
         ${DOM_INDEXING_HELPERS}
-        const items = harnessCollectItems({ actionableFirst: true }).items;
+        const items = harnessCollectItems({}).items;
         const target = items[${index}];
         if (target && target.el) {
           const el = target.el;
@@ -2144,7 +2055,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     return evalInPage(`
       (() => {
         ${DOM_INDEXING_HELPERS}
-        const items = harnessCollectItems({ actionableFirst: true }).items;
+        const items = harnessCollectItems({}).items;
         const target = items[${index}];
         if (!target || !target.el) return 'Element not found at index ${index}.';
         const el = target.el;
@@ -2214,7 +2125,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     return evalInPage(`
       (() => {
         ${DOM_INDEXING_HELPERS}
-        const items = harnessCollectItems({ actionableFirst: true }).items;
+        const items = harnessCollectItems({}).items;
         const target = items[${index}];
         if (!target || !target.el) return 'Element not found at index ${index}.';
         const el = target.el;
@@ -2254,7 +2165,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     return evalInPage(`
       (() => {
         ${DOM_INDEXING_HELPERS}
-        const items = harnessCollectItems({ actionableFirst: true }).items;
+        const items = harnessCollectItems({}).items;
         const target = items[${index}];
         if (!target || !target.el) return 'Element not found at index ${index}.';
         const el = target.el;

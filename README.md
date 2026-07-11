@@ -477,8 +477,8 @@ Agent calls run_in_terminal
 |------|-------|-------------|
 | `browser_navigate` | Parent + Sub | Navigate to a URL (http/https only). Creates a new browser tab if none exists, or navigates the active tab. Waits for the browser view to mount before returning (up to 2s). |
 | `browser_info` | Parent + Sub | Get current browser tab state: URL, page title, load status, and open tab count. |
-| `browser_screenshot` | Parent + Sub | Get a text snapshot of the current page (URL, title, viewport, visible elements, form fields, buttons, errors) grouped by viewport position buckets. Items are shown in actionable-first order, include nearest ancestor context when useful, and filter out collapsed/hidden/occluded elements so the agent can disambiguate similar items more reliably. |
-| `browser_get_dom` | Parent + Sub | Get indexed visible DOM elements with actionable-first ordering, stable visual ordering inside each group, pixel coordinates, viewport position buckets (`TL`..`BR`), and nearest ancestor context (`within="..."`). Collapsed/hidden/occluded elements are filtered out. The returned indices are the same ones used by `browser_click`, `browser_type`, `browser_select`, and other index-based browser actions. |
+| `browser_screenshot` | Parent + Sub | Get a page overview: URL, title, and a standardized position-stable grid of elements (`V:WxH`, `XX|N` section headers, `NN|tag#id[type] "label" FLAGS x,y:WxH ^ctx` per line). Capped at 500 elements. Includes visible error text. Uses the same rigid format as `browser_get_dom` for predictable parsing. |
+| `browser_get_dom` | Parent + Sub | Get the full indexed DOM in a standardized position-stable grid format: `V:WxH` viewport, `XX|N` position-bucket sections (TL..BR), each element line follows rigid field order `NN|tag#id[type] "label" FLAGS x,y:WxH ^ctx`. Indices sorted top-to-bottom, left-to-right (pure geometry). Flags: `A`=clickable, `A+`=interactive, `disabled`, `checked`, `readonly`, `required`. The returned indices are the same ones used by `browser_click`, `browser_type`, `browser_select`, `browser_upload`, and `browser_right_click`. Collapsed/hidden/occluded elements are filtered out. |
 | `browser_console` | Parent + Sub | Get the last 50 console entries (log, warn, error, dialogs) to check for JS errors |
 | `browser_request_errors` | Parent + Sub | Get failed network requests (4xx/5xx/CORS) to verify API calls and resource loads |
 | `browser_click` | **Sub-agent only** | Click by DOM index or pixel coordinates. Dispatches full pointer/mouse event sequence. |
@@ -596,21 +596,18 @@ Parent: delegate_task task="Go to http://localhost:3000/login,
 → [Browser Agent] browser_navigate http://localhost:3000/login
   → Renderer executes → page loads
 → [Browser Agent] browser_get_dom
-  → Renderer returns indexed elements grouped by
-    Top-Left / Top-Center / ... / Bottom-Right
-    with actionable-first ordering, stable visual ordering,
-    and `within="..."` ancestor context
-→ [Browser Agent] browser_click index=12  (email input in Middle-Center bucket)
+  → Renderer returns indexed elements in standardized
+    position-stable grid (V:WxH, XX|N sections, A/A+ flags)
+→ [Browser Agent] browser_click index=12  (email input with A+ flag)
   → Renderer clicks → input focused
 → [Browser Agent] browser_type index=12 text="admin"
   → Renderer types → "admin" entered
 → [Browser Agent] browser_click index=15  (password input)
 → [Browser Agent] browser_type index=15 text="pass123"
-→ [Browser Agent] browser_click index=18  (Sign In button)
+→ [Browser Agent] browser_click index=18  (Sign In button with A+ flag)
 → [Browser Agent] browser_screenshot
-  → Renderer returns a grouped page snapshot with
-    actionable-first interactive items, ancestor context,
-    and collapsed/occluded elements filtered out
+  → Renderer returns URL, title, standardized grid,
+    and filtered error text
   → Sees "Welcome, admin!" in the main content area
 
 → [Browser Agent] Completed in 10 turns.
@@ -912,7 +909,7 @@ The agent knows how to diagnose and fix errors for each language stack. Below is
 | Syntax check (all files) | `run_command` | `python -m compileall .` |
 | Run tests | `run_command` | `python -m pytest` |
 | Install dependencies | `run_command` | `pip install -r requirements.txt` or `pip install <pkg>` |
-| Flask/Django runtime errors | `browser_screenshot` or `browser_get_dom` | Flask debug mode shows full tracebacks in the browser; the position buckets plus `within="..."` ancestor context help distinguish nav chrome from the actual error pane |
+| Flask/Django runtime errors | `browser_screenshot` or `browser_get_dom` | Flask debug mode shows full tracebacks in the browser; the standardized grid with position buckets and `A`/`A+` flags helps distinguish nav chrome from the actual error pane |
 | HTTP errors from backend | `browser_request_errors` | Check for 500 errors and CORS issues |
 | Find where a function is defined | `grep` | `def <name>` or `class <Name>` |
 | Read stack traces | `read_file` | Open the failing file at the line from the traceback |
@@ -980,7 +977,7 @@ The agent knows how to diagnose and fix errors for each language stack. Below is
 
 1. **Start the server** (`run_in_terminal`) — user must Allow
 2. **Check for build errors** (`run_command`) — fixes go through `edit_file` / `write_file`
-3. **Verify the page loads** (`browser_info` → `browser_screenshot` / `browser_get_dom`, then use the position buckets, actionable-first ordering, and `within="..."` ancestor context to target the right element)
+3. **Verify the page loads** (`browser_info` → `browser_screenshot` / `browser_get_dom`, then use the standardized grid, position buckets, and `A`/`A+` flags to target the right element)
 4. **Check browser runtime errors** (`browser_console`, `browser_request_errors`)
 5. **Read relevant source files** (`read_file`) before making fixes
 6. **Make targeted edits** (`edit_file` — just send the lines that change)
@@ -1213,7 +1210,7 @@ Instead of sending the entire system prompt on every agent turn, the prompt is b
 | **Server Startup** | Per-language server startup debugging (port conflicts, missing modules, etc.) | When `run_in_terminal` or server start commands are detected |
 | **Diagnostics** | `read_problems`, `read_command_output` pagination, terminal usage | When `run_command`, `read_problems`, or build commands are detected |
 
-The `buildSystemPrompt()` function in `server/agent.ts` scans the conversation history, tool call names, and file references at each turn, then assembles a **mini-prompt** containing only the relevant chunks. This reduces the system prompt by up to **~95%** compared to sending the full prompt every turn.
+The `buildSystemPrompt()` function in `server/agent.ts` scans the conversation history, tool call names, and file references at each turn, then assembles a **mini-prompt** containing only the relevant chunks. On favorable turns, this can reduce the **system-prompt portion** by up to **~95%** compared to sending the full prompt every turn, but total request-token savings still depend on conversation history, tool output, and any retained summary context.
 
 A typical turn without browser interaction sends only ~3 chunks (Core + Build/Fix + one language chunk) instead of all 14.
 

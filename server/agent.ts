@@ -1541,9 +1541,29 @@ Current time: ${new Date().toISOString()}`;
 
 const BROWSER_USAGE = `### Browser usage
 - Use \`browser_navigate\` to go to a URL, \`browser_info\` to check the current tab state.
-- Use \`browser_screenshot\` to capture page text, \`browser_get_dom\` to inspect indexed elements.
+- Use \`browser_screenshot\` for a quick page overview (URL, title, element grid, errors). Use \`browser_get_dom\` for the full indexed element listing.
 - Use \`browser_console\` and \`browser_request_errors\` to check for errors or failed requests.
-- **All interactive browser actions** (clicking, typing, scrolling, selecting, pressing keys, uploading files) are ONLY available to the browser sub-agent. You do NOT have these tools — delegate via \`delegate_task agent_type: "browser"\`. The sub-agent returns a concise summary.`;
+- **All interactive browser actions** (clicking, typing, scrolling, selecting, pressing keys, uploading files) are ONLY available to the browser sub-agent. You do NOT have these tools — delegate via \`delegate_task agent_type: "browser"\`. The sub-agent returns a concise summary.
+
+### DOM output format (browser_get_dom / browser_screenshot)
+Both tools return elements in a standardized position-stable grid:
+\`\`\`
+V:1920x1080
+---
+TL|2
+  0|button#login "Login" A+ 50,20:100x40 ^form#login
+  1|input#user[text] "Username" A+ 50,70:200x30 ^form#login
+TC|3
+  2|input#pass[password] A+ 50,110:200x30 ^form#login
+  3|h1 "Welcome" 800,30:320x50
+  4|a#help "Help" A 1800,30:80x30 ^nav
+\`\`\`
+Each line: \` NN|tag#id[type] "label" FLAGS x,y:WxH ^ctx\`
+- \`NN\` = index to pass to click/type/select/upload/right_click
+- \`A\` = clickable, \`A+\` = interactive (input/select/textarea/button)
+- Other FLAGS: \`disabled\` \`checked\` \`readonly\` \`required\`
+- Indices are sorted top-to-bottom, left-to-right (pure geometry, stable across re-calls).
+- Look for \`A\` / \`A+\` to identify interactive elements.`;
 
 const BUILD_FIX_LOOP = `### Build & fix loop
 CRITICAL: After making ANY code changes, follow this flow to catch and fix errors:
