@@ -1989,6 +1989,30 @@ details[open] .agent-thought-summary::before { transform: rotate(90deg); }
   background: rgba(255, 255, 255, 0.08);
   color: #d7ba7d;
 }
+.agent-md-table {
+  margin: 0 0 10px;
+  border-collapse: collapse;
+  font-size: 12px;
+  line-height: 1.4;
+  width: 100%;
+}
+.agent-md-table th,
+.agent-md-table td {
+  padding: 4px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  vertical-align: top;
+}
+.agent-md-table th {
+  font-weight: 700;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+}
+.agent-md-table td {
+  color: var(--text-dim);
+}
+.agent-md-table tr:nth-child(even) td {
+  background: rgba(255, 255, 255, 0.03);
+}
 
 /* ── Speech bubble for user messages ── */
 .agent-msg-user .agent-body {

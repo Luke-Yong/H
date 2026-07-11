@@ -2569,6 +2569,105 @@ function MarkdownPreview({ text, msgId }: { text: string; msgId: string }) {
       continue;
     }
 
+    // Table: | col | col | ... header row followed by |---|---| separator
+    if (/^\|.+\|$/.test(trimmed)) {
+      const tableRows: string[][] = [];
+      let j = i;
+      // Collect consecutive table rows
+      while (j < lines.length && /^\|.+\|$/.test(lines[j].trim())) {
+        const cells = lines[j].trim()
+          .replace(/^\|/, "").replace(/\|$/, "")
+          .split("|")
+          .map((c) => c.trim());
+        tableRows.push(cells);
+        j++;
+      }
+      // Must have at least 2 rows (header + separator or header + data)
+      if (tableRows.length >= 2) {
+        // Find the separator row (contains only ---, :--, --:, :--: patterns)
+        let sepIdx = -1;
+        for (let r = 0; r < tableRows.length; r++) {
+          if (tableRows[r].every((c) => /^:?-{3,}:?$/.test(c))) {
+            sepIdx = r;
+            break;
+          }
+        }
+        if (sepIdx === 0 && tableRows.length >= 3) {
+          // Header is row 0, separator is row 0 (matched), data starts at row 1
+          // Actually if sepIdx === 0, the first row matched as separator — skip past it
+          // and the next row is the real header? No, markdown tables don't work that way.
+          // If the first row looks like a separator, just treat rows 1+ as body, no header.
+          blocks.push(
+            <table key={`${msgId}-table-${i}`} className="agent-md-table">
+              <tbody>
+                {tableRows.slice(1).map((row, ri) => (
+                  <tr key={`${msgId}-table-${i}-tr-${ri}`}>
+                    {row.map((cell, ci) => (
+                      <td key={`${msgId}-table-${i}-tr-${ri}-td-${ci}`}>
+                        {renderInlineMarkdown(cell, `${msgId}-table-${i}-tr-${ri}-td-${ci}`)}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>,
+          );
+        } else if (sepIdx === 1) {
+          // Standard: row 0 = header, row 1 = separator, rows 2+ = body
+          const header = tableRows[0];
+          const body = tableRows.slice(2);
+          // Compute alignments from separator
+          const aligns = tableRows[1].map((c) => {
+            if (c.startsWith(":") && c.endsWith(":")) return "center";
+            if (c.endsWith(":")) return "right";
+            return "left";
+          });
+          blocks.push(
+            <table key={`${msgId}-table-${i}`} className="agent-md-table">
+              <thead>
+                <tr>
+                  {header.map((cell, ci) => (
+                    <th key={`${msgId}-table-${i}-th-${ci}`} style={{ textAlign: aligns[ci] || "left" as any }}>
+                      {renderInlineMarkdown(cell, `${msgId}-table-${i}-th-${ci}`)}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {body.map((row, ri) => (
+                  <tr key={`${msgId}-table-${i}-tr-${ri}`}>
+                    {row.map((cell, ci) => (
+                      <td key={`${msgId}-table-${i}-tr-${ri}-td-${ci}`} style={{ textAlign: aligns[ci] || "left" as any }}>
+                        {renderInlineMarkdown(cell, `${msgId}-table-${i}-tr-${ri}-td-${ci}`)}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>,
+          );
+        } else {
+          // No separator found — just render as text lines
+          for (let r = i; r < j; r++) {
+            blocks.push(
+              <p key={`${msgId}-p-${r}`} className="agent-md-p">
+                {renderInlineMarkdown(lines[r].trim(), `${msgId}-p-${r}`)}
+              </p>,
+            );
+          }
+        }
+      } else {
+        // Single table-like line — treat as paragraph
+        blocks.push(
+          <p key={`${msgId}-p-${i}`} className="agent-md-p">
+            {renderInlineMarkdown(trimmed, `${msgId}-p-${i}`)}
+          </p>,
+        );
+      }
+      i = j;
+      continue;
+    }
+
     if (/^[-*]\s+/.test(trimmed)) {
       const items: string[] = [];
       let j = i;
