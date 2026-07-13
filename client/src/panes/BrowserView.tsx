@@ -336,16 +336,68 @@ const harnessBuildGrid = (items, vw, vh) => {
   }
   return lines.join('\\n');
 };
+// When the viewport is dense, split into horizontal bands so the agent
+// works one region at a time instead of drowning in a flat list.
+// Each band is a self-contained position-grid with its own bucket headers.
+const harnessBuildRegionalGrid = (items, vw, vh) => {
+  // Split into 2 bands if >400 elements, 3 bands if >800, 4 if >1200
+  let numBands = 1;
+  if (items.length > 1200) numBands = 4;
+  else if (items.length > 800) numBands = 3;
+  else if (items.length > 400) numBands = 2;
+
+  if (numBands === 1) return harnessBuildGrid(items, vw, vh);
+
+  const bandH = vh / numBands;
+  const bands = [];
+  for (let b = 0; b < numBands; b++) {
+    const y0 = Math.round(b * bandH);
+    const y1 = Math.round((b + 1) * bandH);
+    bands.push({ y0, y1, items: [] });
+  }
+
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    const cy = it.r.top + it.r.height / 2;
+    const bandIdx = Math.min(Math.floor(cy / bandH), numBands - 1);
+    bands[bandIdx].items.push(it);
+  }
+
+  const lines = [];
+  lines.push('V:' + vw + 'x' + vh + ' split ' + numBands + ' bands (' + items.length + ' elements)');
+  lines.push('---');
+  for (let b = 0; b < numBands; b++) {
+    const band = bands[b];
+    if (band.items.length === 0) continue;
+    lines.push('--- Band ' + (b + 1) + '/' + numBands + ' (y:' + band.y0 + '-' + band.y1 + ', ' + band.items.length + ' elems) ---');
+    const buckets = Object.create(null);
+    for (let i = 0; i < HARNESS_BUCKET_ORDER.length; i++) buckets[HARNESS_BUCKET_ORDER[i]] = [];
+    for (let j = 0; j < band.items.length; j++) {
+      const it = band.items[j];
+      buckets[it.pk].push(harnessBuildGridLine(it, it.idx));
+    }
+    for (let i = 0; i < HARNESS_BUCKET_ORDER.length; i++) {
+      const k = HARNESS_BUCKET_ORDER[i];
+      const arr = buckets[k];
+      if (!arr || arr.length === 0) continue;
+      lines.push(k + '|' + arr.length);
+      for (let jj = 0; jj < arr.length; jj++) lines.push(arr[jj]);
+    }
+  }
+  return lines.join('\\n');
+};
 const harnessCollectItems = (options) => {
   const opts = options || {};
   const vw = window.innerWidth;
   const vh = window.innerHeight;
   const actionableOnly = !!opts.actionableOnly;
+  const maxItems = typeof opts.maxItems === 'number' && opts.maxItems > 0 ? opts.maxItems : 0;
   const w = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
   const items = [];
   let domIdx = 0;
   let el;
   while ((el = w.nextNode())) {
+    if (maxItems > 0 && items.length >= maxItems) break;
     const r = el.getBoundingClientRect();
     if (!harnessInViewport(r, vw, vh)) {
       domIdx++;
@@ -388,6 +440,8 @@ const harnessCollectItems = (options) => {
     if (Math.abs(dx) > 0.5) return dx;
     return a.domIdx - b.domIdx;
   });
+  // Stamp each item with its global index so banded grids use stable, clickable indices
+  for (let i = 0; i < items.length; i++) items[i].idx = i;
   return { vw, vh, bucketOrder: HARNESS_BUCKET_ORDER, items };
 };
 `;
@@ -1751,8 +1805,19 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     return evalInPage(`
       (() => {
         ${DOM_INDEXING_HELPERS}
-        const collected = harnessCollectItems({});
-        return harnessBuildGrid(collected.items, collected.vw, collected.vh);
+        const collected = harnessCollectItems({ maxItems: 3000 });
+        let grid = harnessBuildRegionalGrid(collected.items, collected.vw, collected.vh);
+        // Character cap: if output exceeds 120K chars, truncate with note
+        const MAX_CHARS = 120000;
+        if (grid.length > MAX_CHARS) {
+          const at = grid.lastIndexOf('\\n', MAX_CHARS);
+          grid = grid.slice(0, at > 0 ? at : MAX_CHARS);
+          grid += '\\n... truncated (' + Math.round(grid.length / 1024) + 'K chars)';
+        }
+        if (collected.items.length >= 3000) {
+          grid += '\\nNOTE: capped at 3000 elements. Page may have more.';
+        }
+        return grid;
       })()
     `);
   }, [evalInPage]);
@@ -1864,15 +1929,23 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
         const lines = [];
         lines.push('URL: ' + window.location.href);
         lines.push('Title: ' + document.title);
-        const collected = harnessCollectItems({});
+        const collected = harnessCollectItems({ maxItems: 800 });
         const items = collected.items;
         const vw = collected.vw, vh = collected.vh;
 
         // Grid of elements (capped at 500)
         const capped = items.slice(0, 500);
-        lines.push(harnessBuildGrid(capped, vw, vh));
+        let grid = harnessBuildRegionalGrid(capped, vw, vh);
+        // Character cap: if grid exceeds 80K chars, truncate
+        const MAX_CHARS = 80000;
+        if (grid.length > MAX_CHARS) {
+          const at = grid.lastIndexOf('\\n', MAX_CHARS);
+          grid = grid.slice(0, at > 0 ? at : MAX_CHARS);
+          grid += '\\n... truncated (' + Math.round(grid.length / 1024) + 'K chars)';
+        }
+        lines.push(grid);
         if (items.length > 500) {
-          lines.push('NOTE: ' + (items.length - 500) + ' more elements not shown. Use browser_get_dom for full listing.');
+          lines.push('NOTE: showing 500 of ' + items.length + ' elements. Use browser_get_dom for more.');
         }
 
         // Error state: visible error text

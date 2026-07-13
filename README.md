@@ -475,22 +475,26 @@ Agent calls run_in_terminal
 
 | Tool | Scope | Description |
 |------|-------|-------------|
+| **Navigation** |||
 | `browser_navigate` | Parent + Sub | Navigate to a URL (http/https only). Creates a new browser tab if none exists, or navigates the active tab. Waits for the browser view to mount before returning (up to 2s). |
 | `browser_info` | Parent + Sub | Get current browser tab state: URL, page title, load status, and open tab count. |
-| `browser_screenshot` | Parent + Sub | Get a page overview: URL, title, and a standardized position-stable grid of elements (`V:WxH`, `XX|N` section headers, `NN|tag#id[type] "label" FLAGS x,y:WxH ^ctx` per line). Capped at 500 elements. Includes visible error text. Uses the same rigid format as `browser_get_dom` for predictable parsing. |
-| `browser_get_dom` | Parent + Sub | Get the full indexed DOM in a standardized position-stable grid format: `V:WxH` viewport, `XX|N` position-bucket sections (TL..BR), each element line follows rigid field order `NN|tag#id[type] "label" FLAGS x,y:WxH ^ctx`. Indices sorted top-to-bottom, left-to-right (pure geometry). Flags: `A`=clickable, `A+`=interactive, `disabled`, `checked`, `readonly`, `required`. The returned indices are the same ones used by `browser_click`, `browser_type`, `browser_select`, `browser_upload`, and `browser_right_click`. Collapsed/hidden/occluded elements are filtered out. |
+| **Observation** (read-only) |||
+| `browser_screenshot` | Parent + Sub | Get a page overview: URL, title, and a standardized position-stable grid (`V:WxH`, `XX\|N` section headers, `NN\|tag#id[type] "label" FLAGS x,y:WxH ^ctx` per line). Capped at 500 elements, 80K chars. On dense pages (>400 shown elements), the grid auto-splits into horizontal bands (`Band 1/3 y:0-600` etc.) so the agent works one region at a time. Includes visible error text. |
+| `browser_get_dom` | Parent + Sub | Get the full indexed DOM in a standardized position-stable grid. Same rigid field format as `browser_screenshot`. Capped at 3,000 elements, 120K chars. On dense pages, auto-splits into horizontal bands (2 at >400, 3 at >800, 4 at >1,200) with global indices across bands so click/type references remain correct. Indices sorted top-to-bottom, left-to-right (pure geometry). Flags: `A`=clickable, `A+`=interactive, `disabled`, `checked`, `readonly`, `required`. Collapsed/hidden/occluded elements are filtered out. |
 | `browser_console` | Parent + Sub | Get the last 50 console entries (log, warn, error, dialogs) to check for JS errors |
 | `browser_request_errors` | Parent + Sub | Get failed network requests (4xx/5xx/CORS) to verify API calls and resource loads |
+| **Interaction** (sub-agent only) |||
 | `browser_click` | **Sub-agent only** | Click by DOM index or pixel coordinates. Dispatches full pointer/mouse event sequence. |
 | `browser_type` | **Sub-agent only** | Type text into an input by DOM index — clicks first, clears, then types with realistic keyboard events |
 | `browser_clear` | **Sub-agent only** | Clear the value of an input element by DOM index |
 | `browser_select` | **Sub-agent only** | Select an option from a `<select>` dropdown by value or label |
 | `browser_scroll` | **Sub-agent only** | Scroll the page by pixels or to top/bottom |
 | `browser_press_key` | **Sub-agent only** | Press a keyboard key (Enter, Escape, Tab, Arrows, etc.) on the active element |
+| `browser_wait` | **Sub-agent only** | Wait for an element matching a CSS selector to appear (polls every 200ms, default 5s timeout) |
+| **Mouse / file upload** |||
 | `browser_move_mouse` | **Sub-agent only** | Move the cursor to x,y — triggers hover effects without clicking |
 | `browser_right_click` | **Sub-agent only** | Right-click at x,y — dispatches contextmenu event |
 | `browser_upload_file` | **Sub-agent only** | Set files on a file input by absolute paths |
-| `browser_wait` | **Sub-agent only** | Wait for an element matching a CSS selector to appear (polls every 200ms, default 5s timeout) |
 
 ### Diagnostics
 
@@ -598,6 +602,8 @@ Parent: delegate_task task="Go to http://localhost:3000/login,
 → [Browser Agent] browser_get_dom
   → Renderer returns indexed elements in standardized
     position-stable grid (V:WxH, XX|N sections, A/A+ flags)
+    On dense pages, splits into bands like "Band 1/2 y:0-450"
+    so the agent reads one region at a time.
 → [Browser Agent] browser_click index=12  (email input with A+ flag)
   → Renderer clicks → input focused
 → [Browser Agent] browser_type index=12 text="admin"
@@ -606,9 +612,10 @@ Parent: delegate_task task="Go to http://localhost:3000/login,
 → [Browser Agent] browser_type index=15 text="pass123"
 → [Browser Agent] browser_click index=18  (Sign In button with A+ flag)
 → [Browser Agent] browser_screenshot
-  → Renderer returns URL, title, standardized grid,
+  → Renderer returns URL, title, banded grid
+    (auto-splits into regions if viewport is dense),
     and filtered error text
-  → Sees "Welcome, admin!" in the main content area
+  → Sees "Welcome, admin!" in Band 2, Middle-Center section
 
 → [Browser Agent] Completed in 10 turns.
   Login test: SUCCESS. Navigated to login page,

@@ -177,6 +177,8 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   const [markersByFsPath, setMarkersByFsPath] = useState<Record<string, { fsPath: string; markers: MarkerSnapshot[] }>>({});
   const [activeFileId, setActiveFileId] = useState<string>("");
   const activeFileIdRef = useRef(activeFileId);
+  const browserTabsRef = useRef(browserTabs);
+  browserTabsRef.current = browserTabs;
   const fsPathByFileIdRef = useRef<Record<string, string>>({});
   const lspDiagTimeoutsRef = useRef<Record<string, number>>({});
   // SSE connections: one EventSource per language
@@ -1630,7 +1632,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
           const next = remaining[Math.min(Math.max(idx, 0), Math.max(0, remaining.length - 1))];
           setActiveFileId(next?.id || "");
         } else {
-          setActiveFileId("");
+          setActiveFileId(browserTabsRef.current.length > 0 ? BROWSER_EDITOR_TAB_ID : "");
         }
         return remaining;
       });
@@ -1867,13 +1869,13 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
       const remaining = prev.filter((f) => f.id !== id);
       if (activeFileIdRef.current === id) {
         const next = remaining[Math.min(Math.max(idx, 0), Math.max(0, remaining.length - 1))];
-        setActiveFileId(next?.id || "");
+        setActiveFileId(next?.id || (browserTabsRef.current.length > 0 ? BROWSER_EDITOR_TAB_ID : ""));
       } else if (
         activeFileIdRef.current &&
         activeFileIdRef.current !== BROWSER_EDITOR_TAB_ID &&
         !remaining.some((f) => f.id === activeFileIdRef.current)
       ) {
-        setActiveFileId(remaining[0]?.id || "");
+        setActiveFileId(remaining[0]?.id || (browserTabsRef.current.length > 0 ? BROWSER_EDITOR_TAB_ID : ""));
       }
       return remaining;
     });
