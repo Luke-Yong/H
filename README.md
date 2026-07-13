@@ -1148,6 +1148,61 @@ The server only exposes **tools** capability — no resources or prompts.
 ← {"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"   1| import \"dotenv/config\";\n..."}],"isError":false}}
 ```
 
+## Project Structure
+
+```
+Harness/
+├── .env.example                     # Template for environment variables (DeepSeek API key)
+├── package.json                     # Root deps (Express, better-sqlite3, node-pty), scripts (dev, test, desktop:build)
+├── tsconfig.json                    # TypeScript config for server (ES2022, strict, vitest globals)
+├── vitest.config.ts                 # Vitest runner config (node env, 30s timeout)
+├── README.md                        # You're reading it
+│
+├── server/
+│   ├── index.ts                     # Express server entry: API routes, WebSocket terminal, agent SSE streaming, MCP, browser proxy, system stats
+│   ├── agent.ts                     # Agent core: 24+ tool definitions, agentLoop/Stream/StepByStep, sub-agent delegation, permission gating, ITR system prompt builder, history compaction
+│   ├── deepseek.ts                  # DeepSeek API client: blocking + streaming chat w/ tool-calling, embeddings, KV cache tracking, usage reporting
+│   ├── terminalManager.ts           # Terminal session manager: PTY (node-pty) and pipe fallback, WebSocket I/O, venv auto-activation, localhost URL detection
+│   ├── lsp.ts                       # LSP client: spawns language servers (pyright, gopls, etc.), SSE diagnostic streaming, 30+ languages
+│   ├── mcp.ts                       # MCP server: JSON-RPC handler, tool set for external AI clients, stdio + SSE transport
+│   ├── mcp-server.ts                # Standalone MCP server entry point (stdio mode)
+│   ├── memory.ts                    # SQLite persistent memory store (~/.harness/memory.db): keyword + embedding search, used by agent remember/recall/forget tools
+│   └── __tests__/                   # 5 test files: tool definitions, filesystem ops, command execution, agent loop, API integration
+│
+├── client/
+│   ├── package.json                 # Client deps (React 18, Monaco, xterm.js), Vite + TypeScript
+│   ├── vite.config.ts               # Vite dev config: port 5173, proxies /api + /ws + /_browser to localhost:3001
+│   ├── tsconfig.json                # Client TypeScript config (ES2020, DOM, react-jsx)
+│   ├── index.html                   # SPA entry: mounts React app in <div id="root">
+│   └── src/
+│       ├── main.tsx                 # React DOM entry: renders <App />
+│       ├── App.tsx                  # Root component: folder picker, session state, resizable layout (editor + agent console)
+│       ├── App.css                  # Global dark-theme styles: pane layout, editor chrome, agent cards, welcome screen
+│       ├── electron.d.ts            # Type declarations for window.harnessDesktop bridge and <webview> JSX
+│       ├── panes/
+│       │   ├── EditorPane.tsx       # Main editor: Monaco tabs, file tree, browser tab strip, terminal, menu bar, status bar
+│       │   ├── AgentConsole.tsx     # Agent chat UI: streaming messages, diff previews, permission prompts, tool cards, markdown rendering
+│       │   ├── TerminalPane.tsx     # xterm.js terminal: WebSocket-backed PTY, Ctrl+click links, scrollback, agent bridge
+│       │   ├── FilesPanel.tsx       # File explorer tree: virtual files + backend FsEntry, create/rename/delete
+│       │   ├── BrowserView.tsx      # Embedded browser: iframe proxy, getIndexedDom/clickElement/typeIntoElement agent APIs, DOM indexing helpers
+│       │   ├── MenuBar.tsx          # Dropdown menus: File, Edit, View, Run, Help with keyboard shortcuts
+│       │   ├── StatusBar.tsx        # Status bar: cursor position, encoding, indent, language, LSP errors, memory count
+│       │   ├── ScmPanel.tsx         # Source control: git status, commit log, fetch/pull/push, diff
+│       │   ├── NameDialog.tsx       # Modal dialog for create/rename files and folders
+│       │   ├── PathDialog.tsx       # Modal dialog for manually opening a folder path
+│       │   ├── AgentTerminalBridge.ts # Bridge: agent commands → real terminal execution
+│       │   ├── fileModel.ts         # VFile type, detectLanguage(), file/folder icon helpers
+│       │   └── browserFs.ts         # Browser File System API: pickAndEnumerateFolder, readFile, writeFile
+│       └── hooks/
+│           └── useResizable.tsx     # Drag-to-resize panel splitter hook
+│
+└── electron/
+    ├── main.cjs                      # Electron main process: BrowserWindow, server lifecycle, IPC (folder/file picker, geo, permissions), browser session
+    ├── preload.cjs                   # Preload bridge: exposes window.harnessDesktop (openFolder, openFile, onBrowserOpenUrl, setSitePermissions)
+    ├── browser-preload.cjs           # Browser webview preload: geolocation bridge, _blank link interception
+    └── native-location.cjs           # Windows geolocation via PowerShell GeoCoordinateWatcher
+```
+
 ## Testing
 
 Harness includes an automated test suite using [Vitest](https://vitest.dev). Tests cover all agent tools, the agent loop (with mocked DeepSeek API), tool schema validation, and API endpoints.
