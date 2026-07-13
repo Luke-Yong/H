@@ -34,7 +34,7 @@ interface TermInstance {
   isAgentTerminal: boolean;
   currentPromptMarker?: IMarker;
   lastCommandMarker?: IMarker;
-  promptMarkers: Array<{ id: number; marker: IMarker; kind: "idle" | "success" | "error" }>;
+  promptMarkers: Array<{ id: number; marker: IMarker; kind: "idle" | "running" | "success" | "error" | "interrupted" }>;
   commandMarkerIds: number[];
   commandNavIndex: number;
   writeChain: Promise<void>;
@@ -533,12 +533,17 @@ export default function TerminalPane({
   }, []);
 
   const ensurePromptMarker = useCallback((inst: TermInstance) => {
-    const existing = inst.currentPromptMarker;
-    if (existing && existing.line >= 0) return existing;
+    // Always register a fresh marker at the current cursor position.
+    // Each command gets its own gutter dot — reusing the old marker
+    // would overwrite the previous command's state.
     const marker = inst.term.registerMarker(0);
     if (!marker) return undefined;
     inst.currentPromptMarker = marker;
     inst.promptMarkers = [...inst.promptMarkers, { id: marker.id, marker, kind: "idle" }];
+    // Keep at most 200 markers to avoid unbounded memory growth
+    if (inst.promptMarkers.length > 200) {
+      inst.promptMarkers = inst.promptMarkers.slice(-200);
+    }
     bumpGutter();
     return marker;
   }, [bumpGutter]);
@@ -559,6 +564,7 @@ export default function TerminalPane({
       inst.commandRunning = true;
       inst.commandSawError = false;
       inst.lastCommandMarker = inst.currentPromptMarker;
+      setCommandDecorationKind(inst, inst.lastCommandMarker, "running");
       const m = inst.lastCommandMarker;
       if (m && (inst.commandMarkerIds.length === 0 || inst.commandMarkerIds[inst.commandMarkerIds.length - 1] !== m.id)) {
         inst.commandMarkerIds = [...inst.commandMarkerIds, m.id];
@@ -587,7 +593,7 @@ export default function TerminalPane({
     };
   }, [moreOpen]);
 
-  const setCommandDecorationKind = useCallback((inst: TermInstance, marker: IMarker | undefined, kind: "idle" | "success" | "error") => {
+  const setCommandDecorationKind = useCallback((inst: TermInstance, marker: IMarker | undefined, kind: "idle" | "running" | "success" | "error" | "interrupted") => {
     if (!marker) return;
     inst.promptMarkers = inst.promptMarkers.map((entry) => (
       entry.marker.id === marker.id ? { ...entry, kind } : entry
@@ -676,6 +682,7 @@ export default function TerminalPane({
         inst.commandRunning = true;
         inst.commandSawError = false;
         inst.lastCommandMarker = inst.currentPromptMarker;
+        setCommandDecorationKind(inst, inst.lastCommandMarker, "running");
         const m = inst.lastCommandMarker;
         if (m && (inst.commandMarkerIds.length === 0 || inst.commandMarkerIds[inst.commandMarkerIds.length - 1] !== m.id)) {
           inst.commandMarkerIds = [...inst.commandMarkerIds, m.id];
@@ -716,6 +723,10 @@ export default function TerminalPane({
       inst.input = "";
       inst.cursor = 0;
       inst.historyIndex = inst.history.length;
+      if (inst.commandRunning && inst.lastCommandMarker) {
+        setCommandDecorationKind(inst, inst.lastCommandMarker, "interrupted");
+        inst.commandRunning = false;
+      }
       sendToServer(inst.id, "\x03");
       return;
     }
@@ -914,8 +925,11 @@ export default function TerminalPane({
     if (buffered) {
       pendingOutputRef.current.delete(id);
       for (const chunk of buffered) {
-        if (inst.commandRunning && /error|exception|failed|not recognized|cannot|categoryinfo|fullyqualifiederrorid|itemnotfoundexception/i.test(chunk)) {
+        if (inst.commandRunning && /error|errno|exception|failed|traceback|no such file|not recognized|cannot|categoryinfo|fullyqualifiederrorid|itemnotfoundexception/i.test(chunk)) {
           inst.commandSawError = true;
+          if (inst.lastCommandMarker) {
+            setCommandDecorationKind(inst, inst.lastCommandMarker, "error");
+          }
         }
         writeWithPromptHandling(inst, chunk);
       }
@@ -997,6 +1011,12 @@ export default function TerminalPane({
             inst.commandSawError = false;
             inst.commandEchoSeen = false;
             inst.isAgentTerminal = true;
+            // Create a gutter marker for this agent command
+            const am = ensurePromptMarker(inst);
+            if (am) {
+              inst.lastCommandMarker = am;
+              setCommandDecorationKind(inst, am, "running");
+            }
             const label = getCommandLabel(ac.command);
             if (label) setLabelById((prev) => ({ ...prev, [id]: label }));
           };
@@ -1015,8 +1035,13 @@ export default function TerminalPane({
         (agentTerminalBridge as AgentTerminalBridgeInternal)?._pushOutput(output);
         const inst = termsRef.current.get(id);
         if (inst) {
-          if (inst.commandRunning && /error|exception|failed|not recognized|cannot|categoryinfo|fullyqualifiederrorid|itemnotfoundexception/i.test(clean)) {
+          if (inst.commandRunning && /error|errno|exception|failed|traceback|no such file|not recognized|cannot|categoryinfo|fullyqualifiederrorid|itemnotfoundexception/i.test(clean)) {
             inst.commandSawError = true;
+            // Immediately update the gutter marker — don't wait for prompt detection
+            // which may never fire (e.g., process crashes, output doesn't contain a prompt)
+            if (inst.lastCommandMarker) {
+              setCommandDecorationKind(inst, inst.lastCommandMarker, "error");
+            }
           }
           writeWithPromptHandling(inst, clean);
           return;
@@ -1043,7 +1068,18 @@ export default function TerminalPane({
         // Forward exit to agent bridge
         (agentTerminalBridge as AgentTerminalBridgeInternal)?._pushFinish(code ? parseInt(code, 10) || -1 : -1);
         const inst = termsRef.current.get(id);
-        inst?.term.writeln(`\r\n[Process exited code=${code}]`);
+        if (inst) {
+          // Finalize gutter marker before disposing
+          if (inst.commandRunning && inst.lastCommandMarker) {
+            const exitCode = code ? parseInt(code, 10) : -1;
+            if (exitCode === 0 || exitCode === -1) {
+              setCommandDecorationKind(inst, inst.lastCommandMarker, "success");
+            } else {
+              setCommandDecorationKind(inst, inst.lastCommandMarker, "error");
+            }
+          }
+          inst.term.writeln(`\r\n[Process exited code=${code}]`);
+        }
         setTermIds((prev) => prev.filter((x) => x !== id));
         const nextSelection = getNextSelectionAfterRemoval(id);
         setTerminalGroups(nextSelection.groups);

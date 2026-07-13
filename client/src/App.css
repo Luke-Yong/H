@@ -3061,12 +3061,29 @@ body.resizing webview.browser-iframe {
 }
 
 .terminal-gutter-marker-success {
-  background: rgba(55, 148, 255, 0.12);
+  background: rgba(76, 201, 76, 0.10);
+}
+.terminal-gutter-marker-success .term-command-action-dot {
+  background: rgb(76, 201, 76);
 }
 
-.terminal-gutter-marker-success .term-command-action-dot {
+.terminal-gutter-marker-running {
+  background: rgba(55, 148, 255, 0.10);
+}
+.terminal-gutter-marker-running .term-command-action-dot {
   background: rgb(55, 148, 255);
-  box-shadow: 0 0 0 2px rgba(55, 148, 255, 0.18);
+  animation: term-dot-pulse 1.2s ease-in-out infinite;
+}
+@keyframes term-dot-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.7); }
+}
+
+.terminal-gutter-marker-interrupted {
+  background: rgba(200, 160, 0, 0.10);
+}
+.terminal-gutter-marker-interrupted .term-command-action-dot {
+  background: rgb(200, 160, 0);
 }
 
 .terminal-gutter-marker-error {
