@@ -1198,21 +1198,99 @@ Harness uses four layers to reduce token usage and API costs when talking to Dee
 
 ### 1. Instruction-Tool Retrieval (ITR)
 
-Instead of sending the entire system prompt on every agent turn, the prompt is broken into **14 themed chunks** in `server/agent.ts`:
+Instead of sending the entire system prompt on every agent turn, the prompt is broken into **14 themed chunks** in `server/agent.ts`, each with a set of trigger keywords. At each turn, `buildSystemPrompt()` selects only the chunks relevant to the current conversation context.
 
-| Chunk | Contents | When Included |
-|---|---|---|
-| **Core Rules** | Agent identity, workflow rules, file conventions | Always |
-| **Browser Usage** | Browser tool reference, web element patterns (modals, dropdowns, autocomplete, etc.) | When `browser_*` tools are in use, or UI keywords detected |
-| **Build & Fix Loop** | Compile → fix → repeat workflow | When errors, builds, or `edit_file`/`write_file` are detected |
-| **Language-specific** (8 chunks) | JS/TS, Python, Go, Rust, Java, C/C++, Ruby, PHP, Shell troubleshooting | Detected from file extensions (`.py`, `.ts`, `.go`, etc.), config files (`package.json`, `go.mod`, `Cargo.toml`), and error patterns |
-| **General Tips** | Multi-language detection, config file recognition | Always |
-| **Server Startup** | Per-language server startup debugging (port conflicts, missing modules, etc.) | When `run_in_terminal` or server start commands are detected |
-| **Diagnostics** | `read_problems`, `read_command_output` pagination, terminal usage | When `run_command`, `read_problems`, or build commands are detected |
+#### Chunk registry
 
-The `buildSystemPrompt()` function in `server/agent.ts` scans the conversation history, tool call names, and file references at each turn, then assembles a **mini-prompt** containing only the relevant chunks. On favorable turns, this can reduce the **system-prompt portion** by up to **~95%** compared to sending the full prompt every turn, but total request-token savings still depend on conversation history, tool output, and any retained summary context.
+Each chunk is a constant string paired with an array of trigger keywords:
 
-A typical turn without browser interaction sends only ~3 chunks (Core + Build/Fix + one language chunk) instead of all 14.
+| Chunk (id) | Size | Trigger keywords (partial) | Decision |
+|---|---|---|---|
+| `CORE_RULES` | ~700 words | — | Always included |
+| `browser` | ~400 words | `browser_`, `DOM`, `navigate`, `click`, `type`, `form`, `modal`, `dialog`, `dropdown`, `autocomplete`, `hover` | Score ≥ 2, or auto-included if any `browser_*` tool has been called |
+| `build_fix` | ~120 words | `build`, `compile`, `error`, `fix`, `edit_file`, `write_file`, `read_problems`, `run_command`, `syntax` | Score ≥ 2 |
+| `lang_js` | ~200 words | `.ts`, `.tsx`, `.js`, `.jsx`, `package.json`, `typescript`, `node`, `npm`, `react`, `vite`, `import ` | Score ≥ 2 |
+| `lang_python` | ~250 words | `.py`, `python`, `pip`, `flask`, `django`, `traceback`, `ModuleNotFoundError`, `uvicorn` | Score ≥ 2 |
+| `lang_go` | ~100 words | `.go`, `go.mod`, `go build`, `go vet`, `go test`, `go run` | Score ≥ 2 |
+| `lang_rust` | ~100 words | `.rs`, `cargo`, `Cargo.toml`, `rustc`, `rust`, `clippy` | Score ≥ 2 |
+| `lang_java` | ~80 words | `.java`, `pom.xml`, `build.gradle`, `maven`, `mvn`, `gradle`, `javac` | Score ≥ 2 |
+| `lang_c` | ~80 words | `.c`, `.cpp`, `.h`, `CMakeLists.txt`, `gcc`, `g++`, `cmake`, `makefile` | Score ≥ 2 |
+| `lang_ruby` | ~80 words | `.rb`, `Gemfile`, `ruby`, `rake`, `rspec`, `bundle`, `gem`, `rails` | Score ≥ 2 |
+| `lang_php` | ~60 words | `.php`, `composer.json`, `php`, `laravel`, `symfony`, `wordpress` | Score ≥ 2 |
+| `lang_shell` | ~60 words | `.sh`, `.bash`, `shellcheck`, `#!/bin/bash`, `bash `, `Makefile` | Score ≥ 2 |
+| `lang_general` | ~80 words | — | Always included |
+| `server_startup` | ~350 words | `run_in_terminal`, `npm start`, `npm run dev`, `flask run`, `uvicorn`, `EADDRINUSE`, `port`, `listen` | Score ≥ 2 |
+| `diagnostics` | ~200 words | `run_command`, `read_problems`, `read_command_output`, `terminal`, `sandbox`, `build`, `compile`, `test`, `lint`, `error` | Score ≥ 2 |
+
+Full chunk registry with every trigger keyword lives in [`PROMPT_CHUNKS`](file:///d:/Work Projects/Harness/server/agent.ts#L1743-L1862).
+
+#### Selection algorithm
+
+At each agent turn, `buildSystemPrompt()` in [agent.ts](file:///d:/Work Projects/Harness/server/agent.ts#L1907-L1959) runs this flow:
+
+```
+1. Start with CORE_RULES (always present)
+
+2. Build a combined text blob from:
+   • All message content (user, assistant, tool results)
+   • Tool call names extracted from assistant messages
+   • IDE context (open files, diagnostics)
+
+3. For each optional chunk:
+   count = 0
+   for each trigger keyword:
+       if keyword (case-insensitive) appears in combined blob:
+           count += 1
+   if count >= 2 → INCLUDE chunk
+   if count < 2  → SKIP chunk
+
+4. Special rule: browser chunk gets auto-included (boost = +5)
+   if any browser_* tool has been called this session,
+   regardless of keyword matches
+
+5. Append IDE context footer
+
+6. Log selection stats to console:
+   [ITR] prompt: 6142 chars (~1535 tokens) | 5 chunks selected, 9 skipped
+   [ITR]   included: build_fix(s:6), lang_js(s:7), diagnostics(s:4)
+   [ITR]   skipped:  browser(s:0), lang_python(s:0), lang_go(s:0), ...
+```
+
+#### Concrete example: TypeScript project, no browser interaction
+
+The `combined` text blob for a typical TypeScript turn contains `.ts`, `package.json`, `typescript`, `edit_file`, `run_command`, `build`, `error`, `read_problems`, `import `, etc.
+
+```
+Chunk            Triggers matched              Score   Decision
+─────────────────────────────────────────────────────────────────
+CORE_RULES       (always)                       —      ✓ INCLUDE
+browser          none                           0      ✗ SKIP
+build_fix        build, error, edit_file,       6      ✓ INCLUDE
+                 fix, run_command, syntax
+lang_js          .ts, package.json,             7      ✓ INCLUDE
+                 typescript, import, npx,
+                 tsc, react
+lang_python      none                           0      ✗ SKIP
+lang_go          none                           0      ✗ SKIP
+lang_rust        none                           0      ✗ SKIP
+lang_java        none                           0      ✗ SKIP
+lang_c           none                           0      ✗ SKIP
+lang_ruby        none                           0      ✗ SKIP
+lang_php         none                           0      ✗ SKIP
+lang_shell       none                           0      ✗ SKIP
+lang_general     (always)                       —      ✓ INCLUDE
+server_startup   none                           0      ✗ SKIP
+diagnostics      run_command, read_problems,    4      ✓ INCLUDE
+                 build, test
+─────────────────────────────────────────────────────────────────
+Result: 5 chunks included, 9 skipped
+```
+
+**~600 words sent vs ~8,000 if all 14 chunks → ~92% reduction in system prompt size.**
+
+#### Interaction with DeepSeek prefix caching
+
+Because `buildSystemPrompt()` produces **the same output** when the conversation context is stable (same project, same language, same tool patterns), the system message stays identical across consecutive turns. DeepSeek's server-side KV cache then reuses the cached prefix tokens — so the system prompt costs **zero additional tokens** on cache hits beyond the first turn. ITR keeps the prompt small and stable, which makes cache hits more frequent.
 
 ### 2. Context Caching
 
