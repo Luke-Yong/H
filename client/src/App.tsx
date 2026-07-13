@@ -17,24 +17,6 @@ interface BrowserTab {
   label: string;
 }
 
-function reportDebug(hypothesisId: string, location: string, msg: string, data: Record<string, unknown>) {
-  // #region debug-point C:app-report
-  fetch("http://127.0.0.1:7777/event", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      sessionId: "desktop-browser-crash",
-      runId: "post-fix",
-      hypothesisId,
-      location,
-      msg: `[DEBUG] ${msg}`,
-      data,
-      ts: Date.now(),
-    }),
-  }).catch(() => {});
-  // #endregion
-}
-
 function normalizeBrowserOpenUrl(rawUrl: string): string {
   const trimmedUrl = rawUrl.trim();
   if (!trimmedUrl) return "";
@@ -126,14 +108,10 @@ export default function App() {
   }, []);
 
   const handleDetectUrl = useCallback((_sessionId: string, url: string) => {
-    // #region debug-point C:handle-detect-url
-    reportDebug("C", "App.tsx:handleDetectUrl", "terminal detected browser url", {
-      sessionId: _sessionId,
-      url,
-      existingTabs: browserTabs.length,
-    });
-    // #endregion
-    openBrowserTabForUrl(url, true);
+    const normalizedUrl = normalizeBrowserOpenUrl(url);
+    if (normalizedUrl) {
+      openBrowserTabForUrl(normalizedUrl, true);
+    }
   }, [browserTabs.length]);
 
   const handleAddBrowserTab = useCallback(() => {

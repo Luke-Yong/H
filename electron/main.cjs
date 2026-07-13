@@ -28,22 +28,6 @@ process.on("uncaughtException", (error) => {
   showFatalStartupError(error);
 });
 
-function reportDebugMain(hypothesisId, location, msg, data) {
-  fetch("http://127.0.0.1:7777/event", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      sessionId: "desktop-browser-crash",
-      runId: "post-fix",
-      hypothesisId,
-      location,
-      msg: `[DEBUG] ${msg}`,
-      data,
-      ts: Date.now(),
-    }),
-  }).catch(() => {});
-}
-
 function escapeHtml(value) {
   return String(value)
     .replace(/&/g, "&amp;")
@@ -196,15 +180,6 @@ function setupBrowserSession() {
 
   browserSession.setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => {
     const allowed = isPermissionEnabled(requestingOrigin, permission, details);
-    const resolvedOrigin = resolvePermissionOrigin(requestingOrigin, details);
-    reportDebugMain("D", "electron/main.cjs:permissionCheck", "permission check", {
-      permission,
-      requestingOrigin,
-      requestingUrl: details?.requestingUrl,
-      embeddingOrigin: details?.embeddingOrigin,
-      resolvedOrigin,
-      allowed,
-    });
     if (allowed && permission === "geolocation") {
       scheduleGeolocationOverride(webContents, "permission-check");
     }
@@ -213,16 +188,6 @@ function setupBrowserSession() {
 
   browserSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
     const allowed = isPermissionEnabled(details?.requestingUrl, permission, details);
-    const resolvedOrigin = resolvePermissionOrigin(details?.requestingUrl, details);
-    reportDebugMain("D", "electron/main.cjs:permissionRequest", "permission request", {
-      permission,
-      requestingOrigin: details?.requestingOrigin,
-      requestingUrl: details?.requestingUrl,
-      embeddingOrigin: details?.embeddingOrigin,
-      mediaTypes: details?.mediaTypes,
-      resolvedOrigin,
-      allowed,
-    });
     if (allowed && permission === "geolocation") {
       scheduleGeolocationOverride(webContents, "permission-request");
     }
@@ -273,14 +238,6 @@ async function ensureGeolocationOverride(contents, reason = "") {
     loc = await getIdeWideLocation(35_000);
   }
   if (!loc?.ok) {
-    reportDebugMain("D", "electron/main.cjs:geoOverride", "no ide-wide location available; cannot override", {
-      id: contents.id,
-      origin,
-      url: currentUrl,
-      reason,
-      code: loc?.code,
-      message: loc?.message,
-    });
     return;
   }
 
@@ -289,11 +246,6 @@ async function ensureGeolocationOverride(contents, reason = "") {
       contents.debugger.attach("1.3");
     }
   } catch (err) {
-    reportDebugMain("D", "electron/main.cjs:geoOverride", "debugger attach failed", {
-      id: contents.id,
-      url: currentUrl,
-      message: err instanceof Error ? err.message : String(err),
-    });
     return;
   }
 
@@ -303,21 +255,7 @@ async function ensureGeolocationOverride(contents, reason = "") {
       longitude: Number(loc.longitude),
       accuracy: Math.max(1, Number(loc.accuracy || 100)),
     });
-    reportDebugMain("D", "electron/main.cjs:geoOverride", "geolocation override set", {
-      id: contents.id,
-      origin,
-      reason,
-      provider: loc.provider,
-      latitude: loc.latitude,
-      longitude: loc.longitude,
-      accuracy: loc.accuracy,
-    });
   } catch (err) {
-    reportDebugMain("D", "electron/main.cjs:geoOverride", "geolocation override failed", {
-      id: contents.id,
-      origin,
-      message: err instanceof Error ? err.message : String(err),
-    });
   }
 }
 
@@ -330,14 +268,6 @@ async function refreshSharedLocation(reason, timeoutMs) {
       cachedLocation = result;
       cachedLocationUpdatedAt = Date.now();
     }
-    reportDebugMain("D", "electron/main.cjs:sharedLocation", "shared location refresh finished", {
-      reason,
-      ok: !!result?.ok,
-      provider: result?.provider,
-      code: result?.code,
-      message: result?.message,
-      usedCachedFallback: !!(!result?.ok && cachedLocation?.ok),
-    });
     if (result?.ok) {
       for (const contents of getAllBrowserContents()) {
         void ensureGeolocationOverride(contents);
@@ -365,10 +295,6 @@ async function getIdeWideLocation(timeoutMs) {
   ensureSharedLocationLoop();
 
   if (cachedLocation?.ok && Date.now() - cachedLocationUpdatedAt <= LOCATION_FRESH_MS) {
-    reportDebugMain("D", "electron/main.cjs:sharedLocation", "shared location cache hit", {
-      provider: cachedLocation.provider,
-      ageMs: Date.now() - cachedLocationUpdatedAt,
-    });
     return cachedLocation;
   }
 
@@ -376,12 +302,6 @@ async function getIdeWideLocation(timeoutMs) {
   if (result?.ok) return result;
 
   if (cachedLocation?.ok) {
-    reportDebugMain("D", "electron/main.cjs:sharedLocation", "using stale cached location after refresh failure", {
-      provider: cachedLocation.provider,
-      ageMs: Date.now() - cachedLocationUpdatedAt,
-      code: result?.code,
-      message: result?.message,
-    });
     return cachedLocation;
   }
 
@@ -419,10 +339,6 @@ function registerIpc() {
       if (enabled) next.add(key);
     }
     sitePermissions.set(origin, next);
-    reportDebugMain("D", "electron/main.cjs:setSitePermissions", "stored site permissions", {
-      origin,
-      permissions: Array.from(next.values()),
-    });
     for (const contents of getAllBrowserContents()) {
       void ensureGeolocationOverride(contents);
     }
@@ -437,12 +353,6 @@ function registerIpc() {
       requestingOrigin: senderOrigin,
     });
 
-    reportDebugMain("D", "electron/main.cjs:getNativeLocation", "native location request", {
-      senderUrl,
-      senderOrigin,
-      allowed,
-    });
-
     if (!allowed) {
       return {
         ok: false,
@@ -453,13 +363,6 @@ function registerIpc() {
 
     const timeoutMs = Math.max(30_000, Number(payload?.options?.timeout) || 35_000);
     const result = await getIdeWideLocation(timeoutMs);
-    reportDebugMain("D", "electron/main.cjs:getNativeLocation", "native location result", {
-      senderOrigin,
-      ok: !!result?.ok,
-      provider: result?.provider,
-      code: result?.code,
-      message: result?.message,
-    });
     return result;
   });
 }
@@ -549,11 +452,6 @@ app.whenReady().then(async () => {
     contents.on("did-navigate-in-page", apply);
     try {
       contents.debugger.on("detach", (_event, reason) => {
-        reportDebugMain("D", "electron/main.cjs:geoOverride", "debugger detached", {
-          id: contents.id,
-          url: contents.getURL?.() || "",
-          reason,
-        });
         scheduleGeolocationOverride(contents, "debugger-detach");
       });
     } catch {}
