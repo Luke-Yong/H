@@ -1564,9 +1564,21 @@ wss.on("connection", (ws) => {
 });
 
 if (process.env.NODE_ENV !== "test") {
-  server.listen(PORT, () => {
-    console.log(`Harness server running on http://localhost:${PORT}`);
-  });
+  const tryPort = (port: number, maxRetries = 10) => {
+    server.listen(port, () => {
+      console.log(`Harness server running on http://localhost:${port}`);
+    });
+    server.on("error", (err: NodeJS.ErrnoException) => {
+      if (err.code === "EADDRINUSE" && port < PORT + maxRetries) {
+        console.log(`Port ${port} in use, trying ${port + 1}...`);
+        server.close();
+        tryPort(port + 1, maxRetries - 1);
+      } else {
+        throw err;
+      }
+    });
+  };
+  tryPort(PORT);
 }
 
 process.on("SIGINT", async () => {

@@ -32,6 +32,11 @@ npm run dev
 
 This starts both the backend (port 3001) and frontend (port 5173). Open `http://localhost:5173`.
 
+**Port fallback:** If a port is busy, both servers auto-retry on the next port:
+- **Frontend (5173):** Vite increments to 5174, 5175, etc. The client auto-detects the new WebSocket path.
+- **Backend (3001):** Tries 3002, 3003, ... up to 3010 before giving up. Logs the settled port to console.
+- In dev mode the Vite proxy in `vite.config.ts` points to `localhost:3001`, so if the backend falls back to a different port the proxy needs updating. In desktop/production mode only the backend port matters (the frontend is served by Express).
+
 ## Architecture
 
 Harness is a client-server application with an optional Electron desktop shell.
