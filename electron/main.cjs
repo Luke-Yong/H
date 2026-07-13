@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain, dialog, session, webContents } = require("electron");
 const http = require("http");
 const path = require("path");
+const fs = require("fs");
 const { getBestAvailableLocation } = require("./native-location.cjs");
 require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
 
@@ -313,12 +314,34 @@ function registerIpc() {
     event.returnValue = `file:///${path.join(__dirname, "browser-preload.cjs").replace(/\\/g, "/")}`;
   });
 
+  // Last opened folder tracking — for defaulting dialog to parent
+  const LAST_FOLDER_FILE = path.join(app.getPath("userData"), "last-folder.json");
+  function loadLastFolder() {
+    try {
+      if (fs.existsSync(LAST_FOLDER_FILE)) {
+        const data = JSON.parse(fs.readFileSync(LAST_FOLDER_FILE, "utf8"));
+        if (typeof data.path === "string" && data.path) return data.path;
+      }
+    } catch {}
+    return null;
+  }
+  function saveLastFolder(folderPath) {
+    try {
+      fs.writeFileSync(LAST_FOLDER_FILE, JSON.stringify({ path: folderPath }));
+    } catch {}
+  }
+
   ipcMain.handle("harness:openFolder", async () => {
+    const lastFolder = loadLastFolder();
+    const defaultPath = lastFolder ? path.dirname(lastFolder) : undefined;
     const result = await dialog.showOpenDialog({
       properties: ["openDirectory"],
+      defaultPath,
     });
     if (result.canceled) return "";
-    return result.filePaths?.[0] || "";
+    const chosen = result.filePaths?.[0] || "";
+    if (chosen) saveLastFolder(chosen);
+    return chosen;
   });
 
   ipcMain.handle("harness:openFile", async () => {

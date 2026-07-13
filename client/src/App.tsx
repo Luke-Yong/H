@@ -44,6 +44,26 @@ export default function App() {
   const agentFileActionRef = useRef<((fcPath: string, accepted: boolean) => void) | null>(null);
   // Agent ↔ terminal bridge – agent commands run in real terminal instances
   const agentTerminalBridge = useMemo(() => createAgentTerminalBridge(), []);
+
+  // Recent paths (persisted to localStorage)
+  const RECENT_PATHS_KEY = "harness_recentPaths";
+  const [recentPaths, setRecentPaths] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem(RECENT_PATHS_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) return parsed.filter((p) => typeof p === "string").slice(0, 5);
+      }
+    } catch {}
+    return [];
+  });
+  const addRecentPath = useCallback((p: string) => {
+    setRecentPaths((prev) => {
+      const next = [p, ...prev.filter((x) => x !== p)].slice(0, 5);
+      try { localStorage.setItem(RECENT_PATHS_KEY, JSON.stringify(next)); } catch {}
+      return next;
+    });
+  }, []);
   const [debugEntries, setDebugEntries] = useState<DebugConsoleEntry[]>([]);
   const [outputEntries, setOutputEntries] = useState<OutputEntry[]>([]);
   const debugIdRef = useRef(0);
@@ -284,10 +304,11 @@ export default function App() {
       setFsBasePath(data.path);
       isBrowserFs.current = false;
       setShowConsole(true);
+      addRecentPath(data.path);
       await detectProject(data.path);
       ensureTerminalVisible(shouldRestartTerminal);
     } catch (err) { alert(`Failed to open folder: ${err}`); }
-  }, [detectProject, ensureTerminalVisible]);
+  }, [detectProject, ensureTerminalVisible, addRecentPath]);
 
   const openFolderImmediate = useCallback(async () => {
     const desktop = window.harnessDesktop;
@@ -309,10 +330,11 @@ export default function App() {
     setFsBasePath(picked.name);
     isBrowserFs.current = true;
     setShowConsole(true);
+    addRecentPath(picked.name);
     setProjectVenvDir("");
     setProjectActivateScript("");
     ensureTerminalVisible(false);
-  }, [ensureTerminalVisible, openFolder]);
+  }, [ensureTerminalVisible, openFolder, addRecentPath]);
 
   const refreshFs = useCallback(async () => {
     if (isBrowserFs.current || !fsBasePath) return;
@@ -570,6 +592,8 @@ export default function App() {
             onBrowserTabUpdateUrl={handleBrowserTabUpdateUrl}
             onBrowserNewTabFromLink={handleBrowserNewTabFromLink}
             onOpenFolder={() => { void openFolderImmediate(); }}
+            recentPaths={recentPaths}
+            onOpenRecent={(p: string) => { void openFolder(p); }}
             onCreateProject={() => {
               promptName("Project name:", undefined, (name) => { void createNewProject(name); });
             }}

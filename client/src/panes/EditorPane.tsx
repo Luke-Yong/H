@@ -86,6 +86,8 @@ interface Props {
   onBrowserTabUpdateUrl?: (tabId: string, url: string) => void;
   onBrowserNewTabFromLink?: (url: string) => void;
   onOpenFolder: () => void;
+  recentPaths?: string[];
+  onOpenRecent?: (path: string) => void;
   onCreateProject: () => void;
   onCreateFile: () => void;
   onOpenFile: () => void;
@@ -168,7 +170,8 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   { fsRoot, fsBasePath, terminalVenvDir, terminalActivateScript, browserTabs, activeBrowserTabId,
     onActiveBrowserTabChange, onCloseBrowser, onBrowserTabClose, onAddBrowserTab,
     onBrowserTabUpdateLabel, onBrowserTabUpdateUrl, onBrowserNewTabFromLink,
-    onOpenFolder, onCreateProject, onCreateFile, onOpenFile, onRefreshFs,
+    onOpenFolder, recentPaths, onOpenRecent,
+    onCreateProject, onCreateFile, onOpenFile, onRefreshFs,
     terminalVisible, onCloseTerminal, onDetectUrl, debugEntries, onClearDebugEntries, outputEntries, onClearOutputEntries,
     onOpenDevtools, devtoolsForceKey, onStatusChange, onBannerAcceptFile, onBannerRejectFile, agentTerminalBridge }, ref
 ) {
@@ -2026,6 +2029,20 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
               <span className="welcome-btn-text"><strong>New File</strong><small>Create a new file in the current folder</small></span>
             </button>
           </div>
+          {recentPaths && recentPaths.length > 0 && onOpenRecent && (
+            <div className="welcome-recent">
+              <div className="welcome-recent-title">Recent</div>
+              {recentPaths.map((p) => (
+                <button key={p} className="welcome-btn welcome-recent-btn" onClick={() => handleWelcomeClick(() => onOpenRecent(p))}>
+                  <span className="welcome-btn-icon">📁</span>
+                  <span className="welcome-btn-text">
+                    <strong>{p.split(/[/\\]/).pop() || p}</strong>
+                    <small>{p}</small>
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
           <div className="welcome-shortcuts">
             <span>Ctrl+K Ctrl+O — Open Folder</span>
             <span>Ctrl+O — Open File</span>
@@ -2205,6 +2222,20 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
                     <span className="welcome-btn-text"><strong>New File</strong><small>Create a new file in the current folder</small></span>
                   </button>
                 </div>
+                {recentPaths && recentPaths.length > 0 && onOpenRecent && (
+                  <div className="welcome-recent">
+                    <div className="welcome-recent-title">Recent</div>
+                    {recentPaths.map((p) => (
+                      <button key={p} className="welcome-btn welcome-recent-btn" onClick={() => handleWelcomeClick(() => onOpenRecent(p))}>
+                        <span className="welcome-btn-icon">📁</span>
+                        <span className="welcome-btn-text">
+                          <strong>{p.split(/[/\\]/).pop() || p}</strong>
+                          <small>{p}</small>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
                 <div className="welcome-shortcuts">
                   <span>Ctrl+K Ctrl+O — Open Folder</span>
                   <span>Ctrl+O — Open File</span>
