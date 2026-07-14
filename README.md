@@ -1387,6 +1387,42 @@ Important distinction:
 
 No extra cache-control API parameters are needed — DeepSeek handles prefix caching transparently on the server side.
 
+### 2b. Sub-agent Prefix Caching
+
+Each sub-agent (`delegate_task`) normally starts with a fresh messages array — just the system prompt and the task string. Since every delegation has a unique task, **turn 1 of every sub-agent is a cache miss**, even when delegating the same agent type repeatedly (e.g., multiple browser sub-agents).
+
+To improve this, Harness stores a **shared message prefix** per agent type on the parent session. After a sub-agent completes, its task and summary are appended to the prefix. The next delegation of the same type prepends these older task/summary pairs before the new task, making the API message prefix identical across calls:
+
+```
+Before (5 browser sub-agents, 3 turns each):
+  Sub-agent 1: [sys, task1]                  ← MISS
+  Sub-agent 2: [sys, task2]                  ← MISS  (task2 ≠ task1)
+  Sub-agent 3: [sys, task3]                  ← MISS
+  → 5 misses (one per delegation start)
+
+After (same scenario):
+  Sub-agent 1: [sys, task1]                  ← MISS (first ever)
+  Sub-agent 2: [sys, task1, summary1, task2] ← HIT on [sys, task1, summary1]
+  Sub-agent 3: [sys, task2, summary2, task3] ← HIT on [sys, task2, summary2]
+  → 1 miss only (first delegation)
+```
+
+**What's stored** (in `AgentState.subAgentPrefix`):
+
+| Field | Content | Why |
+|---|---|---|
+| Key | Agent type string (`"browser"`, `"code-writer"`, etc.) | Per-type isolation — browser sub-agents share with each other, not with code-search |
+| Messages | Last 2 task/summary pairs (4 messages max) | Bounded growth; never stores file contents (`read_file`/`grep` results), so project changes don't cause stale context |
+| Task content | Truncated to 500 chars | Keeps prefix compact |
+| Summary content | Truncated to 1000 chars | Keeps prefix compact |
+
+**Where it's applied:**
+- `runSubAgentStream` ([agent.ts](server/agent.ts)) — streaming path used by the SSE agent loop
+- `runSubAgent` ([agent.ts](server/agent.ts)) — non-streaming path (researcher tasks)
+- `resumeSubAgent` does NOT store prefix — it resumes an already-paused sub-agent, so the window is unchanged
+
+This is a low-risk optimization: only task/summary pairs are shared, never tool results containing project file contents. The worst case is 4 stale summary lines in the prefix, which act as lightweight context hints rather than authoritative information.
+
 ### 3. Rolling History Compaction
 
 Long-running agent sessions now compact older plain-text turns on the server before building the next model request.

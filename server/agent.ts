@@ -44,6 +44,10 @@ export interface AgentState {
   projectRoot: string;
   /** Rolling summary of older resolved plain-text turns trimmed out of messages. */
   historySummary?: string;
+  /** Shared message prefix per sub-agent type — improves cache hit rates across
+   *  repeated delegations of the same type within one agent session.
+   *  Only stores tasks and summaries, not tool results (which could be stale). */
+  subAgentPrefix?: Record<string, AgentMessage[]>;
   pendingPermission?: { toolCallId: string; command: string; background?: boolean; toolName?: string; params?: Record<string, unknown> };
   /** Deferred destructive file tool — executed on Allow, result held until Accept/Reject in UI. */
   deferredTool?: { toolCallId: string; toolName: string; params: Record<string, unknown>; result: string; originalContent: string | null; filePath: string };
@@ -2120,8 +2124,10 @@ async function* runSubAgentStream(
 ): AsyncGenerator<SubAgentStreamEvent, SubAgentResult, undefined> {
   const maxIter = config.maxIterations || 15;
 
+  // Prepend shared prefix from previous delegations of the same type
+  const prefix = agentMarker ? (parentState.subAgentPrefix || (parentState.subAgentPrefix = {}))[agentMarker] || [] : [];
   const subState: AgentState = {
-    messages: [{ role: "user", content: task }],
+    messages: [...prefix, { role: "user" as const, content: task }],
     iteration: 0,
     projectRoot: parentState.projectRoot,
   };
@@ -2205,11 +2211,14 @@ async function runSubAgent(
   task: string,
   config: SubAgentConfig,
   modelOpts: { model?: string; apiKey: string },
+  agentType?: string,
 ): Promise<SubAgentResult> {
   const maxIter = config.maxIterations || 15;
 
+  // Prepend shared prefix from previous delegations of the same type
+  const prefix = agentType ? (parentState.subAgentPrefix || (parentState.subAgentPrefix = {}))[agentType] || [] : [];
   const subState: AgentState = {
-    messages: [{ role: "user", content: task }],
+    messages: [...prefix, { role: "user" as const, content: task }],
     iteration: 0,
     projectRoot: parentState.projectRoot,
   };
@@ -2998,7 +3007,7 @@ export async function agentLoop(
       if (fnName === "delegate_task") {
         const agentType = String(params.agent_type || "code-search");
         const cfg = SUB_AGENT_PROFILES[agentType] || SUB_AGENT_PROFILES["code-search"];
-        const subResult = await runSubAgent(state, String(params.task || ""), cfg, { model: modelOpts?.model, apiKey: apiKey! });
+        const subResult = await runSubAgent(state, String(params.task || ""), cfg, { model: modelOpts?.model, apiKey: apiKey! }, agentType);
         if (subResult.phase === "browser_tool") {
           state.pendingSubAgent = {
             subState: subResult.subState,
@@ -3017,6 +3026,20 @@ export async function agentLoop(
         state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc2(reasoningContent) });
         state.messages.push({ role: "tool", content: resultText, tool_call_id: tc.id });
         executedTools.push({ name: fnName, result: resultText.slice(0, 1000) });
+        // Store task + summary in shared prefix for cache benefits on
+        // subsequent delegations of the same agent type.
+        // Only stores the last 2 pairs (4 messages) — no file content,
+        // so stale context from project changes is not a concern.
+        if (agentType) {
+          if (!state.subAgentPrefix) state.subAgentPrefix = {};
+          const taskMsg: AgentMessage = { role: "user", content: String(params.task || "").slice(0, 500) };
+          const summaryMsg: AgentMessage = { role: "assistant", content: resultText.slice(0, 1000) };
+          state.subAgentPrefix[agentType] = [
+            ...(state.subAgentPrefix[agentType] || []).slice(-4),
+            taskMsg,
+            summaryMsg,
+          ];
+        }
         continue;
       }
 
@@ -3538,10 +3561,22 @@ export async function* agentLoopStream(
           })),
         };
         executedTools.push({ name: fnName, result: resultText.slice(0, 1000) });
+        // Store task + summary in shared prefix for cache benefits on
+        // subsequent delegations of the same agent type (streaming path).
+        if (agentType) {
+          if (!state.subAgentPrefix) state.subAgentPrefix = {};
+          const taskMsgS: AgentMessage = { role: "user", content: String(params.task || "").slice(0, 500) };
+          const summaryMsgS: AgentMessage = { role: "assistant", content: resultText.slice(0, 1000) };
+          state.subAgentPrefix[agentType] = [
+            ...(state.subAgentPrefix[agentType] || []).slice(-4),
+            taskMsgS,
+            summaryMsgS,
+          ];
+        }
         continue;
       }
 
-      // Browser tool
+      // Browser tool (streaming path)
       browserTool = { name: fnName, id: tc.id, params };
       state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
       browserBreakIdx = i;
