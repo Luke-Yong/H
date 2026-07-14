@@ -896,7 +896,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     ));
   }, [activeFileId]);
   const hasFsRoot = !!(fsRoot && fsRoot.length > 0) || !!fsBasePath;
-  const hasEditor = activeFileId !== "";
+  const hasEditor = activeFileId !== "" && activeFileId !== BROWSER_EDITOR_TAB_ID;
 
   // Notify parent of status bar state
   useEffect(() => {
