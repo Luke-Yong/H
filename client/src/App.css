@@ -1554,7 +1554,7 @@ body.resizing iframe { pointer-events: none; }
 .agent-sub-agent-tool { font-size: 11px; color: #5cc9c1; padding: 2px 0; }
 .agent-sub-agent-text { font-size: 12px; padding: 2px 0; }
 .agent-sub-agent-user { opacity: 0.6; }
-.agent-sub-agent-result { font-size: 11px; opacity: 0.5; padding: 2px 0; white-space: pre-wrap; word-break: break-all; }
+.agent-sub-agent-result { font-size: 11px; opacity: 0.5; padding: 2px 0; white-space: pre-wrap; word-break: break-all; max-height: 300px; overflow-y: auto; }
 
 /* Sub-agent container — color-coded to match delegate_task card */
 .agent-sub-agent-container {

@@ -2957,7 +2957,11 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
                                 <div className="agent-sub-agent-text agent-sub-agent-user">User: {m.content}</div>
                               )}
                               {m.role === "tool" && (
-                                <div className="agent-sub-agent-result">{m.content.slice(0, 200)}</div>
+                                <div className="agent-sub-agent-result">
+                                  {m.content.length > 500
+                                    ? m.content  // browser_screenshot / browser_get_dom: show full output
+                                    : m.content}
+                                </div>
                               )}
                             </div>
                           );
