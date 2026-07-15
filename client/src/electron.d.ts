@@ -9,6 +9,12 @@ declare global {
       openFile?: () => Promise<string>;
       onBrowserOpenUrl?: (callback: (url: string) => void) => (() => void) | void;
       setSitePermissions?: (origin: string, permissions: Record<string, boolean>) => Promise<boolean>;
+      openResourceMonitor?: () => void;
+      closeResourceMonitor?: () => void;
+      minimize?: () => void;
+      maximize?: () => void;
+      close?: () => void;
+      isMaximized?: () => Promise<boolean>;
     };
   }
 

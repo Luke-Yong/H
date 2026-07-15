@@ -442,6 +442,25 @@ function registerIpc() {
   ipcMain.on("harness:closeResourceMonitor", () => {
     closeResourceMonitorWindow();
   });
+
+  // Window controls for frameless window
+  ipcMain.on("harness:minimize", (event) => {
+    BrowserWindow.fromWebContents(event.sender)?.minimize();
+  });
+  ipcMain.on("harness:maximize", (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (win?.isMaximized()) {
+      win.unmaximize();
+    } else {
+      win?.maximize();
+    }
+  });
+  ipcMain.on("harness:close", (event) => {
+    BrowserWindow.fromWebContents(event.sender)?.close();
+  });
+  ipcMain.handle("harness:isMaximized", (event) => {
+    return BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false;
+  });
 }
 
 async function loadUrlWhenReady(win, targetUrl, healthUrl, timeoutMs, title) {
@@ -469,6 +488,7 @@ async function createMainWindow() {
   const win = new BrowserWindow({
     width: 1400,
     height: 900,
+    frame: false,
     backgroundColor: "#1e1e1e",
     webPreferences: {
       contextIsolation: true,
@@ -477,6 +497,8 @@ async function createMainWindow() {
       webviewTag: true,
     },
   });
+
+  win.setMenuBarVisibility(false);
 
   attachPopupInterception(win.webContents);
 

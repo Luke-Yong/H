@@ -1130,9 +1130,25 @@ body.resizing iframe { pointer-events: none; }
 /* ── Menu Bar ── */
 .menu-bar {
   display: flex;
+  align-items: center;
   background: #323233;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
+  -webkit-app-region: drag;
+  user-select: none;
+}
+
+.menu-bar-app-name {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 16px;
+  letter-spacing: 0.3px;
+}
+
+.menu-bar-menus {
+  display: flex;
+  -webkit-app-region: no-drag;
 }
 
 .menu-dropdown { position: relative; }
@@ -1177,6 +1193,27 @@ body.resizing iframe { pointer-events: none; }
 
 .menu-shortcut { color: var(--text-dim); font-size: 11px; margin-left: 24px; }
 .menu-separator { height: 1px; background: #454545; margin: 4px 8px; }
+
+/* ── Window Controls (frameless) ── */
+.menu-bar-window-controls {
+  display: flex;
+  margin-left: auto;
+  -webkit-app-region: no-drag;
+}
+
+.win-ctrl-btn {
+  width: 46px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.win-ctrl-btn:hover { background: #505050; color: var(--text); }
+.win-ctrl-btn.win-ctrl-close:hover { background: #e81123; color: #fff; }
 
 /* ── FS Context Menu (right-click on tree item) ── */
 .fs-context-menu {
