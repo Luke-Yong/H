@@ -1283,6 +1283,9 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
               if (idx >= 0) next[idx] = { ...next[idx], state: undefined, thought: currentThought, fileChanges: fileChangesRef.current.length > 0 ? [...fileChangesRef.current] : undefined, todos: todosRef.current.length > 0 ? [...todosRef.current] : undefined };
               return next;
             });
+            assistantMsgId = null;
+            fileChangesRef.current = [];
+            todosRef.current = [];
           }
           // Clear stale state indicators on all assistant/tool messages
           setMessages((prev) =>
@@ -1589,9 +1592,12 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
             setMessages((prev) => {
               const next = [...prev];
               const idx = next.findIndex((m) => m.id === assistantMsgId);
-              if (idx >= 0) next[idx] = { ...next[idx], state: undefined, thought: currentThought };
+              if (idx >= 0) next[idx] = { ...next[idx], state: undefined, thought: currentThought, fileChanges: fileChangesRef.current.length > 0 ? [...fileChangesRef.current] : undefined, todos: todosRef.current.length > 0 ? [...todosRef.current] : undefined };
               return next;
             });
+            assistantMsgId = null;
+            fileChangesRef.current = [];
+            todosRef.current = [];
           } else if (evt.reply) {
             const normalizedReply = String(evt.reply).replace(/\r\n/g, "\n").trim();
             if (!normalizedReply || normalizedReply !== lastRenderedSummaryRef.current.trim()) {
