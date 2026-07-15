@@ -26,8 +26,32 @@ const PORT = 3001;
 app.use(express.json({ limit: "10mb" }));
 
 const CLIENT_API_KEY_COOKIE = "harness_api_session";
-const CLIENT_API_KEY_TTL_MS = 1000 * 60 * 60 * 12;
 const clientApiKeySessions = new Map<string, { apiKey: string; updatedAt: number }>();
+
+// ── Persistent API key storage (~/.harness/api-keys.json) ──
+const API_KEYS_DIR = path.join(os.homedir(), ".harness");
+const API_KEYS_FILE = path.join(API_KEYS_DIR, "api-keys.json");
+
+function loadApiKeys(): void {
+  try {
+    if (!fs.existsSync(API_KEYS_FILE)) return;
+    const raw = fs.readFileSync(API_KEYS_FILE, "utf-8");
+    const entries: [string, { apiKey: string; updatedAt: number }][] = JSON.parse(raw);
+    for (const [token, session] of entries) {
+      clientApiKeySessions.set(token, session);
+    }
+  } catch { /* ignore corrupt/missing file */ }
+}
+
+function saveApiKeys(): void {
+  try {
+    if (!fs.existsSync(API_KEYS_DIR)) fs.mkdirSync(API_KEYS_DIR, { recursive: true });
+    fs.writeFileSync(API_KEYS_FILE, JSON.stringify([...clientApiKeySessions.entries()], null, 2), "utf-8");
+  } catch { /* ignore write errors */ }
+}
+
+// Load persisted keys on startup
+loadApiKeys();
 
 function parseCookies(req: express.Request): Record<string, string> {
   const raw = req.headers.cookie || "";
@@ -43,14 +67,6 @@ function parseCookies(req: express.Request): Record<string, string> {
   return out;
 }
 
-function cleanupExpiredClientApiKeySessions(now = Date.now()) {
-  for (const [token, session] of clientApiKeySessions.entries()) {
-    if (now - session.updatedAt > CLIENT_API_KEY_TTL_MS) {
-      clientApiKeySessions.delete(token);
-    }
-  }
-}
-
 function getClientApiKeyToken(req: express.Request): string | null {
   const cookies = parseCookies(req);
   const token = cookies[CLIENT_API_KEY_COOKIE];
@@ -58,7 +74,6 @@ function getClientApiKeyToken(req: express.Request): string | null {
 }
 
 function getEffectiveApiKey(req: express.Request): { apiKey: string | null; source: "session" | "none"; sessionToken?: string } {
-  cleanupExpiredClientApiKeySessions();
   const token = getClientApiKeyToken(req);
   if (token) {
     const session = clientApiKeySessions.get(token);
@@ -530,19 +545,23 @@ app.post("/api/chat/agent/credentials", (req, res) => {
   const existingToken = getClientApiKeyToken(req);
   const token = existingToken || crypto.randomBytes(24).toString("hex");
   clientApiKeySessions.set(token, { apiKey, updatedAt: Date.now() });
+  saveApiKeys();
   res.cookie(CLIENT_API_KEY_COOKIE, token, {
     httpOnly: true,
     sameSite: "lax",
     secure: shouldUseSecureCookie(req),
     path: "/",
-    maxAge: CLIENT_API_KEY_TTL_MS,
+    maxAge: 365 * 24 * 60 * 60 * 1000, // 1 year — cookie persists alongside the file-backed key
   });
   res.json({ ok: true, apiKeyConfigured: true, source: "session" });
 });
 
 app.delete("/api/chat/agent/credentials", (req, res) => {
   const token = getClientApiKeyToken(req);
-  if (token) clientApiKeySessions.delete(token);
+  if (token) {
+    clientApiKeySessions.delete(token);
+    saveApiKeys();
+  }
   res.clearCookie(CLIENT_API_KEY_COOKIE, {
     httpOnly: true,
     sameSite: "lax",
@@ -1720,7 +1739,7 @@ async function poll() {
 renderTabs();
 document.getElementById("body").innerHTML = '<div class="empty">Connecting to server...</div>';
 poll();
-setInterval(poll, 10000);
+setInterval(poll, 3000);
 </script>
 </body>
 </html>`);

@@ -108,7 +108,7 @@ function ResourceMonitor() {
   return (
     <div className="status-item status-resources" style={{ padding: 0 }}>
       <button className="status-btn" onClick={open} title="System Resources (opens in separate window)">
-        ⚡ {cpuPercent}%
+        📊 {cpuPercent}%
       </button>
     </div>
   );
