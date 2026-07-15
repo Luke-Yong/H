@@ -200,6 +200,7 @@ export default function TerminalPane({
   const [moreOpen, setMoreOpen] = useState(false);
   const moreRef = useRef<HTMLDivElement | null>(null);
   const onDetectUrlRef = useRef(onDetectUrl);
+  const gutterFrameRef = useRef<number | null>(null);
   const groupKeyRef = useRef("");
   const openedOnceRef = useRef(false);
   const [termIds, setTermIds] = useState<string[]>([]);
@@ -529,7 +530,20 @@ export default function TerminalPane({
   }, []);
 
   const bumpGutter = useCallback(() => {
-    setGutterVersion((v) => v + 1);
+    if (gutterFrameRef.current !== null) return;
+    gutterFrameRef.current = requestAnimationFrame(() => {
+      gutterFrameRef.current = null;
+      setGutterVersion((v) => v + 1);
+    });
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (gutterFrameRef.current !== null) {
+        cancelAnimationFrame(gutterFrameRef.current);
+        gutterFrameRef.current = null;
+      }
+    };
   }, []);
 
   const ensurePromptMarker = useCallback((inst: TermInstance) => {
@@ -807,7 +821,6 @@ export default function TerminalPane({
         brightCyan: "#29b8db", brightWhite: "#ffffff",
       },
       allowProposedApi: true,
-      windowsMode: true,
     });
 
     const fit = new FitAddon();
@@ -908,12 +921,12 @@ export default function TerminalPane({
 
     term.onData((data) => handleInput(inst, data));
     term.onScroll(() => bumpGutter());
+    term.onRender(() => bumpGutter());
     const viewportEl = term.element?.querySelector(".xterm-viewport");
     const handleViewportScroll = () => bumpGutter();
     viewportEl?.addEventListener("scroll", handleViewportScroll);
 
     term.onResize(({ cols, rows }) => {
-      fit.fit();
       bumpGutter();
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(`term:resize:${id}:${cols}:${rows}`);
@@ -1155,18 +1168,22 @@ export default function TerminalPane({
     }
   }, [termIds]);
 
-  // Re-fit on panel resize
+  // Re-fit on panel resize — debounce to let CSS layout settle before measuring
   useEffect(() => {
     if (!visible) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
     const handler = () => {
-      for (const [, inst] of termsRef.current) {
-        try { inst.fit.fit(); } catch {}
-      }
-      bumpGutter();
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        for (const [, inst] of termsRef.current) {
+          try { inst.fit.fit(); } catch {}
+        }
+        bumpGutter();
+      }, 50);
     };
     const obs = new ResizeObserver(handler);
     if (panelRef.current) obs.observe(panelRef.current);
-    return () => obs.disconnect();
+    return () => { obs.disconnect(); if (timer) clearTimeout(timer); };
   }, [bumpGutter, visible]);
 
   const requestTerminal = useCallback((groupIndex: number) => {
@@ -1363,18 +1380,50 @@ export default function TerminalPane({
     { key: "terminal", label: "Terminal" },
   ];
 
+  const getWrappedLineRange = useCallback((inst: TermInstance, line: number) => {
+    if (line < 0) return null;
+    const buffer = inst.term.buffer.active;
+    if (line >= buffer.length) return null;
+
+    let start = line;
+    while (start > 0) {
+      const current = buffer.getLine(start);
+      if (!current?.isWrapped) break;
+      start -= 1;
+    }
+
+    let end = start;
+    while (end + 1 < buffer.length) {
+      const next = buffer.getLine(end + 1);
+      if (!next?.isWrapped) break;
+      end += 1;
+    }
+
+    return { start, end };
+  }, []);
+
+  const getMarkerVisibleRow = useCallback((inst: TermInstance, line: number) => {
+    const range = getWrappedLineRange(inst, line);
+    if (!range) return null;
+    const viewportY = inst.term.buffer.active.viewportY;
+    const viewportBottom = viewportY + Math.max(0, inst.term.rows - 1);
+    const visibleStart = Math.max(range.start, viewportY);
+    const visibleEnd = Math.min(range.end, viewportBottom);
+    if (visibleStart > visibleEnd) return null;
+    return visibleStart - viewportY;
+  }, [getWrappedLineRange]);
+
   const renderGutterMarkers = (id: string) => {
     void gutterVersion;
     const inst = termsRef.current.get(id);
     const screen = inst?.term.element?.querySelector(".xterm-screen") as HTMLDivElement | null;
     if (!inst || !screen || inst.term.rows <= 0) return null;
-    const viewportY = inst.term.buffer.active.viewportY;
     const cellHeight = screen.clientHeight / inst.term.rows;
     return inst.promptMarkers
       .filter((entry) => entry.marker.line >= 0)
       .map((entry) => {
-        const row = entry.marker.line - viewportY;
-        if (row < 0 || row >= inst.term.rows) return null;
+        const row = getMarkerVisibleRow(inst, entry.marker.line);
+        if (row === null || row < 0 || row >= inst.term.rows) return null;
         return (
           <div
             key={`${id}-${entry.id}`}
@@ -1393,7 +1442,8 @@ export default function TerminalPane({
     for (const mid of inst.commandMarkerIds) {
       const entry = inst.promptMarkers.find((e) => e.marker.id === mid);
       const line = entry?.marker.line ?? -1;
-      if (line >= 0) lines.push(line);
+      const range = getWrappedLineRange(inst, line);
+      if (range) lines.push(range.start);
     }
     lines.sort((a, b) => a - b);
     const uniq: number[] = [];
@@ -1401,7 +1451,7 @@ export default function TerminalPane({
       if (uniq.length === 0 || uniq[uniq.length - 1] !== ln) uniq.push(ln);
     }
     return uniq;
-  }, []);
+  }, [getWrappedLineRange]);
 
   const scrollToPrevCommand = useCallback(() => {
     const inst = termsRef.current.get(activeIdRef.current);

@@ -1,6 +1,40 @@
 # Harness
 
-AI-powered coding agent using Monaco Editor and DeepSeek.
+AI-powered coding agent using DeepSeek.
+
+## Contents
+
+- [Setup](#setup)
+- [Configuration](#configuration)
+- [Start](#start)
+- [Architecture](#architecture)
+  - [Server](#server)
+  - [Client](#client)
+  - [Data flow](#data-flow-agent-turn)
+  - [Agent loop internals](#agent-loop-internals)
+- [Desktop (Electron)](#desktop-electron)
+- [Built-in Browser](#built-in-browser-desktop)
+- [Language Support (LSP)](#language-support-lsp)
+- [File Management](#file-management)
+- [Security](#security)
+- [Agent Tools](#agent-tools-deepseek-powered)
+  - [Filesystem](#filesystem)
+  - [Terminal](#terminal)
+  - [Browser](#browser)
+  - [Multi-Agent Delegation](#multi-agent-delegation)
+  - [IDE-Driven Step-by-Step](#ide-driven-step-by-step-execution-force-todo)
+  - [Persistent Memory](#persistent-memory)
+- [Agent Command Catalog](#agent-command-catalog)
+- [Troubleshooting by Language](#troubleshooting-by-language)
+- [MCP (Model Context Protocol)](#mcp-model-context-protocol)
+- [Project Structure](#project-structure)
+- [Testing](#testing)
+- [Token Optimization](#token-optimization-itr--context-caching--live-compaction)
+  - [ITR](#1-instruction-tool-retrieval-itr)
+  - [Context Caching](#2-context-caching)
+  - [Sub-agent Prefix Caching](#2b-sub-agent-prefix-caching)
+  - [History Compaction](#3-rolling-history-compaction)
+  - [Tool Result Distillation](#4-tool-result-distillation)
 
 ## Setup
 
