@@ -337,7 +337,6 @@ function openResourceMonitorWindow(parentWin) {
   win.webContents.on("did-fail-load", (_event, errorCode, errorDesc, validatedURL) => {
     console.log("[resource-monitor] Load failed:", errorCode, errorDesc, validatedURL);
   });
-  win.webContents.openDevTools({ mode: "detach" });
   win.loadURL("http://127.0.0.1:3001/resources");
 
   win.on("closed", () => {
