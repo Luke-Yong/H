@@ -1,6 +1,6 @@
 {
   "name": "harness",
-  "version": "1.0.0",
+  "version": "0.0.1",
   "description": "AI-powered coding workspace with Monaco Editor, DeepSeek agent loop, built-in browser, and sub-agent delegation",
   "private": true,
   "main": "electron/main.cjs",

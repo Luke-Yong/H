@@ -51,7 +51,7 @@ Harness uses a **client-entered API key** model. Enter your DeepSeek API key onc
 2. Enter your API key (starts with `sk-...`)
 3. Click Save
 
-The key is sent once to the server and stored in an **HTTP-only server session** — it is never persisted in browser `localStorage` and is never re-sent in agent request bodies.
+The key is sent once to the server and stored persistently on disk (`~/.harness/api-keys.json`) — it is never persisted in browser `localStorage`, survives app restarts and updates, and is never re-sent in agent request bodies. The key remains stored until explicitly removed via "Remove API Key" in the UI or the `~/.harness/` directory is deleted.
 
 Get a key at [platform.deepseek.com](https://platform.deepseek.com).
 
@@ -424,11 +424,11 @@ Harness gives the AI agent access to your filesystem, terminal, and browser. The
 ### API & Transport
 
 - All DeepSeek API calls use **HTTPS** (`https://api.deepseek.com/v1`).
-- Client-entered DeepSeek API keys are stored in an **HTTP-only server session cookie + in-memory server session**, not in browser `localStorage`.
+- Client-entered DeepSeek API keys are stored persistently on disk at `~/.harness/api-keys.json` (JSON file), keyed by an HTTP-only session cookie. Keys are never written to browser `localStorage`.
 - Agent requests and `/api/models` no longer include the raw key in request bodies or query strings after the initial credential submission.
 - The API key is never exposed to child processes (see Terminal Sandbox below).
 - `/api/chat/agent/config` exposes only configuration status (`apiKeyConfigured`, `source`), not the key value itself.
-- `/api/chat/agent/credentials` is the only route that accepts a raw client-entered key, and it stores that key server-side for the current session.
+- `/api/chat/agent/credentials` is the only route that accepts a raw client-entered key, and it stores that key server-side with file-backed persistence (survives server restarts and app updates).
 
 ### Tool-Level Guards
 
@@ -777,6 +777,7 @@ Next session:
 | Detail | Value |
 |--------|-------|
 | Database | SQLite (WAL mode) at `~/.harness/memory.db` (global, not in project dir) |
+| API Keys | JSON file at `~/.harness/api-keys.json` (persistent, survives restarts and app updates) |
 | Schema | `id`, `key` (unique), `value`, `category`, `tags`, `embedding` (BLOB), `created_at`, `updated_at` |
 | Embeddings | Generated via DeepSeek `/v1/embeddings` endpoint (optional; graceful fallback to keyword search if unavailable) |
 | Retrieval | Embedding cosine similarity search → keyword `LIKE` fallback → list-all |
@@ -1202,6 +1203,7 @@ Harness/
 │   ├── mcp.ts                       # MCP server: JSON-RPC handler, tool set for external AI clients, stdio + SSE transport
 │   ├── mcp-server.ts                # Standalone MCP server entry point (stdio mode)
 │   ├── memory.ts                    # SQLite persistent memory store (~/.harness/memory.db): keyword + embedding search, used by agent remember/recall/forget tools
+│   │                                  # API keys also stored under ~/.harness/api-keys.json (persistent, survives restarts/updates)
 │   └── __tests__/                   # 5 test files: tool definitions, filesystem ops, command execution, agent loop, API integration
 │
 ├── client/
