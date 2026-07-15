@@ -12,6 +12,7 @@ import {
 import fs from "fs";
 import path from "path";
 import os from "os";
+import crypto from "crypto";
 import { execSync } from "child_process";
 
 const app = express();
@@ -23,6 +24,56 @@ export { app };
 const PORT = 3001;
 
 app.use(express.json({ limit: "10mb" }));
+
+const CLIENT_API_KEY_COOKIE = "harness_api_session";
+const CLIENT_API_KEY_TTL_MS = 1000 * 60 * 60 * 12;
+const clientApiKeySessions = new Map<string, { apiKey: string; updatedAt: number }>();
+
+function parseCookies(req: express.Request): Record<string, string> {
+  const raw = req.headers.cookie || "";
+  const out: Record<string, string> = {};
+  for (const part of raw.split(";")) {
+    const idx = part.indexOf("=");
+    if (idx <= 0) continue;
+    const key = part.slice(0, idx).trim();
+    const value = part.slice(idx + 1).trim();
+    if (!key) continue;
+    out[key] = decodeURIComponent(value);
+  }
+  return out;
+}
+
+function cleanupExpiredClientApiKeySessions(now = Date.now()) {
+  for (const [token, session] of clientApiKeySessions.entries()) {
+    if (now - session.updatedAt > CLIENT_API_KEY_TTL_MS) {
+      clientApiKeySessions.delete(token);
+    }
+  }
+}
+
+function getClientApiKeyToken(req: express.Request): string | null {
+  const cookies = parseCookies(req);
+  const token = cookies[CLIENT_API_KEY_COOKIE];
+  return token || null;
+}
+
+function getEffectiveApiKey(req: express.Request): { apiKey: string | null; source: "session" | "none"; sessionToken?: string } {
+  cleanupExpiredClientApiKeySessions();
+  const token = getClientApiKeyToken(req);
+  if (token) {
+    const session = clientApiKeySessions.get(token);
+    if (session?.apiKey) {
+      session.updatedAt = Date.now();
+      return { apiKey: session.apiKey, source: "session", sessionToken: token };
+    }
+  }
+  return { apiKey: null, source: "none" };
+}
+
+function shouldUseSecureCookie(req: express.Request): boolean {
+  if (process.env.NODE_ENV === "production") return true;
+  return req.secure || req.headers["x-forwarded-proto"] === "https";
+}
 
 // ── Broadcast helper ──
 const broadcast = (event: { type: string; data: unknown }) => {
@@ -50,9 +101,10 @@ console.log = (...args: any[]) => {
 
 // ── Agentic coding chat (simple, single-turn) ──
 app.post("/api/chat", async (req, res) => {
-  const { message, context, history, apiKey } = req.body;
+  const { message, context, history } = req.body;
   if (!message) return res.status(400).json({ error: "Missing message" });
-  if (!apiKey) return res.status(400).json({ error: "Missing API key" });
+  const { apiKey } = getEffectiveApiKey(req);
+  if (!apiKey) return res.status(400).json({ error: "No API key configured. Add one in the client." });
 
   try {
     broadcast({ type: "log", data: `User: ${message}` });
@@ -70,8 +122,10 @@ app.post("/api/chat", async (req, res) => {
 import { createAgentSession, getAgentSession, addToolResult, addToolResultStream, deleteAgentSession, agentLoop, agentLoopStream, agentLoopStepByStep, runFsTool, storeCommandOutput, summarizeCommandResult, resumeSubAgent, type AgentState, type AgentResponse, type AgentSseEvent } from "./agent";
 
 app.post("/api/chat/agent", async (req, res) => {
-  const { message, context, projectRoot, apiKey, model, sessionId: clientSessionId } = req.body || {};
+  const { message, context, projectRoot, model, sessionId: clientSessionId } = req.body || {};
   if (!message) return res.status(400).json({ error: "Missing message" });
+  const { apiKey } = getEffectiveApiKey(req);
+  if (!apiKey) return res.status(400).json({ error: "No API key configured. Add one in the client." });
 
   try {
     broadcast({ type: "log", data: `User (agent): ${message}` });
@@ -104,10 +158,12 @@ app.post("/api/chat/agent", async (req, res) => {
 });
 
 app.post("/api/chat/agent/continue", async (req, res) => {
-  const { sessionId, toolCallId, toolResult, projectRoot, apiKey, model } = req.body || {};
+  const { sessionId, toolCallId, toolResult, projectRoot, model } = req.body || {};
   if (!sessionId || !toolCallId || toolResult === undefined) {
     return res.status(400).json({ error: "Missing sessionId, toolCallId, or toolResult" });
   }
+  const { apiKey } = getEffectiveApiKey(req);
+  if (!apiKey) return res.status(400).json({ error: "No API key configured. Add one in the client." });
 
   try {
     const state = getAgentSession(sessionId);
@@ -186,9 +242,11 @@ app.post("/api/chat/agent/continue", async (req, res) => {
 // and may need to call /continue/stream when a browser tool is needed.
 
 app.post("/api/chat/agent/stream", async (req, res) => {
-  const { message, context, projectRoot, model, apiKey, thinking, sessionId: clientSessionId } = req.body || {};
+  const { message, context, projectRoot, model, thinking, sessionId: clientSessionId } = req.body || {};
   const effectiveModel = model || "deepseek-chat";
   if (!message) return res.status(400).json({ error: "Missing message" });
+  const { apiKey } = getEffectiveApiKey(req);
+  if (!apiKey) return res.status(400).json({ error: "No API key configured. Add one in the client." });
 
   try {
     broadcast({ type: "log", data: `User (agent): ${message}` });
@@ -211,7 +269,7 @@ app.post("/api/chat/agent/stream", async (req, res) => {
       res.write(`data: ${data}\n\n`);
     };
 
-    const modelOpts = (effectiveModel || apiKey) ? { model: effectiveModel, apiKey } : undefined;
+    const modelOpts = { model: effectiveModel, apiKey };
     for await (const event of agentLoopStream(root, state, context || "", sessionId, modelOpts)) {
       sendEvent(event);
       if (event.type === "browser_tool" || event.type === "permission_required" || event.type === "done" || event.type === "error") break;
@@ -233,9 +291,11 @@ app.post("/api/chat/agent/stream", async (req, res) => {
 // todo list and forces the agent through each step one at a time via sub-agents.
 
 app.post("/api/chat/agent/stream/stepbystep", async (req, res) => {
-  const { message, context, projectRoot, model, apiKey, sessionId: clientSessionId } = req.body || {};
+  const { message, context, projectRoot, model, sessionId: clientSessionId } = req.body || {};
   const effectiveModel = model || "deepseek-chat";
   if (!message) return res.status(400).json({ error: "Missing message" });
+  const { apiKey } = getEffectiveApiKey(req);
+  if (!apiKey) return res.status(400).json({ error: "No API key configured. Add one in the client." });
 
   try {
     broadcast({ type: "log", data: `User (step-by-step): ${message}` });
@@ -258,7 +318,7 @@ app.post("/api/chat/agent/stream/stepbystep", async (req, res) => {
       res.write(`data: ${data}\n\n`);
     };
 
-    const modelOpts = (effectiveModel || apiKey) ? { model: effectiveModel, apiKey } : undefined;
+    const modelOpts = { model: effectiveModel, apiKey };
     for await (const event of agentLoopStepByStep(root, state, context || "", sessionId, modelOpts)) {
       sendEvent(event);
       if (event.type === "done" || event.type === "error") break;
@@ -276,11 +336,13 @@ app.post("/api/chat/agent/stream/stepbystep", async (req, res) => {
 });
 
 app.post("/api/chat/agent/stream/continue", async (req, res) => {
-  const { sessionId, toolCallId, toolResult, permissionGranted, apiKey, model, thinking, consoleContext } = req.body || {};
+  const { sessionId, toolCallId, toolResult, permissionGranted, model, thinking, consoleContext } = req.body || {};
   const effectiveModel = model || "deepseek-chat";
   if (!sessionId || !toolCallId) {
     return res.status(400).json({ error: "Missing sessionId or toolCallId" });
   }
+  const { apiKey } = getEffectiveApiKey(req);
+  if (!apiKey) return res.status(400).json({ error: "No API key configured. Add one in the client." });
 
   try {
     const state = getAgentSession(sessionId);
@@ -459,6 +521,49 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
       res.end();
     }
   }
+});
+
+app.post("/api/chat/agent/credentials", (req, res) => {
+  const apiKey = String(req.body?.apiKey || "").trim();
+  if (!apiKey) return res.status(400).json({ error: "Missing API key" });
+
+  const existingToken = getClientApiKeyToken(req);
+  const token = existingToken || crypto.randomBytes(24).toString("hex");
+  clientApiKeySessions.set(token, { apiKey, updatedAt: Date.now() });
+  res.cookie(CLIENT_API_KEY_COOKIE, token, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: shouldUseSecureCookie(req),
+    path: "/",
+    maxAge: CLIENT_API_KEY_TTL_MS,
+  });
+  res.json({ ok: true, apiKeyConfigured: true, source: "session" });
+});
+
+app.delete("/api/chat/agent/credentials", (req, res) => {
+  const token = getClientApiKeyToken(req);
+  if (token) clientApiKeySessions.delete(token);
+  res.clearCookie(CLIENT_API_KEY_COOKIE, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: shouldUseSecureCookie(req),
+    path: "/",
+  });
+  // After clearing, the client has no key.
+  res.json({
+    ok: true,
+    apiKeyConfigured: false,
+    source: "none" as const,
+  });
+});
+
+app.get("/api/chat/agent/config", (req, res) => {
+  const { apiKey, source } = getEffectiveApiKey(req);
+  res.json({
+    apiKeyConfigured: Boolean(apiKey),
+    source,
+    modelDefault: "deepseek-chat",
+  });
 });
 
 // ── Clear agent session by thread ID ──
@@ -1487,7 +1592,7 @@ body{background:#1e1e1e;color:#d4d4d4;font:13px/1.5 'Cascadia Code','Fira Code',
 // ── List DeepSeek models ──
 app.get("/api/models", async (req, res) => {
   try {
-    const apiKey = req.query.apiKey as string || process.env.DEEPSEEK_API_KEY;
+    const { apiKey } = getEffectiveApiKey(req);
     if (!apiKey) return res.status(400).json({ error: "No API key configured" });
     const resp = await fetch("https://api.deepseek.com/models", {
       headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },

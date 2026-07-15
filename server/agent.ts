@@ -2615,7 +2615,7 @@ export async function* agentLoopStepByStep(
 ): AsyncGenerator<AgentSseEvent> {
   const apiKey = modelOpts?.apiKey;
   if (!apiKey) {
-    yield { type: "error", error: "No API key configured. Set an API key in the Harness UI." };
+    yield { type: "error", error: "No server API key configured. Set DEEPSEEK_API_KEY on the server." };
     return;
   }
 
@@ -2847,7 +2847,7 @@ export async function agentLoop(
 ): Promise<AgentResponse> {
   const apiKey = modelOpts?.apiKey;
   if (!apiKey) {
-    return { phase: "done", reply: "No API key configured. Set an API key in the Harness UI." };
+    return { phase: "done", reply: "No server API key configured. Set DEEPSEEK_API_KEY on the server." };
   }
   state.iteration++;
 
@@ -3089,7 +3089,7 @@ export async function* agentLoopStream(
 ): AsyncGenerator<AgentSseEvent> {
   const apiKey = modelOpts?.apiKey;
   if (!apiKey) {
-    yield { type: "error", error: "No API key configured. Set an API key in the Harness UI." };
+    yield { type: "error", error: "No server API key configured. Set DEEPSEEK_API_KEY on the server." };
     return;
   }
   const MAX_ITERS = 50;

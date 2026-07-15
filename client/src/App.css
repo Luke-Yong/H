@@ -2217,7 +2217,7 @@ details[open] .agent-thought-summary::before { transform: rotate(90deg); }
   background: #252526;
   border: 1px solid #454545;
   border-radius: 6px;
-  min-width: 220px;
+  width: 300px;
   padding: 4px 0;
   z-index: 300;
   box-shadow: 0 4px 16px rgba(0,0,0,0.5);

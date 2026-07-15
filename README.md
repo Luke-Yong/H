@@ -45,16 +45,13 @@ npm run install:all
 
 ## Configuration
 
-Copy `.env.example` to `.env` and add your DeepSeek API key:
+Harness uses a **client-entered API key** model. Enter your DeepSeek API key once in the Harness UI under the model selector:
 
-```powershell
-copy .env.example .env
-```
+1. Click the model selector in the agent console
+2. Enter your API key (starts with `sk-...`)
+3. Click Save
 
-```
-# .env
-DEEPSEEK_API_KEY=sk-your-key-here
-```
+The key is sent once to the server and stored in an **HTTP-only server session** — it is never persisted in browser `localStorage` and is never re-sent in agent request bodies.
 
 Get a key at [platform.deepseek.com](https://platform.deepseek.com).
 
@@ -427,7 +424,11 @@ Harness gives the AI agent access to your filesystem, terminal, and browser. The
 ### API & Transport
 
 - All DeepSeek API calls use **HTTPS** (`https://api.deepseek.com/v1`).
+- Client-entered DeepSeek API keys are stored in an **HTTP-only server session cookie + in-memory server session**, not in browser `localStorage`.
+- Agent requests and `/api/models` no longer include the raw key in request bodies or query strings after the initial credential submission.
 - The API key is never exposed to child processes (see Terminal Sandbox below).
+- `/api/chat/agent/config` exposes only configuration status (`apiKeyConfigured`, `source`), not the key value itself.
+- `/api/chat/agent/credentials` is the only route that accepts a raw client-entered key, and it stores that key server-side for the current session.
 
 ### Tool-Level Guards
 

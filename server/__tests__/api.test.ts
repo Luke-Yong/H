@@ -35,7 +35,7 @@ describe("API Endpoints", () => {
     it("returns 400 when message is missing", async () => {
       const res = await request(app)
         .post("/api/chat/agent")
-        .send({ apiKey: "sk-test" });
+        .send({});
       expect(res.status).toBe(400);
       expect(res.body.error).toContain("Missing message");
     });
@@ -47,9 +47,12 @@ describe("API Endpoints", () => {
         reasoningContent: null,
       });
 
-      const res = await request(app)
+      const agent = request.agent(app);
+      await agent.post("/api/chat/agent/credentials").send({ apiKey: "sk-test" });
+
+      const res = await agent
         .post("/api/chat/agent")
-        .send({ message: "Hi", apiKey: "sk-test" });
+        .send({ message: "Hi" });
       expect(res.status).toBe(200);
       expect(res.body.phase).toBe("done");
       expect(res.body.reply).toBe("Hello from agent!");
@@ -66,9 +69,12 @@ describe("API Endpoints", () => {
         reasoningContent: null,
       });
 
-      const res = await request(app)
+      const agent = request.agent(app);
+      await agent.post("/api/chat/agent/credentials").send({ apiKey: "sk-test" });
+
+      const res = await agent
         .post("/api/chat/agent")
-        .send({ message: "Open localhost", apiKey: "sk-test" });
+        .send({ message: "Open localhost" });
       expect(res.status).toBe(200);
       expect(res.body.phase).toBe("tool_needed");
       expect(res.body.tool.name).toBe("browser_navigate");
@@ -82,7 +88,7 @@ describe("API Endpoints", () => {
     it("returns 400 when message is missing", async () => {
       const res = await request(app)
         .post("/api/chat/agent/stream")
-        .send({ apiKey: "sk-test" });
+        .send({});
       expect(res.status).toBe(400);
     });
 
@@ -92,9 +98,12 @@ describe("API Endpoints", () => {
         yield { type: "done" as const, finalText: "Hello!", reasoningContent: null, toolCalls: null };
       })());
 
-      const res = await request(app)
+      const agent = request.agent(app);
+      await agent.post("/api/chat/agent/credentials").send({ apiKey: "sk-test" });
+
+      const res = await agent
         .post("/api/chat/agent/stream")
-        .send({ message: "Hi", apiKey: "sk-test" })
+        .send({ message: "Hi" })
         .buffer(true)
         .parse((res, cb) => {
           let data = "";
@@ -149,6 +158,41 @@ describe("API Endpoints", () => {
       const res = await request(app).delete("/api/chat/agent/sessions/nonexistent");
       expect(res.status).toBe(200);
       expect(res.body.ok).toBe(true);
+    });
+  });
+
+  describe("GET /api/chat/agent/config", () => {
+    it("returns that no API key is configured", async () => {
+      const res = await request(app).get("/api/chat/agent/config");
+      expect(res.status).toBe(200);
+      expect(res.body.apiKeyConfigured).toBe(false);
+      expect(res.body.source).toBe("none");
+    });
+  });
+
+  describe("session API key storage", () => {
+    it("stores a client-entered key in the server session and clears it later", async () => {
+      const agent = request.agent(app);
+
+      const initial = await agent.get("/api/chat/agent/config");
+      expect(initial.status).toBe(200);
+      expect(initial.body.apiKeyConfigured).toBe(false);
+      expect(initial.body.source).toBe("none");
+
+      const storeRes = await agent.post("/api/chat/agent/credentials").send({ apiKey: "sk-session" });
+      expect(storeRes.status).toBe(200);
+      expect(storeRes.body.ok).toBe(true);
+      expect(storeRes.body.source).toBe("session");
+
+      const stored = await agent.get("/api/chat/agent/config");
+      expect(stored.status).toBe(200);
+      expect(stored.body.apiKeyConfigured).toBe(true);
+      expect(stored.body.source).toBe("session");
+
+      const cleared = await agent.delete("/api/chat/agent/credentials");
+      expect(cleared.status).toBe(200);
+      expect(cleared.body.apiKeyConfigured).toBe(false);
+      expect(cleared.body.source).toBe("none");
     });
   });
 

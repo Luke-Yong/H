@@ -124,17 +124,8 @@ function saveThreads(key: string, threads: ChatThread[]) {
 function getStoredModel(): string {
   try { return localStorage.getItem("harness-model") || ""; } catch { return ""; }
 }
-function getStoredApiKey(): string {
-  try { return localStorage.getItem("harness-api-key") || ""; } catch { return ""; }
-}
 function getStoredThinking(): boolean {
   try { return localStorage.getItem("harness-thinking") === "true"; } catch { return false; }
-}
-
-function maskApiKey(key: string): string {
-  if (!key) return "";
-  if (key.length <= 8) return "***";
-  return key.slice(0, 4) + "***" + key.slice(-4);
 }
 
 // ── Props ──
@@ -208,7 +199,9 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
   const fcTokenByPathRef = useRef<Map<string, number>>(new Map());
   const selectedModelRef = useRef<string>("");
   const isThinkingRef = useRef(false);
-  const apiKeyRef = useRef("");
+  const [apiKeyConfigured, setApiKeyConfigured] = useState(false);
+  const [apiKeySource, setApiKeySource] = useState<"session" | "server" | "none">("none");
+  const [configChecked, setConfigChecked] = useState(false);
 
   // Subscribe to terminal output from the bridge
   useEffect(() => {
@@ -263,8 +256,6 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
   });
   const activePreset = useMemo(() => presets.find((p) => p.id === activePresetId) || null, [presets, activePresetId]);
 
-  // Global API key (one per user)
-  const [apiKey, setApiKey] = useState<string>(getStoredApiKey);
   // Model/thinking from active preset or manual entry
   const [selectedModel, setSelectedModel] = useState<string>(() => activePreset?.model || getStoredModel());
   const [isThinking, setIsThinking] = useState<boolean>(() => activePreset?.thinking ?? getStoredThinking());
@@ -272,7 +263,6 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
   // Keep refs in sync for deferred file tool callbacks
   useEffect(() => { selectedModelRef.current = selectedModel; }, [selectedModel]);
   useEffect(() => { isThinkingRef.current = isThinking; }, [isThinking]);
-  useEffect(() => { apiKeyRef.current = apiKey; }, [apiKey]);
 
   // Sync model/thinking from activePreset when it changes
   useEffect(() => {
@@ -285,8 +275,70 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [editingApiKey, setEditingApiKey] = useState(false);
   const [tempApiKey, setTempApiKey] = useState("");
+  const [savingApiKey, setSavingApiKey] = useState(false);
   const [editModelInput, setEditModelInput] = useState(selectedModel);
   const modelPickerRef = useRef<HTMLDivElement>(null);
+
+  const refreshAgentConfig = useCallback(async () => {
+    try {
+      const res = await fetch("/api/chat/agent/config");
+      const data = await res.json();
+      setApiKeyConfigured(Boolean(data?.apiKeyConfigured));
+      setApiKeySource(data?.source === "session" ? data.source : "none");
+    } catch {
+      setApiKeyConfigured(false);
+      setApiKeySource("none");
+    } finally {
+      setConfigChecked(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    try { localStorage.removeItem("harness-api-key"); } catch {}
+    void refreshAgentConfig();
+  }, [refreshAgentConfig]);
+
+  const saveApiKey = useCallback(async () => {
+    const apiKey = tempApiKey.trim();
+    if (!apiKey) return;
+    setSavingApiKey(true);
+    try {
+      const res = await fetch("/api/chat/agent/credentials", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(String(data?.error || `HTTP ${res.status}`));
+      }
+      setEditingApiKey(false);
+      setTempApiKey("");
+      await refreshAgentConfig();
+    } catch (err) {
+      setMessages((prev) => [...prev, { id: nextId(), role: "system", content: `Error saving API key: ${String(err)}`, when: Date.now() }]);
+    } finally {
+      setSavingApiKey(false);
+    }
+  }, [tempApiKey, refreshAgentConfig]);
+
+  const clearApiKey = useCallback(async () => {
+    setSavingApiKey(true);
+    try {
+      const res = await fetch("/api/chat/agent/credentials", { method: "DELETE" });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(String(data?.error || `HTTP ${res.status}`));
+      }
+      setEditingApiKey(false);
+      setTempApiKey("");
+      await refreshAgentConfig();
+    } catch (err) {
+      setMessages((prev) => [...prev, { id: nextId(), role: "system", content: `Error clearing API key: ${String(err)}`, when: Date.now() }]);
+    } finally {
+      setSavingApiKey(false);
+    }
+  }, [refreshAgentConfig]);
 
   // Save/update a preset — dedup by model id
   const saveAsPreset = useCallback(() => {
@@ -348,14 +400,6 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
     localStorage.setItem("harness-model", id);
     setModelPickerOpen(false);
   }, [editModelInput]);
-
-  const saveApiKey = useCallback(() => {
-    setApiKey(tempApiKey);
-    localStorage.setItem("harness-api-key", tempApiKey);
-    setEditingApiKey(false);
-    // Auto-focus model input if no model set yet
-    if (!selectedModel) setEditModelInput("deepseek-chat");
-  }, [tempApiKey, selectedModel]);
 
   useEffect(() => {
     setEditModelInput(selectedModel);
@@ -909,7 +953,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
     const toolIds: string[] = []; // track tool messages within this round
 
     try {
-      await consumeSSE("/api/chat/agent/stream", { sessionId, message: userMessage, context: fullContext, projectRoot: root, model: selectedModel, apiKey: apiKey || undefined }, async (evt) => {
+      await consumeSSE("/api/chat/agent/stream", { sessionId, message: userMessage, context: fullContext, projectRoot: root, model: selectedModel }, async (evt) => {
         if (signal.aborted) return false;
         if (evt.sessionId && evt.sessionId !== sessionId) {
           sessionId = evt.sessionId;
@@ -1733,7 +1777,6 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
           toolCallId: tcid,
           toolResult: accepted ? "OK" : "rejected",
           model: selectedModel || "deepseek-chat",
-          apiKey,
           thinking: isThinking,
           consoleContext: getConsoleContext?.() || "",
         });
@@ -1821,7 +1864,6 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
                 permissionGranted: granted,
                 toolResult: termResult ?? undefined,
                 model: selectedModel || "deepseek-chat",
-                apiKey,
                 thinking: isThinking,
                 consoleContext: getConsoleContext?.() || "",
               });
@@ -1924,7 +1966,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
             sessionId, toolCallId,
             permissionGranted: granted,
             toolResult: termResult ?? undefined,
-            model: selectedModel || "deepseek-chat", apiKey, thinking: isThinking,
+            model: selectedModel || "deepseek-chat", thinking: isThinking,
             consoleContext: getConsoleContext?.() || "",
           });
         }
@@ -1952,7 +1994,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
           });
         }
         if (!signal.aborted) {
-          await continueStreaming({ sessionId, toolCallId, toolResult, model: selectedModel || "deepseek-chat", apiKey, thinking: isThinking, consoleContext: getConsoleContext?.() || "" });
+          await continueStreaming({ sessionId, toolCallId, toolResult, model: selectedModel || "deepseek-chat", thinking: isThinking, consoleContext: getConsoleContext?.() || "" });
         } else {
           agentDoneRef.current = true;
         }
@@ -3352,8 +3394,8 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
               }
               if (e.key === "Enter" && !e.shiftKey && !mentionOpen) { e.preventDefault(); send(); }
             }}
-            placeholder={apiKey ? "Ask the agent...  (Shift+Enter for new line)" : "Set an API key to start chatting..."}
-            disabled={loading || !apiKey}
+            placeholder={apiKeyConfigured ? "Ask the agent...  (Shift+Enter for new line)" : "Add an API key to start chatting..."}
+            disabled={loading || !apiKeyConfigured}
             rows={3}
           />
           <div className="agent-input-buttons">
@@ -3361,18 +3403,18 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
             {loading ? (
               <button className="agent-send-btn agent-stop-btn" onClick={stop} title="Stop"><i className="codicon codicon-debug-stop" /></button>
             ) : (
-              <button className="agent-send-btn" onClick={send} disabled={!input.trim()} title="Send"><i className="codicon codicon-send" /></button>
+              <button className="agent-send-btn" onClick={send} disabled={!input.trim() || !apiKeyConfigured} title="Send"><i className="codicon codicon-send" /></button>
             )}
           </div>
         </div>
         {/* ── Model selector ── */}
         <div className="agent-model-bar">
           <div className="agent-model-selector" ref={modelPickerRef}>
-            <button className="agent-model-btn" onClick={() => setModelPickerOpen((v) => !v)} title="Configure model">
-              {!apiKey ? (
+            <button className="agent-model-btn" onClick={() => { setModelPickerOpen((v) => !v); void refreshAgentConfig(); }} title="Configure model">
+              {!apiKeyConfigured ? (
                 <>
                   <i className="codicon codicon-warning" style={{color: "#d29922"}} />
-                  <span style={{color: "#d29922"}}>Set API Key</span>
+                  <span style={{color: "#d29922"}}>Add API Key</span>
                 </>
               ) : (
                 <>
@@ -3429,7 +3471,6 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
                   <span className="agent-model-item-desc">{isThinking ? "Thinking (reasoning)" : "Non-thinking (chat)"}</span>
                   <i className={`codicon codicon-${isThinking ? "check" : "circle-outline"}`} style={{color: isThinking ? "#4ec94e" : undefined}} />
                 </button>
-                {/* API Key */}
                 {editingApiKey ? (
                   <div className="agent-model-apikey-edit">
                     <input
@@ -3438,35 +3479,39 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
                       placeholder="sk-..."
                       value={tempApiKey}
                       onChange={(e) => setTempApiKey(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === "Enter") { setApiKey(tempApiKey); localStorage.setItem("harness-api-key", tempApiKey); setEditingApiKey(false); } }}
+                      onKeyDown={(e) => { if (e.key === "Enter" && !savingApiKey) void saveApiKey(); }}
                       autoFocus
                     />
-                    <button className="agent-model-apikey-save" onClick={() => { setApiKey(tempApiKey); localStorage.setItem("harness-api-key", tempApiKey); setEditingApiKey(false); }}>Save</button>
-                    <button className="agent-model-apikey-cancel" onClick={() => setEditingApiKey(false)}>Cancel</button>
+                    <button className="agent-model-apikey-save" onClick={() => { void saveApiKey(); }} disabled={!tempApiKey.trim() || savingApiKey}>Save</button>
+                    <button className="agent-model-apikey-cancel" onClick={() => { setEditingApiKey(false); setTempApiKey(""); }} disabled={savingApiKey}>Cancel</button>
                   </div>
-                ) : apiKey ? (
+                ) : (
                   <>
                     <div className="agent-model-apikey-display">
-                      <i className="codicon codicon-key" />
-                      <span>{maskApiKey(apiKey)}</span>
+                      <i className={`codicon ${apiKeyConfigured ? "codicon-key" : "codicon-warning"}`} />
+                      <span>
+                        {apiKeySource === "session"
+                          ? "Using API key stored in this server session."
+                          : "No API key configured."}
+                      </span>
                     </div>
                     <div className="agent-model-apikey-row">
                       <button className="agent-model-item" onClick={() => { setTempApiKey(""); setEditingApiKey(true); }}>
-                        <span className="agent-model-item-name">Replace API Key</span>
-                        <i className="codicon codicon-refresh" />
+                        <span className="agent-model-item-name">{apiKeyConfigured ? "Replace API Key" : "Add API Key"}</span>
+                        <span className="agent-model-item-desc">Stored on the server for this session, not in browser storage</span>
+                        <i className="codicon codicon-key" />
                       </button>
-                      <button className="agent-model-item agent-model-item-danger" onClick={() => { setApiKey(""); localStorage.setItem("harness-api-key", ""); }}>
-                        <span className="agent-model-item-name">Delete</span>
-                        <i className="codicon codicon-trash" />
-                      </button>
+                      {apiKeySource === "session" && (
+                        <button className="agent-model-item agent-model-item-danger" onClick={() => { void clearApiKey(); }} disabled={savingApiKey}>
+                          <span className="agent-model-item-name">Clear Session Key</span>
+                          <i className="codicon codicon-trash" />
+                        </button>
+                      )}
                     </div>
+                    {!apiKeyConfigured && (
+                      <div className="agent-mention-hint">Add a DeepSeek API key to start chatting.</div>
+                    )}
                   </>
-                ) : (
-                  <button className="agent-model-item" onClick={() => { setTempApiKey(""); setEditingApiKey(true); }}>
-                    <span className="agent-model-item-name">Add API Key</span>
-                    <span className="agent-model-item-desc">Required to use DeepSeek</span>
-                    <i className="codicon codicon-add" />
-                  </button>
                 )}
                 <div className="agent-model-popup-divider" />
                 {/* Save / Clear buttons */}

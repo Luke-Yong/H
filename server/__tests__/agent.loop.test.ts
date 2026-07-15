@@ -123,7 +123,7 @@ describe("agentLoop", () => {
     const result = await agentLoop(tmpDir, state, "", {});
 
     expect(result.phase).toBe("done");
-    expect(result.reply).toContain("No API key");
+    expect(result.reply).toContain("No server API key configured");
   });
 
   it("stops after MAX_ITERATIONS and returns summary", async () => {
@@ -298,7 +298,7 @@ describe("agentLoopStream", () => {
 
     const errorEvent = events.find(e => e.type === "error");
     expect(errorEvent).toBeDefined();
-    expect(errorEvent?.error).toContain("No API key");
+    expect(errorEvent?.error).toContain("No server API key configured");
   });
 
   it("yields browser_tool event for browser actions", async () => {
