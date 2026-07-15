@@ -243,8 +243,8 @@ body {
   margin-bottom: 6px;
   background: #252526; border: 1px solid #454545;
   border-radius: 8px; box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
-  padding: 0; min-width: 380px; max-width: 480px;
-  max-height: 520px; display: flex; flex-direction: column;
+  padding: 0; width: 430px; height: 480px;
+  display: flex; flex-direction: column;
   z-index: 5000; overflow: hidden;
 }
 

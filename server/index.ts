@@ -871,12 +871,37 @@ app.post("/api/fs/rename", (req, res) => {
 });
 
 // ── System stats ──
-let prevCpuTimes = os.cpus().map((c) => c.times);
-let prevCpuTime = Date.now();
+let prevCpuTimesStatus = os.cpus().map((c) => c.times);
+let prevCpuTimesStats = os.cpus().map((c) => c.times);
+let prevCpuTimeStats = Date.now();
 let prevProcCpu = process.cpuUsage();
 let prevProcTime = Date.now();
 let prevNetBytes: { rx: number; tx: number } | null = null;
 let prevNetTime = 0;
+let cachedProcesses: ProcessSample[] | null = null;
+let processCacheAge = 0;
+
+// ── Minimal CPU poll for status bar (avoids heavy execSync disk queries) ──
+let lastCpuPercent = 0;
+app.get("/api/system/cpu", (_req, res) => {
+  try {
+    const cpus = os.cpus();
+    let totalDelta = 0, totalIdle = 0;
+    for (let i = 0; i < cpus.length; i++) {
+      const prev = prevCpuTimesStatus[i] || { user: 0, nice: 0, sys: 0, idle: 0, irq: 0 };
+      const cur = cpus[i].times;
+      const prevTotal = prev.user + prev.nice + prev.sys + prev.idle + prev.irq;
+      const curTotal = cur.user + cur.nice + cur.sys + cur.idle + cur.irq;
+      const delta = curTotal - prevTotal;
+      const idle = cur.idle - prev.idle;
+      totalDelta += delta;
+      totalIdle += idle;
+    }
+    prevCpuTimesStatus = cpus.map((c) => c.times);
+    lastCpuPercent = totalDelta > 0 ? Math.round((1 - totalIdle / totalDelta) * 100) : 0;
+  } catch {}
+  res.json({ cpuPercent: lastCpuPercent });
+});
 
 let firstStatsCall = true;
 
@@ -892,7 +917,7 @@ app.get("/api/system/stats", (_req, res) => {
     let totalIdle = 0;
 
     for (let i = 0; i < cpus.length; i++) {
-      const prev = prevCpuTimes[i] || { user: 0, nice: 0, sys: 0, idle: 0, irq: 0 };
+      const prev = prevCpuTimesStats[i] || { user: 0, nice: 0, sys: 0, idle: 0, irq: 0 };
       const cur = cpus[i].times;
       const prevTotal = prev.user + prev.nice + prev.sys + prev.idle + prev.irq;
       const curTotal = cur.user + cur.nice + cur.sys + cur.idle + cur.irq;
@@ -903,8 +928,8 @@ app.get("/api/system/stats", (_req, res) => {
       cpuUsage.push(Math.round((1 - idle / (delta || 1)) * 100));
     }
 
-    prevCpuTimes = cpus.map((c) => c.times);
-    prevCpuTime = now;
+    prevCpuTimesStats = cpus.map((c) => c.times);
+    prevCpuTimeStats = now;
 
     const cpuPercent = totalDelta > 0 ? Math.round((1 - totalIdle / totalDelta) * 100) : 0;
 
@@ -943,8 +968,13 @@ app.get("/api/system/stats", (_req, res) => {
       processes: Array<{ name: string; pid: number; ram: number; ramPercent: number; cpu: number }>;
     }> = [];
 
-    // Get process listing (sampled)
-    const sampled = sampleProcesses();
+    // Get process listing (sampled) — cached, only refresh every 5 polls
+    if (processCacheAge <= 0 || !cachedProcesses) {
+      cachedProcesses = sampleProcesses();
+      processCacheAge = 5;
+    }
+    processCacheAge--;
+    const sampled = cachedProcesses;
     const ourPid = process.pid;
     const isOurProcess = (name: string, pid: number) =>
       pid === ourPid ||
@@ -1405,6 +1435,295 @@ app.get("/api/lsp/status", (_req, res) => {
 // ── Health check ──
 app.get("/api/health", (_req, res) => {
   res.json({ status: "ok" });
+});
+
+// ── Resource Monitor page (loaded by Electron resource window) ──
+app.get("/resources", (_req, res) => {
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.send(`<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>System Resources</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background: #1e1e1e; color: #d4d4d4; font-size: 12px; overflow: hidden; }
+  .wrap { display: flex; flex-direction: column; height: 100vh; }
+  .header { display: flex; align-items: center; gap: 12px; padding: 8px 14px; background: #1a1a1a; border-bottom: 1px solid #333; flex-shrink: 0; }
+  .host { color: #4ec94e; font-weight: 600; }
+  .os { color: #888; }
+  .uptime { color: #888; margin-left: auto; font-family: monospace; }
+  .tabs { display: flex; flex-shrink: 0; border-bottom: 1px solid #333; background: #1a1a1a; }
+  .tab { background: none; border: none; border-bottom: 2px solid transparent; color: #888; padding: 7px 16px; font-size: 11px; font-family: inherit; cursor: pointer; transition: color .15s, border-color .15s; }
+  .tab.active { color: #d4d4d4; border-bottom-color: #4ec94e; }
+  .body { flex: 1; overflow-y: auto; padding: 8px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; align-content: start; }
+  .body .card { margin-bottom: 0; }
+  .card { background: #252526; border: 1px solid #333; border-radius: 6px; margin-bottom: 8px; }
+  .sec-header { display: flex; align-items: center; gap: 8px; padding: 7px 10px; cursor: pointer; user-select: none; border-bottom: 1px solid #333; }
+  .sec-header:hover { background: #2a2a2a; }
+  .sec-toggle { font-size: 9px; width: 12px; color: #888; }
+  .sec-title { font-size: 11px; font-weight: 600; }
+  .sec-count { font-size: 10px; color: #888; margin-left: auto; }
+  .sec-body { padding: 6px 10px; }
+  .row { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 11px; }
+  .label { color: #888; min-width: 55px; }
+  .val { font-weight: 600; font-family: monospace; text-align: right; min-width: 70px; }
+  .val-lg { font-size: 14px; font-weight: 600; font-family: monospace; min-width: 70px; text-align: right; }
+  .bar-wrap { flex: 1; height: 8px; background: #3c3c3c; border-radius: 4px; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 4px; transition: width .6s; }
+  .core-row { display: flex; align-items: center; gap: 6px; padding: 1px 0; font-size: 10px; }
+  .core-label { width: 28px; color: #888; font-family: monospace; }
+  .core-bar { flex: 1; height: 6px; background: #3c3c3c; border-radius: 3px; overflow: hidden; }
+  .core-fill { height: 100%; background: #4ec94e; border-radius: 3px; transition: width .6s; }
+  .core-val { width: 36px; text-align: right; font-family: monospace; color: #bbb; }
+  .load-grid { display: flex; gap: 16px; padding: 4px 0; }
+  .load-item { text-align: center; }
+  .load-label { font-size: 10px; color: #888; display: block; }
+  .load-value { font-size: 13px; font-weight: 600; font-family: monospace; }
+  .net-row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; }
+  .net-dir { display: flex; align-items: center; gap: 6px; }
+  .net-icon { font-size: 14px; width: 16px; }
+  .net-value { font-weight: 600; font-family: monospace; }
+  .proc-row { display: flex; align-items: center; gap: 8px; padding: 2px 0; font-size: 10px; }
+  .proc-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .proc-pid { color: #888; font-family: monospace; }
+  .proc-metric { display: flex; align-items: center; gap: 4px; min-width: 120px; }
+  .proc-metric .bar-wrap { height: 5px; width: 70px; }
+  .proc-heap { margin-top: 1px; font-size: 9px; color: #888; font-family: monospace; }
+  .empty { color: #666; padding: 8px; font-style: italic; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="header" id="header">
+    <span class="host" id="hostname">---</span>
+    <span class="os" id="platform">---</span>
+    <span class="uptime" id="uptime">Up ---</span>
+  </div>
+  <div class="tabs" id="tabs"></div>
+  <div class="body" id="body"></div>
+</div>
+<script>
+var DEBUG = true;
+window.onerror = function(msg, url, line, col, err) {
+  var body = document.getElementById("body");
+  if (body) body.innerHTML = '<div class="empty" style="color:#e74c3c">JS Error: ' + msg + ' (line ' + line + ')</div>';
+  return false;
+};
+
+const API = "/api/system/stats";
+const TABS = ["Overview", "CPU & Memory", "Disk", "Network"];
+var tab = "Overview";
+var collapsed = {};
+var lastData = null;
+
+function fmt(n) {
+  if (n >= 1073741824) return (n / 1073741824).toFixed(1) + " GB";
+  if (n >= 1048576) return (n / 1048576).toFixed(1) + " MB";
+  return (n / 1024).toFixed(0) + " KB";
+}
+
+function bar(w, c, h, id) {
+  return '<div class="bar-wrap" style="height:' + h + 'px"><div id="' + (id||'') + '" class="bar-fill" style="width:' + w + '%;background:' + c + '"></div></div>';
+}
+
+function secHeader(key, label, count, coll) {
+  return '<div class="sec-header" onclick="toggle(\\'' + key + '\\')">' +
+    '<span class="sec-toggle">' + (coll ? '\u25b8' : '\u25be') + '</span>' +
+    '<span class="sec-title">' + label + '</span>' +
+    (count ? '<span class="sec-count">' + count + '</span>' : '') + '</div>';
+}
+
+function renderTabs() {
+  document.getElementById("tabs").innerHTML = TABS.map(function(t) {
+    return '<button class="tab' + (t === tab ? ' active' : '') + '" onclick="setTab(\\'' + t + '\\')">' + t + '</button>';
+  }).join("");
+}
+
+function setTab(t) { tab = t; renderTabs(); render(); }
+function toggle(k) { collapsed[k] = !collapsed[k]; render(); }
+
+function renderProcs(cats, our) {
+  if (!cats.length) return "";
+  var h = "";
+  for (var i = 0; i < cats.length; i++) {
+    var cat = cats[i];
+    var items = "";
+    for (var j = 0; j < cat.processes.length; j++) {
+      var p = cat.processes[j];
+      var heap = p.pid === (our && our.pid)
+        ? '<div class="proc-heap">Heap ' + fmt(our.heapUsed) + ' / ' + fmt(our.heapTotal) + ' \u00b7 Up ' + fmtUp(our.uptime) + '</div>' : "";
+      items += '<div class="proc-row">' +
+        '<span class="proc-name" title="' + p.name + '">' + p.name + '</span>' +
+        '<span class="proc-pid">PID ' + p.pid + '</span>' +
+        '<div class="proc-metric">' + bar(p.cpu, "#569cd6", 5, "") + '<span>' + p.cpu + '%</span></div>' +
+        '<div class="proc-metric">' + bar(p.ramPercent, "#e2b714", 5, "") + '<span>' + fmt(p.ram) + '</span></div>' +
+        '</div>' + heap;
+    }
+    h += '<div class="card">' + secHeader("proc-" + cat.category, cat.category, String(cat.processes.length), !!collapsed["proc-" + cat.category]) +
+      '<div class="sec-body"' + (collapsed["proc-" + cat.category] ? ' style="display:none"' : '') + '>' + items + '</div></div>';
+  }
+  return h;
+}
+
+function fmtUp(s) { return s < 60 ? s + 's' : s < 3600 ? Math.floor(s/60) + 'm' : Math.floor(s/3600) + 'h ' + Math.floor((s%3600)/60) + 'm'; }
+
+function render() {
+  if (!lastData) return;
+  var s = lastData;
+  var allCount = s.processesByCategory.reduce(function(a,c){ return a + c.processes.length; }, 0);
+  var cores = "";
+  for (var i = 0; i < s.perCore.length; i++) {
+    cores += '<div class="core-row"><span class="core-label">C' + i + '</span><div class="core-bar"><div class="core-fill" style="width:' + s.perCore[i] + '%"></div></div><span class="core-val">' + s.perCore[i] + '%</span></div>';
+  }
+  var ipSection = s.network.ipAddresses.length
+    ? '<div style="margin-top:4px;font-size:10px;color:#888;text-transform:uppercase;letter-spacing:.3px">IP Addresses</div>' +
+      s.network.ipAddresses.map(function(ip){ return '<div class="row"><span class="label">' + ip.name + '</span><span class="val">' + ip.address + '</span></div>'; }).join("")
+    : "";
+  var diskItems = s.diskBreakdown.map(function(d){ return '<div class="row"><span class="label">' + d.component + '/</span><span class="val">' + fmt(d.size) + '</span></div>'; }).join("");
+
+  var overview = '<div class="card">' + secHeader("ov-cpu", "CPU", s.cpuPercent + '%', !!collapsed["ov-cpu"]) +
+    '<div class="sec-body"' + (collapsed["ov-cpu"] ? ' style="display:none"' : '') + '>' +
+    '<div class="row"><span class="label">Usage</span>' + bar(s.cpuPercent, "#4ec94e", 8, "ovCpuBar") + '<span class="val">' + s.cpuPercent + '%</span></div>' +
+    '<div class="row"><span class="label">Speed</span><span class="val">' + s.cpuSpeed + ' MHz</span></div>' +
+    '<div class="row"><span class="label">Model</span><span class="val" style="font-size:10px;font-weight:normal">' + s.cpuModel + '</span></div>' +
+    '</div></div>' +
+    '<div class="card">' + secHeader("ov-mem", "Memory", s.memPercent + '%', !!collapsed["ov-mem"]) +
+    '<div class="sec-body"' + (collapsed["ov-mem"] ? ' style="display:none"' : '') + '>' +
+    '<div class="row"><span class="label">Usage</span>' + bar(s.memPercent, "#e2b714", 8, "ovMemBar") + '<span class="val">' + s.memPercent + '%</span></div>' +
+    '<div class="row"><span class="label">Used</span><span class="val">' + fmt(s.memUsed) + '</span></div>' +
+    '<div class="row"><span class="label">Total</span><span class="val">' + fmt(s.memTotal) + '</span></div>' +
+    '</div></div>' +
+    (s.disk.total > 0 ? '<div class="card">' + secHeader("ov-disk", "Disk (" + (s.disk.drive||"C:") + ")", s.disk.percent + '%', !!collapsed["ov-disk"]) +
+    '<div class="sec-body"' + (collapsed["ov-disk"] ? ' style="display:none"' : '') + '>' +
+    '<div class="row"><span class="label">Usage</span>' + bar(s.disk.percent, "#569cd6", 8, "ovDiskBar") + '<span class="val">' + s.disk.percent + '%</span></div>' +
+    '<div class="row"><span class="label">Free</span><span class="val">' + fmt(s.disk.free) + '</span></div>' +
+    '<div class="row"><span class="label">Total</span><span class="val">' + fmt(s.disk.total) + '</span></div>' +
+    (s.disk.model ? '<div class="row"><span class="label">Model</span><span class="val" style="font-size:10px;font-weight:normal">' + s.disk.model + '</span></div>' : '') +
+    '</div></div>' : '') +
+    '<div class="card">' + secHeader("ov-net", "Network", "", !!collapsed["ov-net"]) +
+    '<div class="sec-body"' + (collapsed["ov-net"] ? ' style="display:none"' : '') + '>' +
+    '<div class="row"><span class="label">\u2193 Down</span><span class="val">' + fmt(s.network.rxRate) + '/s</span></div>' +
+    '<div class="row"><span class="label">\u2191 Up</span><span class="val">' + fmt(s.network.txRate) + '/s</span></div>' +
+    ipSection +
+    '</div></div>';
+
+  var cpuMem = '<div class="card">' + secHeader("cpu-total", "CPU Usage", s.cpuPercent + '%', !!collapsed["cpu-total"]) +
+    '<div class="sec-body"' + (collapsed["cpu-total"] ? ' style="display:none"' : '') + '>' +
+    '<div class="row">' + bar(s.cpuPercent, "#4ec94e", 10, "cpuTotalBar") + '<span class="val-lg">' + s.cpuPercent + '%</span></div>' +
+    '</div></div>' +
+    '<div class="card">' + secHeader("cpu-cores", "Per-Core (" + s.cpuCores + " cores)", "", !!collapsed["cpu-cores"]) +
+    '<div class="sec-body"' + (collapsed["cpu-cores"] ? ' style="display:none"' : '') + '>' + cores + '</div></div>' +
+    '<div class="card">' + secHeader("cpu-info", "Processor Info", "", !!collapsed["cpu-info"]) +
+    '<div class="sec-body"' + (collapsed["cpu-info"] ? ' style="display:none"' : '') + '>' +
+    '<div class="row"><span class="label">Model</span><span class="val" style="font-size:10px;font-weight:normal">' + s.cpuModel + '</span></div>' +
+    '<div class="row"><span class="label">Speed</span><span class="val">' + s.cpuSpeed + ' MHz</span></div>' +
+    '<div class="row"><span class="label">Cores</span><span class="val">' + s.cpuCores + '</span></div>' +
+    '</div></div>' +
+    '<div class="card">' + secHeader("mem-detail", "Memory", s.memPercent + '%', !!collapsed["mem-detail"]) +
+    '<div class="sec-body"' + (collapsed["mem-detail"] ? ' style="display:none"' : '') + '>' +
+    '<div class="row">' + bar(s.memPercent, "#e2b714", 10, "memTotalBar") + '<span class="val-lg">' + s.memPercent + '%</span></div>' +
+    '<div class="row"><span class="label">Used</span><span class="val">' + fmt(s.memUsed) + '</span></div>' +
+    '<div class="row"><span class="label">Free</span><span class="val">' + fmt(s.memTotal - s.memUsed) + '</span></div>' +
+    '<div class="row"><span class="label">Total</span><span class="val">' + fmt(s.memTotal) + '</span></div>' +
+    '</div></div>' +
+    '<div class="card">' + secHeader("load-detail", "Load Average", "", !!collapsed["load-detail"]) +
+    '<div class="sec-body"' + (collapsed["load-detail"] ? ' style="display:none"' : '') + '>' +
+    '<div class="load-grid">' + ["1m","5m","15m"].map(function(l, i){ return '<div class="load-item"><span class="load-label">' + l + '</span><span class="load-value">' + ((s.loadAvg[i]||0).toFixed(2)) + '</span></div>'; }).join("") + '</div>' +
+    '</div></div>' +
+    '<div class="card">' + secHeader("proc-cpu", "Processes", String(allCount), !!collapsed["proc-cpu"]) +
+    '<div class="sec-body"' + (collapsed["proc-cpu"] ? ' style="display:none"' : '') + '>' + renderProcs(s.processesByCategory, s.ourProcess) + '</div></div>';
+
+  var disk = (s.disk.total > 0 ? '<div class="card">' + secHeader("disk-os", "Drive " + (s.disk.drive||"C:"), s.disk.percent + '%', !!collapsed["disk-os"]) +
+    '<div class="sec-body"' + (collapsed["disk-os"] ? ' style="display:none"' : '') + '>' +
+    '<div class="row">' + bar(s.disk.percent, "#569cd6", 10, "diskTotalBar") + '<span class="val-lg">' + s.disk.percent + '%</span></div>' +
+    '<div class="row"><span class="label">Used</span><span class="val">' + fmt(s.disk.used) + '</span></div>' +
+    '<div class="row"><span class="label">Free</span><span class="val">' + fmt(s.disk.free) + '</span></div>' +
+    '<div class="row"><span class="label">Total</span><span class="val">' + fmt(s.disk.total) + '</span></div>' +
+    (s.disk.model ? '<div class="row"><span class="label">Model</span><span class="val" style="font-size:10px;font-weight:normal">' + s.disk.model + '</span></div>' : '') +
+    '</div></div>' : '') +
+    '<div class="card">' + secHeader("disk-harness", "Harness Components", "", !!collapsed["disk-harness"]) +
+    '<div class="sec-body"' + (collapsed["disk-harness"] ? ' style="display:none"' : '') + '>' +
+    (diskItems || '<div class="empty">No data</div>') + '</div></div>';
+
+  var net = '<div class="card">' + secHeader("net-speed", "Transfer Rates", "", !!collapsed["net-speed"]) +
+    '<div class="sec-body"' + (collapsed["net-speed"] ? ' style="display:none"' : '') + '>' +
+    '<div class="net-row"><div class="net-dir"><span class="net-icon">\u2193</span><span>Download</span></div><span class="net-value">' + fmt(s.network.rxRate) + '/s</span></div>' +
+    '<div class="net-row"><div class="net-dir"><span class="net-icon">\u2191</span><span>Upload</span></div><span class="net-value">' + fmt(s.network.txRate) + '/s</span></div>' +
+    '</div></div>' +
+    '<div class="card">' + secHeader("net-total", "Total Transferred", "", !!collapsed["net-total"]) +
+    '<div class="sec-body"' + (collapsed["net-total"] ? ' style="display:none"' : '') + '>' +
+    '<div class="row"><span class="label">Received</span><span class="val">' + fmt(s.network.totalRx) + '</span></div>' +
+    '<div class="row"><span class="label">Sent</span><span class="val">' + fmt(s.network.totalTx) + '</span></div>' +
+    '</div></div>' +
+    (s.network.ipAddresses.length ? '<div class="card">' + secHeader("net-ip", "IP Addresses", "", !!collapsed["net-ip"]) +
+    '<div class="sec-body"' + (collapsed["net-ip"] ? ' style="display:none"' : '') + '>' +
+    s.network.ipAddresses.map(function(ip){ return '<div class="row"><span class="label">' + ip.name + '</span><div style="flex:1;display:flex;align-items:center;gap:16px"><span class="val">' + ip.address + '</span>' + (ip.mac ? '<span style="font-size:10px;color:#666;font-family:monospace">' + ip.mac + '</span>' : '') + '</div></div>'; }).join("") +
+    '</div></div>' : '');
+
+  var bodies = { "Overview": overview, "CPU & Memory": cpuMem, "Disk": disk, "Network": net };
+  document.getElementById("body").innerHTML = bodies[tab] || overview;
+
+  var ovCpuBar = document.getElementById("ovCpuBar");
+  if (ovCpuBar) ovCpuBar.style.width = s.cpuPercent + '%';
+  var ovMemBar = document.getElementById("ovMemBar");
+  if (ovMemBar) ovMemBar.style.width = s.memPercent + '%';
+  var ovDiskBar = document.getElementById("ovDiskBar");
+  if (ovDiskBar) ovDiskBar.style.width = s.disk.percent + '%';
+  var cpuTotalBar = document.getElementById("cpuTotalBar");
+  if (cpuTotalBar) cpuTotalBar.style.width = s.cpuPercent + '%';
+  var memTotalBar = document.getElementById("memTotalBar");
+  if (memTotalBar) memTotalBar.style.width = s.memPercent + '%';
+  var diskTotalBar = document.getElementById("diskTotalBar");
+  if (diskTotalBar) diskTotalBar.style.width = s.disk.percent + '%';
+}
+
+var pollErrors = 0;
+var polling = false;
+async function poll() {
+  if (polling) return;
+  polling = true;
+  try {
+    var res = await fetch(API);
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    var raw = await res.json();
+    if (raw.error) throw new Error(raw.error);
+    lastData = {
+      cpuPercent: raw.cpu.percent, cpuCores: raw.cpu.cores, cpuModel: raw.cpu.model, cpuSpeed: raw.cpu.speed,
+      memPercent: raw.memory.percent, memUsed: raw.memory.used, memTotal: raw.memory.total,
+      uptime: raw.uptime, loadAvg: raw.loadAvg || [],
+      hostname: raw.hostname, platform: raw.platform, arch: raw.arch,
+      perCore: raw.cpu.perCore || [],
+      processesByCategory: raw.processesByCategory || [],
+      disk: raw.disk || { total: 0, free: 0, used: 0, percent: 0, model: "", drive: "" },
+      diskBreakdown: raw.diskBreakdown || [],
+      network: raw.network || { totalRx: 0, totalTx: 0, rxRate: 0, txRate: 0, ipAddresses: [] },
+      ourProcess: raw.ourProcess || null,
+    };
+    pollErrors = 0;
+    document.getElementById("hostname").textContent = lastData.hostname;
+    document.getElementById("platform").textContent = lastData.platform + " " + lastData.arch;
+    document.getElementById("uptime").textContent = "Up " + lastData.uptime;
+    try {
+      render();
+    } catch(renderErr) {
+      document.getElementById("body").innerHTML = '<div class="empty">Render error: ' + renderErr.message + '</div>';
+    }
+  } catch(e) {
+    pollErrors++;
+    document.getElementById("body").innerHTML = '<div class="empty">Failed to load resource data: ' + e.message + '. Retrying every 2s...</div>';
+  }
+  polling = false;
+}
+
+renderTabs();
+document.getElementById("body").innerHTML = '<div class="empty">Connecting to server...</div>';
+poll();
+setInterval(poll, 10000);
+</script>
+</body>
+</html>`);
 });
 
 // ── MCP (Model Context Protocol) endpoints ──

@@ -309,6 +309,51 @@ async function getIdeWideLocation(timeoutMs) {
   return result;
 }
 
+// ── Resource Monitor Window ──
+let resourceMonitorWindow = null;
+
+function openResourceMonitorWindow(parentWin) {
+  if (resourceMonitorWindow && !resourceMonitorWindow.isDestroyed()) {
+    resourceMonitorWindow.focus();
+    return;
+  }
+
+  const win = new BrowserWindow({
+    width: 900,
+    height: 550,
+    backgroundColor: "#1e1e1e",
+    title: "System Resources",
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      webSecurity: false,
+    },
+  });
+
+  win.setMenuBarVisibility(false);
+  win.webContents.on("did-finish-load", () => {
+    console.log("[resource-monitor] Page loaded successfully");
+  });
+  win.webContents.on("did-fail-load", (_event, errorCode, errorDesc, validatedURL) => {
+    console.log("[resource-monitor] Load failed:", errorCode, errorDesc, validatedURL);
+  });
+  win.webContents.openDevTools({ mode: "detach" });
+  win.loadURL("http://127.0.0.1:3001/resources");
+
+  win.on("closed", () => {
+    resourceMonitorWindow = null;
+  });
+
+  resourceMonitorWindow = win;
+}
+
+function closeResourceMonitorWindow() {
+  if (resourceMonitorWindow && !resourceMonitorWindow.isDestroyed()) {
+    resourceMonitorWindow.close();
+    resourceMonitorWindow = null;
+  }
+}
+
 function registerIpc() {
   ipcMain.on("harness:getBrowserPreloadUrl", (event) => {
     event.returnValue = `file:///${path.join(__dirname, "browser-preload.cjs").replace(/\\/g, "/")}`;
@@ -387,6 +432,15 @@ function registerIpc() {
     const timeoutMs = Math.max(30_000, Number(payload?.options?.timeout) || 35_000);
     const result = await getIdeWideLocation(timeoutMs);
     return result;
+  });
+
+  ipcMain.on("harness:openResourceMonitor", (event) => {
+    const parentWin = BrowserWindow.fromWebContents(event.sender);
+    openResourceMonitorWindow(parentWin);
+  });
+
+  ipcMain.on("harness:closeResourceMonitor", () => {
+    closeResourceMonitorWindow();
   });
 }
 
