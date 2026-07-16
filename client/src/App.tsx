@@ -563,7 +563,7 @@ export default function App() {
         { label: "Kill Terminal", action: () => setTermVisible(false) },
       ],
     },
-    { label: "Help", items: [{ label: "About Harness", action: () => alert("Harness - AI-powered coding agent\nMonaco + DeepSeek") }] },
+    { label: "Help", items: [{ label: "About Harness", action: () => alert("Harness\nAI-powered coding workspace\nPowered by DeepSeek") }] },
   ], [fsBasePath, statusBar.hasEditor, openFolderImmediate, openFileImmediate, createNewProject, createNewFile, handleBrowserClose]);
 
   return (

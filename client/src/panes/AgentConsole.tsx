@@ -2867,7 +2867,7 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
       {/* ── Messages ── */}
       <div className="console-list" ref={consoleListRef}>
         {safeMessages.length === 0 && (
-          <div className="agent-empty">Ask the agent to do anything — write code, run tests, browse the web, manage files...</div>
+          <div className="agent-empty">Ask anything — DeepSeek can write code, debug, browse the web, run commands, and manage files.</div>
         )}
         {messageGroups.map((group, gi) => {
            const isLast = gi === messageGroups.length - 1;

@@ -1576,7 +1576,7 @@ function renderProcs(cats, our) {
       items += '<div class="proc-row">' +
         '<span class="proc-name" title="' + p.name + '">' + p.name + '</span>' +
         '<span class="proc-pid">PID ' + p.pid + '</span>' +
-        '<div class="proc-metric">' + bar(p.cpu, "#569cd6", 5, "") + '<span>' + p.cpu + '%</span></div>' +
+        '<div class="proc-metric">' + bar(p.cpu, "#4D6BFE", 5, "") + '<span>' + p.cpu + '%</span></div>' +
         '<div class="proc-metric">' + bar(p.ramPercent, "#e2b714", 5, "") + '<span>' + fmt(p.ram) + '</span></div>' +
         '</div>' + heap;
     }
@@ -1616,7 +1616,7 @@ function render() {
     '</div></div>' +
     (s.disk.total > 0 ? '<div class="card">' + secHeader("ov-disk", "Disk (" + (s.disk.drive||"C:") + ")", s.disk.percent + '%', !!collapsed["ov-disk"]) +
     '<div class="sec-body"' + (collapsed["ov-disk"] ? ' style="display:none"' : '') + '>' +
-    '<div class="row"><span class="label">Usage</span>' + bar(s.disk.percent, "#569cd6", 8, "ovDiskBar") + '<span class="val">' + s.disk.percent + '%</span></div>' +
+    '<div class="row"><span class="label">Usage</span>' + bar(s.disk.percent, "#4D6BFE", 8, "ovDiskBar") + '<span class="val">' + s.disk.percent + '%</span></div>' +
     '<div class="row"><span class="label">Free</span><span class="val">' + fmt(s.disk.free) + '</span></div>' +
     '<div class="row"><span class="label">Total</span><span class="val">' + fmt(s.disk.total) + '</span></div>' +
     (s.disk.model ? '<div class="row"><span class="label">Model</span><span class="val" style="font-size:10px;font-weight:normal">' + s.disk.model + '</span></div>' : '') +
@@ -1903,7 +1903,7 @@ app.use("/_browser", (req, res, next) => {
             const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#1e1e1e;color:#d4d4d4;font:13px/1.5 'Cascadia Code','Fira Code',Consolas,monospace;padding:16px;white-space:pre-wrap;word-break:break-word}
-.key{color:#9cdcfe}.str{color:#ce9178}.num{color:#b5cea8}.bool{color:#569cd6}.nil{color:#569cd6}.bracket{color:#ffd700}
+.key{color:#8E9FFF}.str{color:#ce9178}.num{color:#b5cea8}.bool{color:#4D6BFE}.nil{color:#4D6BFE}.bracket{color:#ffd700}
 </style></head><body>${highlightJson(formatted)}</body></html>`;
             res.writeHead(proxyRes.statusCode || 200, headers);
             res.end(html);

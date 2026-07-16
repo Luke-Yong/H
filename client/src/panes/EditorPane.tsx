@@ -2010,7 +2010,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
         {sidebarVisible && sidebarPanel === "scm" && <ScmPanel fsBasePath={fsBasePath} newFilePaths={newFilePaths} onOpenFile={openFileByFsPath} />}
         <div className="editor-welcome">
           <div className="welcome-logo">Harness</div>
-          <div className="welcome-subtitle">AI-Powered Browser Test IDE</div>
+          <div className="welcome-subtitle">Powered by DeepSeek</div>
           <div className="welcome-actions">
             <button className="welcome-btn" onClick={() => handleWelcomeClick(onOpenFolder)}>
               <span className="welcome-btn-icon">📂</span>
@@ -2203,7 +2203,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
             {showWelcomeInEditor && (
               <div className="editor-welcome">
                 <div className="welcome-logo">Harness</div>
-                <div className="welcome-subtitle">AI-Powered Browser Test IDE</div>
+                <div className="welcome-subtitle">Powered by DeepSeek</div>
                 <div className="welcome-actions">
                   <button className="welcome-btn" onClick={() => handleWelcomeClick(onOpenFolder)}>
                     <span className="welcome-btn-icon">📂</span>
