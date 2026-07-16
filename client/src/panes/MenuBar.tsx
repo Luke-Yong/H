@@ -90,7 +90,10 @@ export default function MenuBar({ menus }: Props) {
 
   return (
     <div className="menu-bar" onDoubleClick={() => { window.harnessDesktop?.maximize?.(); syncMax(); }}>
-      <div className="menu-bar-app-name">Harness</div>
+      <div className="menu-bar-app-name">
+        <img src="/icon.svg" className="menu-bar-app-icon" alt="" />
+        Harness
+      </div>
       <div className="menu-bar-menus">
         {menus.map((menu, i) => (
           <Dropdown

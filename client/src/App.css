@@ -1144,6 +1144,15 @@ body.resizing iframe { pointer-events: none; }
   font-weight: 600;
   padding: 4px 16px;
   letter-spacing: 0.3px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.menu-bar-app-icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
 }
 
 .menu-bar-menus {

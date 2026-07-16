@@ -13,7 +13,8 @@
     "dev:client": "cd client && npm run dev",
     "desktop:dev": "set ELECTRON_DEV=1&& concurrently \"cd client && npm run dev\" \"electron electron/main.cjs\"",
     "desktop:build": "cd client && npm run build",
-    "desktop:pack": "npm run desktop:build && electron-builder --win",
+    "desktop:pack": "npm run icon:generate && npm run desktop:build && electron-builder --win",
+    "icon:generate": "node scripts/generate-icon.js",
     "install:all": "npm install && cd client && npm install",
     "rebuild:pty": "electron-rebuild -f -w node-pty",
     "postinstall": "node -e \"try { const { spawnSync } = require('child_process'); const r = spawnSync('npx', ['electron-rebuild','-f','-w','node-pty'], { stdio: 'inherit', shell: true }); if (r.status !== 0) { console.warn('node-pty rebuild failed; terminal will fall back to pipe mode.'); } } catch(e) { console.warn('node-pty rebuild skipped; terminal will fall back to pipe mode.'); }\"",
@@ -30,11 +31,14 @@
     "ws": "^8.18.0"
   },
   "build": {
+    "appId": "com.harness.ide",
+    "productName": "Harness",
     "npmRebuild": false,
     "asarUnpack": [
       "node_modules/@esbuild/**/*"
     ],
     "win": {
+      "icon": "build/icon.ico",
       "signAndEditExecutable": false
     }
   },
@@ -47,7 +51,9 @@
     "electron": "^34.0.0",
     "electron-builder": "^25.1.8",
     "electron-rebuild": "^3.2.9",
+    "sharp": "^0.35.3",
     "supertest": "^7.2.2",
+    "to-ico": "^1.1.5",
     "typescript": "^5.6.0",
     "vitest": "^4.1.9"
   }
