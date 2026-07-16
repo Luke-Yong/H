@@ -3,6 +3,8 @@ import { WebSocket } from "ws";
 import fs from "fs";
 import path from "path";
 import os from "os";
+import http from "http";
+import https from "https";
 
 type Backend = "pty" | "pipe";
 
@@ -10,7 +12,21 @@ type Backend = "pty" | "pipe";
 const LOCALHOST_URL_RE = /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]):\d{2,5}/gi;
 const groupSeenUrls = new Map<string, Set<string>>();
 
-function scanAndEmitUrl(ws: WebSocket, groupKey: string, sessionId: string, chunk: string) {
+function isWebPage(url: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const client = url.startsWith("https") ? https : http;
+    const req = client.request(url, { method: "HEAD", timeout: 2000 }, (res) => {
+      const ct = res.headers["content-type"] || "";
+      resolve(ct.includes("text/html"));
+      res.resume(); // consume response to free socket
+    });
+    req.on("error", () => resolve(false));
+    req.on("timeout", () => { req.destroy(); resolve(false); });
+    req.end();
+  });
+}
+
+async function scanAndEmitUrl(ws: WebSocket, groupKey: string, sessionId: string, chunk: string) {
   const matches = chunk.match(LOCALHOST_URL_RE);
   if (!matches) return;
   let set = groupSeenUrls.get(groupKey);
@@ -23,6 +39,12 @@ function scanAndEmitUrl(ws: WebSocket, groupKey: string, sessionId: string, chun
     if (set.has(normalized)) continue;
     set.add(normalized);
     console.log(`[Harness] Detected URL: ${normalized} (session=${sessionId})`);
+    // Only open if it's a web page (text/html), skip API endpoints
+    const isWeb = await isWebPage(normalized);
+    if (!isWeb) {
+      console.log(`[Harness] Skipping non-HTML URL: ${normalized}`);
+      continue;
+    }
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(`term:url:${sessionId}:${normalized}`);
     }

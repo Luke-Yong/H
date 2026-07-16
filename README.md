@@ -246,7 +246,12 @@ In Electron mode, Harness includes a full browser in the editor area powered by 
 
 ### Features
 
-**Auto-detect localhost URLs** — When a terminal process starts a local server, the browser detects the URL and opens it as a new tab automatically.
+**Auto-detect localhost URLs** — When a terminal process outputs a URL, Harness scans the output in real time and opens compatible URLs in a new browser tab automatically.
+
+- **Detection pattern:** Any URL matching `http(s)://localhost`, `127.0.0.1`, `0.0.0.0`, or `[::1]` with a port number (e.g. `http://localhost:5173`).
+- **Web page vs API filtering:** Before opening, Harness sends a quick `HEAD` request to check the `Content-Type` header. Only URLs returning `text/html` are opened as browser tabs — API endpoints (e.g. `/api/health`, JSON responses) are silently skipped.
+- **Deduplication:** Each URL is opened at most once per terminal session. Repeating the same URL in terminal output is ignored.
+- **Supported sources:** Works with both PTY and pipe-based terminals, scanning both stdout and stderr.
 
 **Manual navigation** — Type a URL or a Bing search query in the address bar and press Enter or click Go.
 
