@@ -565,6 +565,9 @@ async function createMainWindow() {
   }
 }
 
+// Must be set before app.whenReady() on Windows to apply the taskbar icon
+app.setAppUserModelId("com.harness.ide");
+
 app.whenReady().then(async () => {
   registerIpc();
   setupBrowserSession();
