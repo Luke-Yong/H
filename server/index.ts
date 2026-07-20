@@ -2012,21 +2012,32 @@ wss.on("connection", (ws) => {
 });
 
 if (process.env.NODE_ENV !== "test") {
-  const tryPort = (port: number, maxRetries = 10) => {
+  const PORT_RANGES: [number, number][] = [[3001, 3100]];
+
+  const tryPort = (rangeIdx = 0, offset = 0) => {
+    if (rangeIdx >= PORT_RANGES.length) {
+      throw new Error("No available ports in configured ranges");
+    }
+    const [start, end] = PORT_RANGES[rangeIdx];
+    const port = start + offset;
+    if (port > end) {
+      tryPort(rangeIdx + 1, 0);
+      return;
+    }
+
     server.listen(port, () => {
       console.log(`Harness server running on http://localhost:${port}`);
     });
     server.on("error", (err: NodeJS.ErrnoException) => {
-      if (err.code === "EADDRINUSE" && port < PORT + maxRetries) {
-        console.log(`Port ${port} in use, trying ${port + 1}...`);
+      if (err.code === "EADDRINUSE") {
         server.close();
-        tryPort(port + 1, maxRetries - 1);
+        tryPort(rangeIdx, offset + 1);
       } else {
         throw err;
       }
     });
   };
-  tryPort(PORT);
+  tryPort();
 }
 
 process.on("SIGINT", async () => {

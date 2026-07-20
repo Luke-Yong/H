@@ -18,6 +18,8 @@ const geoOverrideDebounce = new Map();
 function showFatalStartupError(error) {
   const message = error instanceof Error ? (error.stack || error.message) : String(error);
   try { console.error("[harness-startup]", message); } catch {}
+  // Suppress popup for EADDRINUSE — server auto-falls back to next port
+  if (/EADDRINUSE|address already in use/i.test(message)) return;
   try { dialog.showErrorBox("Harness failed to start", message); } catch {}
 }
 
@@ -124,6 +126,23 @@ async function waitForUrl(url, timeoutMs) {
     await new Promise((r) => setTimeout(r, 250));
   }
   return false;
+}
+
+async function waitForAnyPort(ranges, path, timeoutMs) {
+  const start = Date.now();
+  let rangeIdx = 0;
+  let port = ranges[0][0];
+  while (Date.now() - start < timeoutMs) {
+    const ok = await requestOk(`http://127.0.0.1:${port}${path}`);
+    if (ok) return port;
+    await new Promise((r) => setTimeout(r, 250));
+    if (++port > ranges[rangeIdx][1]) {
+      rangeIdx++;
+      if (rangeIdx >= ranges.length) rangeIdx = 0;
+      port = ranges[rangeIdx][0];
+    }
+  }
+  return 0;
 }
 
 function startEmbeddedServer() {
@@ -344,6 +363,9 @@ async function getIdeWideLocation(timeoutMs) {
 
 // ── Resource Monitor Window ──
 let resourceMonitorWindow = null;
+let serverPort = 3001;
+const SERVER_PORT_RANGES = [[3001, 3100]];
+const VITE_PORT_RANGES = [[5101, 5200]];
 
 function openResourceMonitorWindow(parentWin) {
   if (resourceMonitorWindow && !resourceMonitorWindow.isDestroyed()) {
@@ -370,7 +392,7 @@ function openResourceMonitorWindow(parentWin) {
   win.webContents.on("did-fail-load", (_event, errorCode, errorDesc, validatedURL) => {
     console.log("[resource-monitor] Load failed:", errorCode, errorDesc, validatedURL);
   });
-  win.loadURL("http://127.0.0.1:3001/resources");
+  win.loadURL(`http://127.0.0.1:${serverPort}/resources`);
 
   win.on("closed", () => {
     resourceMonitorWindow = null;
@@ -523,6 +545,7 @@ async function createMainWindow() {
     frame: false,
     icon: path.join(__dirname, "..", "build", "icon.ico"),
     backgroundColor: "#1e1e1e",
+    show: !isDev, // dev: show manually after loading screen; prod: show immediately
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -536,32 +559,51 @@ async function createMainWindow() {
   attachPopupInterception(win.webContents);
 
   if (isDev) {
-    await loadUrlWhenReady(
-      win,
-      "data:text/html;charset=utf-8," + encodeURIComponent(loadingPageHtml("Starting Harness server", "Server is ready.")),
-      "http://127.0.0.1:3001/api/health",
-      30_000,
-      "Starting Harness server"
-    );
-  } else {
-    await loadUrlWhenReady(
-      win,
-      "http://127.0.0.1:3001",
-      "http://127.0.0.1:3001/api/health",
-      30_000,
-      "Starting Harness"
-    );
-  }
+    // Show loading page while waiting for Express server (window hidden until now)
+    const loadingUrl = `data:text/html;charset=utf-8,${encodeURIComponent(
+      loadingPageHtml("Harness", "Starting services...")
+    )}`;
+    await win.loadURL(loadingUrl);
+    win.show(); // Reveal with loading screen visible
 
-  if (isDev) {
+    const expressPort = await waitForAnyPort(SERVER_PORT_RANGES, "/api/health", 30_000);
+    if (!expressPort) {
+      const failUrl = `data:text/html;charset=utf-8,${encodeURIComponent(
+        loadingPageHtml("Harness", "Express server failed to start.")
+      )}`;
+      await win.loadURL(failUrl);
+      return;
+    }
+    serverPort = expressPort;
+
+    // Express ready — find Vite dev server
+    const vitePort = await waitForAnyPort(VITE_PORT_RANGES, "/", 120_000);
+    if (!vitePort) {
+      const failUrl = `data:text/html;charset=utf-8,${encodeURIComponent(
+        loadingPageHtml("Harness", "Vite dev server failed to start.")
+      )}`;
+      await win.loadURL(failUrl);
+      return;
+    }
+    await win.loadURL(`http://localhost:${vitePort}`);
+    win.webContents.openDevTools({ mode: "detach" });
+  } else {
+    const port = await waitForAnyPort(SERVER_PORT_RANGES, "/api/health", 30_000);
+    if (!port) {
+      const failUrl = `data:text/html;charset=utf-8,${encodeURIComponent(
+        loadingPageHtml("Harness", "Express server failed to start.")
+      )}`;
+      await win.loadURL(failUrl);
+      return;
+    }
+    serverPort = port;
     await loadUrlWhenReady(
       win,
-      "http://localhost:5173",
-      "http://localhost:5173",
-      120_000,
-      "Starting Harness UI"
+      `http://127.0.0.1:${port}`,
+      `http://127.0.0.1:${port}/api/health`,
+      2_000,
+      "Harness"
     );
-    win.webContents.openDevTools({ mode: "detach" });
   }
 }
 

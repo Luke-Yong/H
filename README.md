@@ -61,11 +61,11 @@ Get a key at [platform.deepseek.com](https://platform.deepseek.com).
 npm run dev
 ```
 
-This starts both the backend (port 3001) and frontend (port 5173). Open `http://localhost:5173`.
+This starts both the backend (port range **3001-3100**) and frontend (port range **5101-5200**). Open `http://localhost:5101`.
 
 **Port fallback:** If a port is busy, both servers auto-retry on the next port:
-- **Frontend (5173):** Vite increments to 5174, 5175, etc. The client auto-detects the new WebSocket path.
-- **Backend (3001):** Tries 3002, 3003, ... up to 3010 before giving up. Logs the settled port to console.
+- **Frontend (5101-5200):** Vite auto-increments from 5101 up to 5200.
+- **Backend (3001-3100):** Tries 3002, 3003, ... up to 3100 before giving up.
 - In dev mode the Vite proxy in `vite.config.ts` points to `localhost:3001`, so if the backend falls back to a different port the proxy needs updating. In desktop/production mode only the backend port matters (the frontend is served by Express).
 
 ## Architecture
@@ -96,7 +96,7 @@ Harness is a client-server application with an optional Electron desktop shell.
 
 ### Server (`server/`)
 
-The Node.js Express server on **port 3001** is the backbone. It owns all backend logic and never runs in the browser.
+The Node.js Express server on **port 3001** (range 3001-3100) is the backbone. It owns all backend logic and never runs in the browser.
 
 | Layer | File | Role |
 |---|---|---|
@@ -115,7 +115,7 @@ The Node.js Express server on **port 3001** is the backbone. It owns all backend
 
 ### Client (`client/`)
 
-The React + Vite frontend runs on **port 5173** in development. In desktop/production mode, the Express server serves the built static files directly from `client/dist/`.
+The React + Vite frontend runs on **port 5101** (range 5101-5200) in development. In desktop/production mode, the Express server serves the built static files directly from `client/dist/`.
 
 | Pane | File | Role |
 |---|---|---|
@@ -214,7 +214,7 @@ Each tool call is always a matched pair: an `assistant` message with `name` cont
 | Feature | Web (browser) | Desktop (Electron) |
 |---|---|---|
 | Server | External process (`npm run dev:server`) | Embedded via `tsx` require in the Electron main process |
-| Client | Vite dev server (port 5173) or served by Express (production) | Vite dev server in dev, served by Express in production |
+| Client | Vite dev server (port 5101, range 5101-5200) or served by Express (production) | Vite dev server in dev, served by Express in production |
 | Terminal | WebSocket to server, pipe-fallback PTY | WebSocket to server, `node-pty` with ConPTY on Windows |
 | File access | Browser File System Access API or server FS APIs | Server FS APIs + native Electron `dialog` for folder/file pickers |
 | Built-in browser | iframe + reverse proxy (`/_browser`) | Electron `webview` with geolocation, permissions, popup interception |
@@ -1232,7 +1232,7 @@ Harness/
 │
 ├── client/
 │   ├── package.json                 # Client deps (React 18, Monaco, xterm.js), Vite + TypeScript
-│   ├── vite.config.ts               # Vite dev config: port 5173, proxies /api + /ws + /_browser to localhost:3001
+│   ├── vite.config.ts               # Vite dev config: port 5101, proxies /api + /ws + /_browser to localhost:3001
 │   ├── tsconfig.json                # Client TypeScript config (ES2020, DOM, react-jsx)
 │   ├── index.html                   # SPA entry: mounts React app in <div id="root">
 │   └── src/
