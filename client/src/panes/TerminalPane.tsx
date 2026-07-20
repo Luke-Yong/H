@@ -5,10 +5,7 @@ import "@xterm/xterm/css/xterm.css";
 import { useResizable } from "../hooks/useResizable";
 import type { AgentTerminalBridge, AgentTerminalBridgeInternal } from "./AgentTerminalBridge";
 
-const WS_URL =
-  window.location.port === "5173"
-    ? "ws://localhost:3001/ws"
-    : `ws://${window.location.host}/ws`;
+const WS_URL = `ws://${window.location.host}/ws`;
 
 function isAbsolutePath(p: string): boolean {
   if (!p) return false;

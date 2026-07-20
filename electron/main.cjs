@@ -18,8 +18,6 @@ const geoOverrideDebounce = new Map();
 function showFatalStartupError(error) {
   const message = error instanceof Error ? (error.stack || error.message) : String(error);
   try { console.error("[harness-startup]", message); } catch {}
-  // Suppress popup for EADDRINUSE — server auto-falls back to next port
-  if (/EADDRINUSE|address already in use/i.test(message)) return;
   try { dialog.showErrorBox("Harness failed to start", message); } catch {}
 }
 
@@ -128,19 +126,54 @@ async function waitForUrl(url, timeoutMs) {
   return false;
 }
 
-async function waitForAnyPort(ranges, path, timeoutMs) {
+const PORT_DIR = path.join(require("os").homedir(), ".harness");
+const EXPRESS_PORT_FILE = path.join(PORT_DIR, "express-port");
+const VITE_PORT_FILE = path.join(PORT_DIR, "vite-port");
+
+function readPortFile(filePath) {
+  try {
+    const val = parseInt(fs.readFileSync(filePath, "utf8").trim(), 10);
+    return val > 0 ? val : 0;
+  } catch {
+    return 0;
+  }
+}
+
+async function waitForPortFile(filePath, timeoutMs) {
   const start = Date.now();
-  let rangeIdx = 0;
-  let port = ranges[0][0];
   while (Date.now() - start < timeoutMs) {
-    const ok = await requestOk(`http://127.0.0.1:${port}${path}`);
-    if (ok) return port;
+    const port = readPortFile(filePath);
+    if (port) return port;
     await new Promise((r) => setTimeout(r, 250));
-    if (++port > ranges[rangeIdx][1]) {
-      rangeIdx++;
-      if (rangeIdx >= ranges.length) rangeIdx = 0;
-      port = ranges[rangeIdx][0];
+  }
+  return 0;
+}
+
+async function waitForOwnServerPort(timeoutMs) {
+  const myPid = process.pid;
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const port = readPortFile(EXPRESS_PORT_FILE);
+    if (port) {
+      try {
+        const resp = await new Promise((resolve, reject) => {
+          const req = http.get(`http://127.0.0.1:${port}/api/health`, (res) => {
+            let body = "";
+            res.on("data", (chunk) => { body += chunk; });
+            res.on("end", () => {
+              try { resolve({ status: res.statusCode, body: JSON.parse(body) }); }
+              catch { resolve(null); }
+            });
+          });
+          req.on("error", () => resolve(null));
+          req.setTimeout(800, () => { req.destroy(); resolve(null); });
+        });
+        if (resp && resp.status >= 200 && resp.status < 500 && resp.body.pid === myPid) {
+          return port;
+        }
+      } catch {}
     }
+    await new Promise((r) => setTimeout(r, 250));
   }
   return 0;
 }
@@ -363,9 +396,7 @@ async function getIdeWideLocation(timeoutMs) {
 
 // ── Resource Monitor Window ──
 let resourceMonitorWindow = null;
-let serverPort = 3001;
-const SERVER_PORT_RANGES = [[3001, 3100]];
-const VITE_PORT_RANGES = [[5101, 5200]];
+let serverPort = 0;
 
 function openResourceMonitorWindow(parentWin) {
   if (resourceMonitorWindow && !resourceMonitorWindow.isDestroyed()) {
@@ -566,7 +597,7 @@ async function createMainWindow() {
     await win.loadURL(loadingUrl);
     win.show(); // Reveal with loading screen visible
 
-    const expressPort = await waitForAnyPort(SERVER_PORT_RANGES, "/api/health", 30_000);
+    const expressPort = await waitForOwnServerPort(30_000);
     if (!expressPort) {
       const failUrl = `data:text/html;charset=utf-8,${encodeURIComponent(
         loadingPageHtml("Harness", "Express server failed to start.")
@@ -577,7 +608,7 @@ async function createMainWindow() {
     serverPort = expressPort;
 
     // Express ready — find Vite dev server
-    const vitePort = await waitForAnyPort(VITE_PORT_RANGES, "/", 120_000);
+    const vitePort = await waitForPortFile(VITE_PORT_FILE, 120_000);
     if (!vitePort) {
       const failUrl = `data:text/html;charset=utf-8,${encodeURIComponent(
         loadingPageHtml("Harness", "Vite dev server failed to start.")
@@ -588,7 +619,7 @@ async function createMainWindow() {
     await win.loadURL(`http://localhost:${vitePort}`);
     win.webContents.openDevTools({ mode: "detach" });
   } else {
-    const port = await waitForAnyPort(SERVER_PORT_RANGES, "/api/health", 30_000);
+    const port = await waitForOwnServerPort(30_000);
     if (!port) {
       const failUrl = `data:text/html;charset=utf-8,${encodeURIComponent(
         loadingPageHtml("Harness", "Express server failed to start.")

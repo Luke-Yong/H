@@ -21,8 +21,6 @@ const wss = new WebSocketServer({ server });
 
 export { app };
 
-const PORT = 3001;
-
 app.use(express.json({ limit: "10mb" }));
 
 const CLIENT_API_KEY_COOKIE = "harness_api_session";
@@ -1458,7 +1456,7 @@ app.get("/api/lsp/status", (_req, res) => {
 
 // ── Health check ──
 app.get("/api/health", (_req, res) => {
-  res.json({ status: "ok" });
+  res.json({ status: "ok", pid: process.pid });
 });
 
 // ── Resource Monitor page (loaded by Electron resource window) ──
@@ -2012,32 +2010,17 @@ wss.on("connection", (ws) => {
 });
 
 if (process.env.NODE_ENV !== "test") {
-  const PORT_RANGES: [number, number][] = [[3001, 3100]];
-
-  const tryPort = (rangeIdx = 0, offset = 0) => {
-    if (rangeIdx >= PORT_RANGES.length) {
-      throw new Error("No available ports in configured ranges");
-    }
-    const [start, end] = PORT_RANGES[rangeIdx];
-    const port = start + offset;
-    if (port > end) {
-      tryPort(rangeIdx + 1, 0);
-      return;
-    }
-
-    server.listen(port, () => {
-      console.log(`Harness server running on http://localhost:${port}`);
-    });
-    server.on("error", (err: NodeJS.ErrnoException) => {
-      if (err.code === "EADDRINUSE") {
-        server.close();
-        tryPort(rangeIdx, offset + 1);
-      } else {
-        throw err;
-      }
-    });
-  };
-  tryPort();
+  server.listen(0, () => {
+    const addr = server.address();
+    const port = typeof addr === "object" && addr ? addr.port : 0;
+    console.log(`Harness server running on http://localhost:${port}`);
+    // Write port for Vite proxy + Electron discovery
+    try {
+      const dir = path.join(os.homedir(), ".harness");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "express-port"), String(port));
+    } catch {}
+  });
 }
 
 process.on("SIGINT", async () => {

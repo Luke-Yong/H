@@ -61,12 +61,12 @@ Get a key at [platform.deepseek.com](https://platform.deepseek.com).
 npm run dev
 ```
 
-This starts both the backend (port range **3001-3100**) and frontend (port range **5101-5200**). Open `http://localhost:5101`.
+This starts both the backend and frontend. The OS assigns both ports; check console output for the URLs.
 
-**Port fallback:** If a port is busy, both servers auto-retry on the next port:
-- **Frontend (5101-5200):** Vite auto-increments from 5101 up to 5200.
-- **Backend (3001-3100):** Tries 3002, 3003, ... up to 3100 before giving up.
-- In dev mode the Vite proxy in `vite.config.ts` points to `localhost:3001`, so if the backend falls back to a different port the proxy needs updating. In desktop/production mode only the backend port matters (the frontend is served by Express).
+**Port selection:** Both servers let the OS assign a free port — no hardcoded port numbers:
+- **Backend:** `server.listen(0)` — port written to `~/.harness/express-port`.
+- **Frontend:** Vite `port: 0` — port written to `~/.harness/vite-port`.
+- The Vite proxy and Electron read the backend port from `~/.harness/express-port` at startup.
 
 ## Architecture
 
@@ -96,7 +96,7 @@ Harness is a client-server application with an optional Electron desktop shell.
 
 ### Server (`server/`)
 
-The Node.js Express server on **port 3001** (range 3001-3100) is the backbone. It owns all backend logic and never runs in the browser.
+The Node.js Express server is the backbone. It owns all backend logic and never runs in the browser. The OS assigns a free port at startup, written to `~/.harness/express-port` for discovery.
 
 | Layer | File | Role |
 |---|---|---|
@@ -115,7 +115,7 @@ The Node.js Express server on **port 3001** (range 3001-3100) is the backbone. I
 
 ### Client (`client/`)
 
-The React + Vite frontend runs on **port 5101** (range 5101-5200) in development. In desktop/production mode, the Express server serves the built static files directly from `client/dist/`.
+The React + Vite frontend runs on an OS-assigned port (`port: 0`) in development. In desktop/production mode, the Express server serves the built static files directly from `client/dist/`.
 
 | Pane | File | Role |
 |---|---|---|
@@ -214,7 +214,7 @@ Each tool call is always a matched pair: an `assistant` message with `name` cont
 | Feature | Web (browser) | Desktop (Electron) |
 |---|---|---|
 | Server | External process (`npm run dev:server`) | Embedded via `tsx` require in the Electron main process |
-| Client | Vite dev server (port 5101, range 5101-5200) or served by Express (production) | Vite dev server in dev, served by Express in production |
+| Client | Vite dev server (OS-assigned port) or served by Express (production) | Vite dev server in dev, served by Express in production |
 | Terminal | WebSocket to server, pipe-fallback PTY | WebSocket to server, `node-pty` with ConPTY on Windows |
 | File access | Browser File System Access API or server FS APIs | Server FS APIs + native Electron `dialog` for folder/file pickers |
 | Built-in browser | iframe + reverse proxy (`/_browser`) | Electron `webview` with geolocation, permissions, popup interception |
@@ -1080,9 +1080,9 @@ The configuration depends on how you're running Harness:
 | Scenario | Transport | Why |
 |----------|-----------|-----|
 | **Development** (source checkout) | Stdio or SSE | Both work; stdio gives you project isolation |
-| **Electron desktop app** (packaged) | **SSE only** | The Express server already runs inside Electron on port 3001 — no extra process needed |
+| **Electron desktop app** (packaged) | **SSE only** | The Express server already runs inside Electron — no extra process needed |
 
-> **In an Electron app:** the Harness Express server starts inside the Electron main process. The MCP endpoints (`/api/mcp`, `/api/mcp/sse`) are available automatically on `http://localhost:3001`. You do NOT need a separate process or a `cwd` pointing to the source code — just connect via SSE.
+> **In an Electron app:** the Harness Express server starts inside the Electron main process. The MCP endpoints (`/api/mcp`, `/api/mcp/sse`) are available automatically on the server's assigned port. You do NOT need a separate process or a `cwd` pointing to the source code — just connect via SSE.
 
 ### Development mode (source checkout)
 
@@ -1090,13 +1090,13 @@ When running Harness from source (`npm run dev`), you have both options:
 
 #### Option A: SSE (simplest — no extra config)
 
-Start the server, then point any MCP client at the running endpoint:
+Start the server, then point any MCP client at the running endpoint (check the console output for the port, or read `~/.harness/express-port`):
 
 ```json
 {
   "mcpServers": {
     "harness": {
-      "url": "http://localhost:3001/api/mcp/sse"
+      "url": "http://localhost:<port>/api/mcp/sse"
     }
   }
 }
@@ -1142,13 +1142,13 @@ Cursor config (`Settings > MCP > Add Server`):
 
 ### Electron desktop app (packaged)
 
-When Harness is installed as a desktop app, the server is already running at `http://localhost:3001`. Use SSE transport only — no `command`/`cwd` needed:
+When Harness is installed as a desktop app, the server starts automatically. The port is written to `~/.harness/express-port`. Use SSE transport only — no `command`/`cwd` needed:
 
 ```json
 {
   "mcpServers": {
     "harness": {
-      "url": "http://localhost:3001/api/mcp/sse"
+      "url": "http://localhost:<port>/api/mcp/sse"
     }
   }
 }
@@ -1232,7 +1232,7 @@ Harness/
 │
 ├── client/
 │   ├── package.json                 # Client deps (React 18, Monaco, xterm.js), Vite + TypeScript
-│   ├── vite.config.ts               # Vite dev config: port 5101, proxies /api + /ws + /_browser to localhost:3001
+│   ├── vite.config.ts               # Vite dev config: reads Express port from ~/.harness/express-port, proxies /api + /ws + /_browser
 │   ├── tsconfig.json                # Client TypeScript config (ES2020, DOM, react-jsx)
 │   ├── index.html                   # SPA entry: mounts React app in <div id="root">
 │   └── src/
