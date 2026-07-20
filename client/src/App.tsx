@@ -72,6 +72,45 @@ export default function App() {
   const [fsRoot, setFsRoot] = useState<FsEntry[] | null>(null);
   const [fsBasePath, setFsBasePath] = useState("");
   const isBrowserFs = useRef(false);
+  const prevFsBasePathRef = useRef("");
+
+  // Persist open editor tabs per folder
+  const TAB_STORAGE_KEY = "harness-open-tabs";
+
+  const saveOpenTabs = useCallback(() => {
+    const currentPath = prevFsBasePathRef.current || fsBasePath;
+    if (!currentPath) return;
+    const files = editorRef.current?.getFiles() || [];
+    const paths = files.filter((f) => f._fsPath).map((f) => f._fsPath!);
+    try {
+      const stored: Record<string, string[]> = JSON.parse(localStorage.getItem(TAB_STORAGE_KEY) || "{}");
+      if (paths.length > 0) {
+        stored[currentPath] = paths;
+      } else {
+        delete stored[currentPath];
+      }
+      localStorage.setItem(TAB_STORAGE_KEY, JSON.stringify(stored));
+    } catch {}
+  }, [fsBasePath]);
+
+  const restoreOpenTabs = useCallback((folderPath: string) => {
+    try {
+      const stored: Record<string, string[]> = JSON.parse(localStorage.getItem(TAB_STORAGE_KEY) || "{}");
+      const paths = stored[folderPath];
+      if (paths && paths.length > 0) {
+        // Restore after a tick so EditorPane has processed the new fsBasePath
+        setTimeout(() => {
+          for (const p of paths) {
+            editorRef.current?.openFileByFsPath(p);
+          }
+        }, 50);
+      }
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    prevFsBasePathRef.current = fsBasePath;
+  }, [fsBasePath]);
   const [projectVenvDir, setProjectVenvDir] = useState<string>("");
   const [projectActivateScript, setProjectActivateScript] = useState<string>("");
   const [goal, setGoal] = useState("Verify the app works correctly");
@@ -294,6 +333,7 @@ export default function App() {
   }, []);
 
   const openFolder = useCallback(async (folderPath: string) => {
+    saveOpenTabs();
     const shouldRestartTerminal = termVisibleRef.current;
     if (shouldRestartTerminal) setTermVisible(false);
     try {
@@ -307,8 +347,9 @@ export default function App() {
       addRecentPath(data.path);
       await detectProject(data.path);
       ensureTerminalVisible(shouldRestartTerminal);
+      restoreOpenTabs(data.path);
     } catch (err) { alert(`Failed to open folder: ${err}`); }
-  }, [detectProject, ensureTerminalVisible, addRecentPath]);
+  }, [detectProject, ensureTerminalVisible, addRecentPath, restoreOpenTabs, saveOpenTabs]);
 
   const openFolderImmediate = useCallback(async () => {
     const desktop = window.harnessDesktop;
@@ -529,7 +570,7 @@ export default function App() {
         }},
         // Conditionals
         ...(fsBasePath
-          ? [{ label: "Close Folder", shortcut: "Ctrl+K F", action: () => { setFsRoot(null); setFsBasePath(""); isBrowserFs.current = false; setProjectVenvDir(""); setProjectActivateScript(""); handleBrowserClose(); setTermVisible(false); setShowConsole(false); } } as MenuItem]
+          ? [{ label: "Close Folder", shortcut: "Ctrl+K F", action: () => { saveOpenTabs(); setFsRoot(null); setFsBasePath(""); isBrowserFs.current = false; setProjectVenvDir(""); setProjectActivateScript(""); handleBrowserClose(); setTermVisible(false); setShowConsole(false); } } as MenuItem]
           : []),
         ...(statusBar.hasEditor
           ? [{ label: "Close File", shortcut: "Ctrl+W", action: () => { editorRef.current?.closeActiveTab(); } } as MenuItem]
@@ -564,7 +605,7 @@ export default function App() {
       ],
     },
     { label: "Help", items: [{ label: "About Harness", action: () => alert("Harness\nAI-powered coding workspace\nPowered by DeepSeek") }] },
-  ], [fsBasePath, statusBar.hasEditor, openFolderImmediate, openFileImmediate, createNewProject, createNewFile, handleBrowserClose]);
+  ], [fsBasePath, statusBar.hasEditor, openFolderImmediate, openFileImmediate, createNewProject, createNewFile, handleBrowserClose, saveOpenTabs]);
 
   return (
     <div className="app">

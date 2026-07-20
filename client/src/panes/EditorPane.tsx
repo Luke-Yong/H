@@ -50,6 +50,8 @@ export interface EditorPaneHandle {
   closeFileByFsPath: (fsPath: string) => void;
   /** Rename a file tab by its old fsPath to a new fsPath. */
   renameFileByFsPath: (oldPath: string, newPath: string) => void;
+  /** Close all open file tabs. */
+  closeAllFiles: () => void;
 }
 
 export interface StatusBarState {
@@ -662,6 +664,16 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   }, [fsBasePath]);
 
   useEffect(() => { refreshGitStatus(); }, [refreshGitStatus]);
+
+  // Clear open files when folder is closed
+  const prevBasePathRef = useRef(fsBasePath);
+  useEffect(() => {
+    if (prevBasePathRef.current && !fsBasePath) {
+      setFiles([]);
+      setDirtyFiles(new Set());
+    }
+    prevBasePathRef.current = fsBasePath;
+  }, [fsBasePath]);
 
   // Fetch git diff for active file
   useEffect(() => {
@@ -1639,6 +1651,10 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
         }
         return remaining;
       });
+    },
+    closeAllFiles: () => {
+      setFiles([]);
+      setDirtyFiles(new Set());
     },
   }), [getCode, files, applyAiFiles, applyAgentFileChanges, acceptAgentChangeByPath, rejectAgentChangeByPath, openFileByFsPath, handleGoToLine, handleGoToBracket, handleSetLanguage, handleIndentChange, handleLineEnding, setEncoding, getConsoleContext, executeBrowserAction, getProjectFiles, getFsBasePath, refreshGitStatus, onCloseBrowser]);
 
