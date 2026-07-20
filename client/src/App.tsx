@@ -64,6 +64,48 @@ export default function App() {
       return next;
     });
   }, []);
+
+  const removeRecentPath = useCallback((p: string) => {
+    setRecentPaths((prev) => {
+      const next = prev.filter((x) => x !== p);
+      try { localStorage.setItem(RECENT_PATHS_KEY, JSON.stringify(next)); } catch {}
+      return next;
+    });
+  }, []);
+
+  const checkPathExists = useCallback(async (p: string): Promise<boolean> => {
+    try {
+      const res = await fetch(`/api/fs/list?path=${encodeURIComponent(p)}`);
+      if (!res.ok) return false;
+      const data = await res.json();
+      return !data.error;
+    } catch { return false; }
+  }, []);
+
+  const validateRecentPaths = useCallback(async () => {
+    if (recentPaths.length === 0) return;
+    const results = await Promise.all(
+      recentPaths.map(async (p) => {
+        const exists = await checkPathExists(p);
+        return exists ? p : null;
+      })
+    );
+    const valid = results.filter((p): p is string => p !== null);
+    if (valid.length !== recentPaths.length) {
+      setRecentPaths(valid);
+      try { localStorage.setItem(RECENT_PATHS_KEY, JSON.stringify(valid)); } catch {}
+    }
+  }, [recentPaths, checkPathExists]);
+
+  // Validate that recent paths still exist on mount
+  useEffect(() => { validateRecentPaths(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Validate recent paths when window regains focus
+  useEffect(() => {
+    const handler = () => { validateRecentPaths(); };
+    window.addEventListener("focus", handler);
+    return () => window.removeEventListener("focus", handler);
+  }, [validateRecentPaths]);
   const [debugEntries, setDebugEntries] = useState<DebugConsoleEntry[]>([]);
   const [outputEntries, setOutputEntries] = useState<OutputEntry[]>([]);
   const debugIdRef = useRef(0);
@@ -634,7 +676,10 @@ export default function App() {
             onBrowserNewTabFromLink={handleBrowserNewTabFromLink}
             onOpenFolder={() => { void openFolderImmediate(); }}
             recentPaths={recentPaths}
-            onOpenRecent={(p: string) => { void openFolder(p); }}
+            onOpenRecent={async (p: string) => {
+              const exists = await checkPathExists(p);
+              if (exists) { void openFolder(p); } else { removeRecentPath(p); }
+            }}
             onCreateProject={() => {
               promptName("Project name:", undefined, (name) => { void createNewProject(name); });
             }}

@@ -674,7 +674,12 @@ app.get("/api/fs/list", (req, res) => {
       });
     res.json({ path: dirPath, entries: result });
   } catch (err) {
-    res.status(500).json({ error: String(err) });
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      res.status(404).json({ error: "Path not found" });
+    } else {
+      res.status(500).json({ error: String(err) });
+    }
   }
 });
 
