@@ -1,4 +1,5 @@
 import { spawn, spawnSync, ChildProcess } from "child_process";
+import fs from "fs";
 import path from "path";
 import { pathToFileURL } from "url";
 import type { Response } from "express";
@@ -57,14 +58,15 @@ interface MonacoMarker {
   code?: string;
 }
 
-// LSP severity (1=Error,2=Warning,3=Info,4=Hint) → Monaco severity
+// LSP severity (1=Error,2=Warning,3=Info,4=Hint) → Monaco severity.
+// Per LSP spec: "If omitted, diagnostics should be treated as errors."
 function mapSeverity(sev: number | undefined): number {
   switch (sev) {
     case 1: return 8;
     case 2: return 4;
     case 3: return 2;
     case 4: return 1;
-    default: return 4;
+    default: return 8; // undefined → Error per LSP spec
   }
 }
 
@@ -165,6 +167,25 @@ function commandExists(bin: string): boolean {
   return ok;
 }
 
+// Detect a Python virtual environment directory under the project root.
+// Checks common venv names (.venv, venv, env, .env) and returns the first
+// match so pyright can resolve installed packages for that project.
+function detectVenv(rootPath: string): string | null {
+  const candidates = [".venv", "venv", "env", ".env"];
+  for (const name of candidates) {
+    const full = path.join(rootPath, name);
+    // Must be a directory containing a pyvenv.cfg, or a Scripts/bin dir.
+    try {
+      const st = fs.statSync(full);
+      if (!st.isDirectory()) continue;
+      if (fs.existsSync(path.join(full, "pyvenv.cfg"))) return full;
+      if (process.platform === "win32" && fs.existsSync(path.join(full, "Scripts", "python.exe"))) return full;
+      if (fs.existsSync(path.join(full, "bin", "python")) || fs.existsSync(path.join(full, "bin", "python3"))) return full;
+    } catch { continue; }
+  }
+  return null;
+}
+
 function getLspCmd(language: string, _rootPath: string): { cmd: string; args: string[] } | null {
   const specs = SERVER_SPECS[language];
   if (!specs) return null;
@@ -256,11 +277,18 @@ function startLspWithSpec(rootPath: string, language: string, spec: ServerSpec):
     console.error(`[LSP:${language}:${cmdInfo.cmd}] ${String(d)}`);
   });
   proc.on("close", (code) => {
+    // Clean up diagnostics for URIs opened by this session.
+    for (const uri of session.openedUris) {
+      diagnosticsByUri.delete(normalizeUri(uri));
+    }
     sessions.delete(key);
     sessionErrors.set(key, `LSP "${spec.cmd}" exited with code ${code}`);
     console.log(`LSP ${language} (${spec.cmd}) exited with code ${code}`);
   });
   proc.on("error", (err) => {
+    for (const uri of session.openedUris) {
+      diagnosticsByUri.delete(normalizeUri(uri));
+    }
     sessions.delete(key);
     sessionErrors.set(key, `LSP "${spec.cmd}" spawn error: ${err.message}`);
     console.error(`LSP ${language} (${spec.cmd}) spawn error: ${err.message}`);
@@ -293,6 +321,7 @@ function startLspWithSpec(rootPath: string, language: string, spec: ServerSpec):
         sendNotification(session, "workspace/didChangeConfiguration", { settings });
       }
     } else if (cmdInfo.cmd === "pyright-langserver") {
+      const venvDir = detectVenv(rootPath);
       sendNotification(session, "workspace/didChangeConfiguration", {
         settings: {
           python: {
@@ -301,9 +330,45 @@ function startLspWithSpec(rootPath: string, language: string, spec: ServerSpec):
               diagnosticMode: "openFilesOnly",
               autoSearchPaths: true,
               useLibraryCodeForTypes: true,
+              ...(venvDir ? { venvPath: path.dirname(venvDir), venv: path.basename(venvDir) } : {}),
+              diagnosticSeverityOverrides: {
+                // Import resolution — pyright often can't find installed packages
+                // in venvs, monorepos, editable installs, namespace packages, etc.
+                reportMissingImports: "warning",
+                reportMissingTypeStubs: "none",
+                // Optional-related rules — Python codebases commonly use Optional
+                // without explicit guards; these are rarely real bugs at runtime.
+                reportOptionalMemberAccess: "none",
+                reportOptionalSubscript: "none",
+                reportOptionalCall: "none",
+                reportOptionalIterable: "none",
+                reportOptionalContextManager: "none",
+                reportOptionalOperand: "none",
+                // Dynamic attribute access is idiomatic Python (ORM models,
+                // __getattr__, mock objects, etc.).
+                reportAttributeAccessIssue: "warning",
+                // Type argument/assignment mismatches — downgrade to warning
+                // since many are false positives on dynamic code.
+                reportArgumentType: "warning",
+                reportAssignmentType: "warning",
+              },
             },
           },
         },
+      });
+    } else if (cmdInfo.cmd === "yaml-language-server") {
+      // Disable schema-store lookups — unmatched schemas produce noisy
+      // "Schema not found" / "Using schema from cache" false positives.
+      sendNotification(session, "workspace/didChangeConfiguration", {
+        settings: {
+          yaml: { schemaStore: { enable: false }, validate: true },
+        },
+      });
+    } else if (cmdInfo.cmd === "gopls") {
+      // Disable staticcheck — it reports style/opinion suggestions that
+      // read as false positives in a coding-agent workflow.
+      sendNotification(session, "workspace/didChangeConfiguration", {
+        settings: { gopls: { staticcheck: false } },
       });
     }
     session.initialized = true;
@@ -345,16 +410,32 @@ function handleMessage(session: LspSession, msg: LspResponse) {
   if (msg.method === "textDocument/publishDiagnostics" && msg.params?.uri) {
     const uri = normalizeUri(msg.params.uri as string);
     const diags: any[] = msg.params.diagnostics || [];
-    const markers: MonacoMarker[] = diags.map((d) => ({
-      message: d.message,
-      severity: mapSeverity(d.severity),
-      startLineNumber: (d.range?.start?.line ?? 0) + 1,
-      startColumn: (d.range?.start?.character ?? 0) + 1,
-      endLineNumber: (d.range?.end?.line ?? 0) + 1,
-      endColumn: (d.range?.end?.character ?? 0) + 1,
-      source: d.source,
-      code: typeof d.code === "object" ? d.code?.value : (d.code != null ? String(d.code) : undefined),
-    }));
+    const MAX_DIAGS_PER_FILE = 200;
+    const markers: MonacoMarker[] = [];
+    for (const d of diags) {
+      // Drop Info (3) and Hint (4) — they produce noise, not actionable feedback.
+      const lspSeverity = d.severity;
+      if (lspSeverity === 3 || lspSeverity === 4) continue;
+      const startLine = d.range?.start?.line ?? 0;
+      const startChar = d.range?.start?.character ?? 0;
+      const endLine = d.range?.end?.line ?? startLine;
+      const endChar = d.range?.end?.character ?? startChar;
+      // Drop diagnostics with negative line/column or start > end (malformed).
+      if (startLine < 0 || startChar < 0 || endLine < startLine) continue;
+      if (endLine === startLine && endChar < startChar) continue;
+      // Cap per-file diagnostics to avoid flooding the UI.
+      if (markers.length >= MAX_DIAGS_PER_FILE) break;
+      markers.push({
+        message: d.message,
+        severity: mapSeverity(lspSeverity),
+        startLineNumber: startLine + 1,
+        startColumn: startChar + 1,
+        endLineNumber: endLine + 1,
+        endColumn: endChar + 1,
+        source: d.source,
+        code: typeof d.code === "object" ? d.code?.value : (d.code != null ? String(d.code) : undefined),
+      });
+    }
     diagnosticsByUri.set(uri, markers);
     // Broadcast to all SSE clients watching this session
     const eventData = JSON.stringify({ uri, markers });
@@ -515,8 +596,10 @@ export function watchDiagnostics(
       }
       // Pyright needs a moment for workspace config
       if (spec.cmd === "pyright-langserver") await delay(500);
-      // Flush any diagnostics already published during init
+      // Flush diagnostics already published during init, scoped to this root.
+      const normRoot = normalizeUri(session.rootUri);
       for (const [uri, markers] of diagnosticsByUri) {
+        if (!uri.startsWith(normRoot)) continue;
         try { res.write(`data: ${JSON.stringify({ uri, markers })}\n\n`); } catch { return; }
       }
     })();
@@ -554,7 +637,6 @@ export async function notifyFileChange(
 
     const uri = toFileUri(filePath, false);
     const isNew = !session.openedUris.has(uri);
-    if (!isNew) diagnosticsByUri.delete(normalizeUri(uri));
     if (isNew) {
       session.openedUris.add(uri);
       session.docVersions.set(uri, 1);

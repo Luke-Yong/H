@@ -376,10 +376,29 @@ After installing a server, **restart the backend** (`npm run dev:server`, or `np
 
 ### Reducing false positives
 
-To keep diagnostics signal-heavy, Harness tunes two noisy defaults:
+Harness applies multiple layers of filtering to keep diagnostics high-signal:
 
-- **JavaScript** runs **syntax-only** validation (semantic/type checks are disabled), since plain browser JS has no type or module information. TypeScript keeps full semantic checking.
-- **Python (`pylsp`)** keeps `pyflakes` (real bugs: undefined/unused names, syntax) and disables the style/complexity linters (`pycodestyle`, `pydocstyle`, `mccabe`, `flake8`, `pylint`).
+**Server-side diagnostic pipeline** (`lsp.ts` — `handleMessage`):
+- **Severity filtering** — Info (3) and Hint (4) diagnostics are dropped. Only Error and Warning reach the editor.
+- **Validity checks** — Diagnostics with negative line/column positions or inverted ranges (end before start) are discarded.
+- **Per-file cap** — Max 200 diagnostics per file to prevent UI flooding on legacy or untyped code.
+
+**Per-language LSP server tuning** (applied via `workspace/didChangeConfiguration` at init):
+
+| Language / Server | Tuning |
+|---|---|
+| **JavaScript** (Monaco built-in) | Syntax-only validation; semantic/type checks disabled (no module graph in plain JS) |
+| **TypeScript** (Monaco built-in) | Full semantic checking with `strict: false`, `noImplicitAny: false` |
+| **Python / pyright** | `typeCheckingMode: "basic"`, `diagnosticMode: "openFilesOnly"`;<br>`reportOptional*` rules → `"none"` (idiomatic Python uses Optional without guards);<br>`reportMissingImports` → `"warning"` (venv/monorepo resolution gaps);<br>`reportAttributeAccessIssue`, `reportArgumentType`, `reportAssignmentType` → `"warning"` |
+| **Python / pyright** (venv) | Auto-detects `.venv` / `venv` / `env` / `.env` under the project root and passes `venvPath` + `venv` so pyright resolves site-packages |
+| **Python / pylsp** | Keeps `pyflakes` (real bugs); disables `pycodestyle`, `pydocstyle`, `mccabe`, `flake8`, `pylint` |
+| **YAML** | Schema-store lookups disabled — avoids "Schema not found" false positives when no matching schema exists |
+| **Go / gopls** | `staticcheck: false` — disables opinionated style suggestions |
+
+**Engine-level fixes:**
+- `mapSeverity` defaults undefined severity to **Error** (LSP spec: omitted means error), not Warning.
+- Diagnostics cache is scoped per project root — SSE init flushes only the current session's URIs, not the global map.
+- Diagnostic entries are cleaned from the cache when the LSP session exits, preventing stale markers.
 
 ### Adding a language
 
