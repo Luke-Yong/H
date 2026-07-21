@@ -63,10 +63,14 @@ npm run dev
 
 This starts both the backend and frontend. The OS assigns both ports; check console output for the URLs.
 
-**Port selection:** Both servers let the OS assign a free port — no hardcoded port numbers:
-- **Backend:** `server.listen(0)` — port written to `~/.harness/express-port`.
-- **Frontend:** Vite `port: 0` — port written to `~/.harness/vite-port`.
-- The Vite proxy and Electron read the backend port from `~/.harness/express-port` at startup.
+**Port discovery flow:**
+
+1. Express starts → `server.listen(0)` → OS assigns a free port → port written to `~/.harness/express-port`
+2. Vite starts → polls `~/.harness/express-port` every 200 ms until found → configures proxy to that port
+3. Vite then binds → `port: 0` → OS assigns a free port → port written to `~/.harness/vite-port`
+4. Electron (desktop mode) reads both files to connect to Express and load the Vite dev page
+
+Both servers let the OS decide — no hardcoded port numbers anywhere.
 
 ## Architecture
 

@@ -7,12 +7,16 @@ import path from "path";
 const PORT_FILE = path.join(os.homedir(), ".harness", "express-port");
 const VITE_PORT_FILE = path.join(os.homedir(), ".harness", "vite-port");
 
-function readExpressPort(): number {
-  try {
-    return parseInt(fs.readFileSync(PORT_FILE, "utf8").trim(), 10) || 5173;
-  } catch {
-    return 5173; // fallback — will retry on HMR if Express starts later
+async function waitForExpressPort(timeoutMs = 30_000): Promise<number> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const val = parseInt(fs.readFileSync(PORT_FILE, "utf8").trim(), 10);
+      if (val > 0) return val;
+    } catch {}
+    await new Promise((r) => setTimeout(r, 200));
   }
+  throw new Error("Timed out waiting for Express port file");
 }
 
 function writeVitePortPlugin() {
@@ -33,7 +37,7 @@ function writeVitePortPlugin() {
 }
 
 export default defineConfig(async () => {
-  const expressPort = readExpressPort();
+  const expressPort = await waitForExpressPort();
 
   return {
     plugins: [react(), writeVitePortPlugin()],
