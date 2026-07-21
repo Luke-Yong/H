@@ -681,6 +681,26 @@ The knowledge graph is designed as input for graph machine learning and path pre
 - **Markov chain path prediction**: Transition probabilities over `IMPORTS_SYMBOL` edges answer "if you just edited symbol X, what file is most likely to need changes next?"
 - **GNN input**: Nodes carry features `(type, kind, name)` and edges carry `(type)`. An adjacency matrix can be built directly from the `.kg` file for training graph neural networks on codebase structure.
 
+### Comparison with Graphify
+
+Harness and [Graphify](https://github.com/Graphify-Labs/graphify) share the same core idea: pre-build a knowledge graph so AI agents can answer structural questions with a single query instead of scanning raw files. The differences are in scope and design philosophy:
+
+| | Harness | Graphify |
+|---|---|---|
+| **Trigger** | Always-on, built-in IDE feature | Manually invoked CLI skill (`/graphify`) |
+| **AST parsing** | TypeScript compiler API (TS/JS) | Tree-sitter (23 languages) |
+| **LLM involvement** | Zero — purely deterministic | Two-pass: deterministic AST + Claude subagents for semantic/concept extraction |
+| **Output format** | Compact `.kg` edge list (token-optimized) + `.txt` visualization | `.graph.html` (interactive), `.graph.json` (NetworkX), `GRAPH_REPORT.md` |
+| **Multimodal** | Code files only | Code, PDFs, images, video, audio, diagrams |
+| **Community detection** | None | Leiden clustering — groups subsystems by edge density |
+| **Confidence tagging** | N/A (everything is EXTRACTED) | EXTRACTED / INFERRED / AMBIGUOUS |
+| **Query interface** | `read_graph` tool — 5 query types (structure, exports, imports_of, exporters_of, dependents) | Python NetworkX API + CLI |
+| **Update model** | Auto-rebuilds on file watcher events (2s debounce) | SHA256 cache — re-runs only changed files |
+| **Agent integration** | System prompt rule + tool registry | CLAUDE.md/AGENTS.md rules + PreToolUse hooks (fires before grep/glob) |
+| **Footprint** | Lightweight, minimal token overhead — always ready | Heavier but richer — HTML visualizations, plain-language reports, multi-format |
+
+Harness prioritizes **zero-latency, always-on graph availability** embedded in the IDE loop, with a purpose-built compact format for LLM token efficiency. Graphify prioritizes **depth and breadth** — multi-language, multi-format, semantic reasoning — trading setup time for richer architectural insight.
+
 ## Security
 
 Harness gives the AI agent access to your filesystem, terminal, and browser. The following mitigations protect against supply-chain risks (compromised API responses, model prompt injection, or malicious tool outputs).
