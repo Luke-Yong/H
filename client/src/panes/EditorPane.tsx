@@ -36,6 +36,7 @@ export interface EditorPaneHandle {
   executeBrowserAction: (toolName: string, params: Record<string, unknown>) => Promise<string>;
   getProjectFiles: () => Promise<string[]>;
   getFsBasePath: () => string;
+  getActiveFilePath: () => string | null;
   /** Refresh the git status for untracked/modified markers. */
   refreshGitStatus?: () => Promise<void>;
   /** Close the active editor tab. */
@@ -1632,6 +1633,10 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     setLanguage: handleSetLanguage, setIndent: handleIndentChange,
     setLineEnding: handleLineEnding, setEncoding,
     getConsoleContext, executeBrowserAction, getProjectFiles, getFsBasePath,
+    getActiveFilePath: () => {
+      const f = files.find((x) => x.id === activeFileIdRef.current);
+      return f?._fsPath || null;
+    },
     refreshGitStatus,
     closeActiveTab: () => {
       if (!activeFileIdRef.current) return;

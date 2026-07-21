@@ -124,10 +124,11 @@ export default function App() {
     if (!currentPath) return;
     const files = editorRef.current?.getFiles() || [];
     const paths = files.filter((f) => f._fsPath).map((f) => f._fsPath!);
+    const activePath = editorRef.current?.getActiveFilePath?.() || null;
     try {
-      const stored: Record<string, string[]> = JSON.parse(localStorage.getItem(TAB_STORAGE_KEY) || "{}");
+      const stored: Record<string, { paths: string[]; activePath: string | null }> = JSON.parse(localStorage.getItem(TAB_STORAGE_KEY) || "{}");
       if (paths.length > 0) {
-        stored[currentPath] = paths;
+        stored[currentPath] = { paths, activePath };
       } else {
         delete stored[currentPath];
       }
@@ -137,13 +138,19 @@ export default function App() {
 
   const restoreOpenTabs = useCallback((folderPath: string) => {
     try {
-      const stored: Record<string, string[]> = JSON.parse(localStorage.getItem(TAB_STORAGE_KEY) || "{}");
-      const paths = stored[folderPath];
-      if (paths && paths.length > 0) {
+      const stored: Record<string, { paths: string[]; activePath: string | null }> = JSON.parse(localStorage.getItem(TAB_STORAGE_KEY) || "{}");
+      const entry = stored[folderPath];
+      if (entry && entry.paths && entry.paths.length > 0) {
         // Restore after a tick so EditorPane has processed the new fsBasePath
         setTimeout(() => {
-          for (const p of paths) {
+          for (const p of entry.paths) {
             editorRef.current?.openFileByFsPath(p);
+          }
+          // Focus the previously active tab
+          if (entry.activePath) {
+            setTimeout(() => {
+              editorRef.current?.openFileByFsPath(entry.activePath!);
+            }, 100);
           }
         }, 50);
       }
