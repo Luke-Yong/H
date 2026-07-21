@@ -536,6 +536,25 @@ When the agent runs, Harness sends the project file tree as part of the system p
 └────────────────────────────────────────────────────────────────────┘
 ```
 
+### Workspace Deduplication
+
+Each workspace gets a unique snapshot filename keyed by an MD5 hash of its resolved absolute path. This prevents cross-project collisions and ensures the same folder always maps to the same graph file.
+
+```
+d:\Work Projects\Harness   → MD5 → a1b2c3d4e5f6
+                             → ~/.harness/file-tree-snapshot-a1b2c3d4e5f6.kg
+                             → ~/.harness/file-tree-snapshot-a1b2c3d4e5f6.txt
+
+d:\Other Projects\app       → MD5 → f6e5d4c3b2a1
+                             → ~/.harness/file-tree-snapshot-f6e5d4c3b2a1.kg
+                             → ~/.harness/file-tree-snapshot-f6e5d4c3b2a1.txt
+```
+
+- **Same folder, same hash** — reopening a project overwrites its existing snapshot (no stale duplicates).
+- **Different folders, different hashes** — each workspace has independent graph files.
+- **Path changes break the link** — renaming or moving the project folder produces a new hash and a fresh snapshot. The old file is orphaned (not auto-cleaned).
+- **`read_graph` uses identical hashing** — the tool locates the correct `.kg` file at query time by computing the same MD5 from the project root.
+
 ### API Endpoints
 
 | Endpoint | Method | Description |

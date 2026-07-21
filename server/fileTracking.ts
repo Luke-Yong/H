@@ -302,7 +302,12 @@ export class FileTrackingService {
 
   /** Initialize the file tracking service for a workspace. */
   init(workspacePath: string): FileTrackingStatus {
-    this.workspacePath = path.resolve(workspacePath);
+    const resolved = path.resolve(workspacePath);
+    // Skip if already tracking the same workspace
+    if (this.mode !== "none" && this.workspacePath === resolved) {
+      return this.getStatus();
+    }
+    this.workspacePath = resolved;
     this.store.setWorkspace(this.workspacePath);
     // Load any persisted snapshot for this workspace (cross-session continuity)
     this.loadSnapshot();

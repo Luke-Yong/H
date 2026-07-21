@@ -613,11 +613,11 @@ export const TOOLS: ToolDef[] = [
       + "Use this for structural/dependency questions — it's faster than grepping or reading files. "
       + "For file contents, use read_file. For content search, use grep. "
       + "Query types:\n"
+      + "- 'structure' — print the full directory tree. Use this FIRST for architecture/overview questions ('describe this project', 'what's the project layout?').\n"
       + "- 'exports <file>' — list all symbols exported by a file (functions, classes, consts, types, interfaces, enums)\n"
       + "- 'imports_of <file>' — list all symbols imported by a file (with their source files)\n"
       + "- 'exporters_of <symbol>' — find which files export a symbol with this name\n"
-      + "- 'dependents <file>' — find which files import from this file\n"
-      + "- 'structure' — print the full directory tree (dirs and files, no symbols)",
+      + "- 'dependents <file>' — find which files import from this file",
     parameters: {
       type: "object",
       properties: {
@@ -1202,7 +1202,7 @@ function runGraphQuery(query: string, projectRoot: string): string {
   const raw = fs.readFileSync(kgPath, "utf-8");
   const lines = raw.split(/\r?\n/).filter((l) => l && !l.startsWith("#"));
 
-  // Parse nodes
+  // ── Parse nodes ──
   const nodes = new Map<string, { type: string; parentId: string; name: string; kind: string }>();
   for (const line of lines) {
     if (!line.startsWith("n")) continue;
@@ -1213,21 +1213,39 @@ function runGraphQuery(query: string, projectRoot: string): string {
     });
   }
 
-  // Parse edges
-  const edges: Array<{ from: string; to: string; type: string }> = [];
+  // ── Parse edges + build O(1) indexes ──
+  // fromIndex: key = "TYPE|fromId" → edges
+  const fromIndex = new Map<string, Array<{ to: string; type: string }>>();
+  // toIndex: key = "TYPE|toId" → fromIds
+  const toIndex = new Map<string, string[]>();
+  function indexEdge(key: string, fromId: string, toId: string, type: string): void {
+    const fk = type + "|" + fromId;
+    let arr = fromIndex.get(fk);
+    if (!arr) { arr = []; fromIndex.set(fk, arr); }
+    arr.push({ to: toId, type });
+    const tk = type + "|" + toId;
+    let tarr = toIndex.get(tk);
+    if (!tarr) { tarr = []; toIndex.set(tk, tarr); }
+    tarr.push(fromId);
+  }
   for (const line of lines) {
     if (!line.startsWith("e")) continue;
     const parts = line.split("|");
     if (parts.length < 4) continue;
-    edges.push({ from: "n" + parts[0].slice(1), to: parts[2], type: parts[3] });
+    // e<fromSeq>|<fromId>|<toId>|<type>
+    const fromId = "n" + parts[0].slice(1);
+    const toId = parts[2];
+    const type = parts[3];
+    indexEdge(parts[0], fromId, toId, type);
   }
 
-  // Build parent chain path resolver
+  // ── Pre-resolve all paths (one recursive walk per node, cached) ──
   const pathCache = new Map<string, string>();
   const resolvePath = (id: string): string => {
-    if (pathCache.has(id)) return pathCache.get(id)!;
+    const cached = pathCache.get(id);
+    if (cached !== undefined) return cached;
     const node = nodes.get(id);
-    if (!node) return "";
+    if (!node) { pathCache.set(id, ""); return ""; }
     if (!node.parentId) { pathCache.set(id, node.name); return node.name; }
     const parentPath = resolvePath(node.parentId);
     const p = parentPath ? parentPath + "/" + node.name : node.name;
@@ -1235,14 +1253,41 @@ function runGraphQuery(query: string, projectRoot: string): string {
     return p;
   };
 
-  // Parse query
+  // ── Pre-resolve all file paths into a lowercase map for O(1) lookup ──
+  const filePaths = new Map<string, string>(); // id → resolvedPath (lowercased)
+  for (const [id, node] of nodes) {
+    if (node.type === "file") {
+      filePaths.set(id, resolvePath(id).toLowerCase());
+    }
+  }
+
+  // ── Symbol name index: name.toLowerCase() → [{ id, parentId, name, kind }] ──
+  const symbolIndex = new Map<string, Array<{ id: string; parentId: string; name: string; kind: string }>>();
+  for (const [id, node] of nodes) {
+    if (node.type !== "symbol") continue;
+    const key = node.name.toLowerCase();
+    let arr = symbolIndex.get(key);
+    if (!arr) { arr = []; symbolIndex.set(key, arr); }
+    arr.push({ id, parentId: node.parentId, name: node.name, kind: node.kind });
+  }
+
+  // ── Helper: find file node ID by path substring ──
+  const qLower = (s: string) => s.toLowerCase();
+  const findFileId = (target: string): string | null => {
+    const t = qLower(target);
+    for (const [id, fpath] of filePaths) {
+      if (fpath.includes(t)) return id;
+    }
+    return null;
+  };
+
+  // ── Parse query ──
   const trimmed = query.trim();
   const spaceIdx = trimmed.indexOf(" ");
   const qType = spaceIdx >= 0 ? trimmed.slice(0, spaceIdx).toLowerCase() : trimmed.toLowerCase();
   const qTarget = spaceIdx >= 0 ? trimmed.slice(spaceIdx + 1).trim() : "";
 
   if (qType === "structure") {
-    // Print directory tree (dirs + files, no symbols)
     const dirPaths: string[] = [];
     for (const [id, node] of nodes) {
       if (node.type === "dir" || node.type === "file") {
@@ -1254,15 +1299,9 @@ function runGraphQuery(query: string, projectRoot: string): string {
   }
 
   if (qType === "exports") {
-    // Find the file node matching qTarget
-    let fileId = "";
-    for (const [id, node] of nodes) {
-      if (node.type === "file" && resolvePath(id).includes(qTarget)) {
-        fileId = id; break;
-      }
-    }
+    const fileId = findFileId(qTarget);
     if (!fileId) return `File not found in graph: ${qTarget}`;
-    const symEdges = edges.filter((e) => e.type === "EXPORTS" && e.from === fileId);
+    const symEdges = fromIndex.get("EXPORTS|" + fileId) || [];
     if (symEdges.length === 0) return `${resolvePath(fileId)} exports nothing (or is not a TypeScript file).`;
     const syms = symEdges.map((e) => {
       const sym = nodes.get(e.to);
@@ -1272,35 +1311,24 @@ function runGraphQuery(query: string, projectRoot: string): string {
   }
 
   if (qType === "exporters_of") {
-    // Find all symbol nodes matching qTarget and their parent files
-    const results: string[] = [];
-    for (const [id, node] of nodes) {
-      if (node.type === "symbol" && node.name.toLowerCase() === qTarget.toLowerCase()) {
-        results.push(`${resolvePath(node.parentId)} → ${node.name}:${node.kind}`);
-      }
-    }
-    if (results.length === 0) return `No symbol named '${qTarget}' found in the graph.`;
+    const matches = symbolIndex.get(qLower(qTarget));
+    if (!matches || matches.length === 0) return `No symbol named '${qTarget}' found in the graph.`;
+    const results = matches.map((s) => `${resolvePath(s.parentId)} → ${s.name}:${s.kind}`);
     return `Files exporting '${qTarget}':\n${results.join("\n")}`;
   }
 
   if (qType === "imports_of") {
-    let fileId = "";
-    for (const [id, node] of nodes) {
-      if (node.type === "file" && resolvePath(id).includes(qTarget)) {
-        fileId = id; break;
-      }
-    }
+    const fileId = findFileId(qTarget);
     if (!fileId) return `File not found in graph: ${qTarget}`;
-    // Get IMPORTS_SYMBOL edges from this file
-    const symImports = edges.filter((e) => e.type === "IMPORTS_SYMBOL" && e.from === fileId);
-    const fileImports = edges.filter((e) => e.type === "IMPORTS" && e.from === fileId);
+    const symImports = fromIndex.get("IMPORTS_SYMBOL|" + fileId) || [];
+    const fileImports = fromIndex.get("IMPORTS|" + fileId) || [];
     const parts: string[] = [];
     if (symImports.length > 0) {
       parts.push("Symbol-level imports:");
       for (const e of symImports) {
         const sym = nodes.get(e.to);
-        const filePath = sym ? resolvePath(sym.parentId) : "?";
-        parts.push(`  ${sym?.name || "?"} from ${filePath}`);
+        const fpath = sym ? resolvePath(sym.parentId) : "?";
+        parts.push(`  ${sym?.name || "?"} from ${fpath}`);
       }
     }
     if (fileImports.length > 0) {
@@ -1314,28 +1342,20 @@ function runGraphQuery(query: string, projectRoot: string): string {
   }
 
   if (qType === "dependents") {
-    let fileId = "";
-    for (const [id, node] of nodes) {
-      if (node.type === "file" && resolvePath(id).includes(qTarget)) {
-        fileId = id; break;
-      }
-    }
+    const fileId = findFileId(qTarget);
     if (!fileId) return `File not found in graph: ${qTarget}`;
-    const deps = edges.filter((e) =>
-      (e.type === "IMPORTS" || e.type === "IMPORTS_SYMBOL") && e.to === fileId
-    );
-    // Also check for symbol-level: files that import symbols exported by this file
-    const exportedSyms = edges.filter((e) => e.type === "EXPORTS" && e.from === fileId).map((e) => e.to);
-    const symDepSets = new Set<string>();
-    for (const symId of exportedSyms) {
-      for (const e of edges) {
-        if (e.type === "IMPORTS_SYMBOL" && e.to === symId) symDepSets.add(e.from);
+    const allDeps = new Set<string>();
+    // Direct file-level & symbol-level imports where target file is the TO
+    for (const key of ["IMPORTS|" + fileId, "IMPORTS_SYMBOL|" + fileId]) {
+      for (const fromId of toIndex.get(key) || []) allDeps.add(fromId);
+    }
+    // Indirect: files that import symbols exported by the target file
+    const exportedEdges = fromIndex.get("EXPORTS|" + fileId) || [];
+    for (const e of exportedEdges) {
+      for (const fromId of toIndex.get("IMPORTS_SYMBOL|" + e.to) || []) {
+        allDeps.add(fromId);
       }
     }
-    const allDeps = new Set<string>();
-    for (const e of deps) allDeps.add(e.from);
-    for (const id of symDepSets) allDeps.add(id);
-
     if (allDeps.size === 0) return `No files depend on ${resolvePath(fileId)}.`;
     const depList = [...allDeps].map((id) => resolvePath(id)).sort();
     return `${resolvePath(fileId)} is imported by:\n${depList.join("\n")}`;
@@ -1716,6 +1736,12 @@ You have access to tools that let you read/write files, run commands, interact w
 - Use \`recall\` at the start of a session or task to retrieve relevant past memories. Search by semantic meaning or exact key.
 - Use \`forget\` to remove outdated or incorrect memories when preferences change.
 
+### Tool priority
+When exploring an unfamiliar project or answering structural questions, follow this order:
+1. **\`read_graph structure\`** — always start here to see the project layout. Use it FIRST for any architecture/structure/overview question.
+2. **\`read_graph exports <file>\` / \`read_graph dependents <file>\`** — next, check what key files export and how they connect.
+3. **\`read_file\` / \`grep\`** — only then read file contents or search for specific code. \`read_graph\` answers structural questions without scanning files.
+
 ### File conventions
 - All file paths are relative to the project root.
 - Use \`read_file\` to see existing code before editing it.
@@ -1724,7 +1750,7 @@ You have access to tools that let you read/write files, run commands, interact w
 - Use \`list_files\` to browse a specific directory.
 - Use \`search_files\` to find any file or folder anywhere in the project (by name pattern).
 - Use \`grep\` to search file contents for a string or regex — find definitions, usages, references.
-- Use \`read_graph\` for dependency/structural queries (what exports X? who imports from Y?) — much faster than grep for these questions.
+- Use \`read_graph\` for dependency/structural queries — \`read_graph structure\` to understand project layout/architecture before browsing files, \`read_graph exports <file>\` to see what a file exports, \`read_graph dependents <file>\` to find who imports from it. Much faster than grep for these questions.
 
 Current time: ${new Date().toISOString()}`;
 
