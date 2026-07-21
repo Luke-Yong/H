@@ -130,6 +130,21 @@ body {
   cursor: default;
   white-space: nowrap;
 }
+
+/* Status bar spinner (file tracking scan in progress) */
+.status-spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid rgba(255, 255, 255, 0.3);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: status-spin 0.7s linear infinite;
+  margin-right: 5px;
+}
+@keyframes status-spin {
+  to { transform: rotate(360deg); }
+}
 .status-item:hover { background: rgba(255, 255, 255, 0.12); }
 
 .status-goto-input {
@@ -3406,3 +3421,92 @@ body.resizing webview.browser-iframe {
 /* ── Drag cursor ── */
 body.resizing { user-select: none; }
 body.resizing * { user-select: none; }
+
+/* ── Git Switch Dialog ── */
+.git-switch-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 3000;
+  animation: git-overlay-in 0.15s ease;
+}
+@keyframes git-overlay-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.git-switch-dialog {
+  background: #2d2d2d;
+  border: 1px solid #454545;
+  border-radius: 10px;
+  width: 420px;
+  max-width: 90vw;
+  padding: 28px 24px 20px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+  animation: git-dialog-in 0.2s ease;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+@keyframes git-dialog-in {
+  from { transform: translateY(12px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+.git-switch-icon {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: rgba(225, 37, 27, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 16px;
+}
+
+.git-switch-dialog h3 {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+  margin: 0 0 8px;
+}
+
+.git-switch-dialog p {
+  font-size: 13px;
+  color: var(--text-dim);
+  line-height: 1.55;
+  margin: 0 0 20px;
+}
+
+.git-switch-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.git-switch-btn {
+  padding: 8px 24px;
+  border-radius: 5px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  font-family: inherit;
+  transition: filter 0.15s, background 0.15s;
+}
+
+.git-switch-btn.primary {
+  background: #2ea043;
+  color: #fff;
+}
+.git-switch-btn.primary:hover { filter: brightness(1.15); }
+
+.git-switch-btn.secondary {
+  background: #3c3c3c;
+  color: var(--text-dim);
+  border: 1px solid #555;
+}
+.git-switch-btn.secondary:hover { background: #505050; color: var(--text); }

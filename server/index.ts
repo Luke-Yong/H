@@ -14,6 +14,7 @@ import path from "path";
 import os from "os";
 import crypto from "crypto";
 import { execSync } from "child_process";
+import { getFileTrackingService } from "./fileTracking";
 
 const app = express();
 const server = createServer(app);
@@ -1374,6 +1375,108 @@ app.get("/api/git/diff", (req, res) => {
     res.json({ ok: true, file, diff: raw });
   } catch (err: any) {
     res.json({ ok: false, error: err?.message || "Diff failed" });
+  }
+});
+
+// ── File Tracking endpoints ──
+// Returns current tracking mode, Git availability, and mid-session detection status.
+app.get("/api/file-tracking/status", (_req, res) => {
+  try {
+    const svc = getFileTrackingService();
+    res.json(svc.getStatus());
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "Unknown error" });
+  }
+});
+
+// Initialize file tracking for a workspace.
+// The frontend calls this when a folder is opened.
+app.post("/api/file-tracking/init", (req, res) => {
+  try {
+    const { workspacePath } = req.body || {};
+    if (!workspacePath) {
+      return res.status(400).json({ error: "workspacePath is required" });
+    }
+    const svc = getFileTrackingService();
+    const status = svc.init(workspacePath);
+    res.json(status);
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "Unknown error" });
+  }
+});
+
+// Poll for Git availability — used by frontend periodic check.
+// Returns { gitDetected: true } when Git has become available mid-session.
+app.get("/api/file-tracking/git-detected", (_req, res) => {
+  try {
+    const svc = getFileTrackingService();
+    const status = svc.getStatus();
+    res.json({
+      gitDetected: status.gitDetectedMidSession,
+      mode: status.mode,
+      gitAvailable: status.gitAvailable,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "Unknown error" });
+  }
+});
+
+// Switch from watcher mode to Git mode.
+// Compares current state with Git's state, resolves differences, and switches.
+app.post("/api/file-tracking/switch-to-git", (req, res) => {
+  try {
+    const svc = getFileTrackingService();
+    const result = svc.switchToGit();
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "Unknown error" });
+  }
+});
+
+// Get changed files — works in both modes.
+app.get("/api/file-tracking/changes", (req, res) => {
+  try {
+    const svc = getFileTrackingService();
+    const files = svc.getChangedFiles();
+    res.json({ files });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "Unknown error" });
+  }
+});
+
+// Force refresh the file tree (re-scans in watcher mode).
+app.post("/api/file-tracking/refresh", (_req, res) => {
+  try {
+    const svc = getFileTrackingService();
+    svc.refreshFileTree();
+    res.json({ ok: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "Unknown error" });
+  }
+});
+
+// Get file tree context for the agent's system prompt.
+// First call returns a full tree snapshot; subsequent calls return patches only.
+// The last-sent snapshot persists to disk (~/.harness/file-tree-snapshot.json).
+app.get("/api/file-tracking/file-tree-context", (_req, res) => {
+  try {
+    const svc = getFileTrackingService();
+    const result = svc.getFileTreeContext();
+    res.json({ text: result.text, isFull: result.isFull });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "Unknown error" });
+  }
+});
+
+// Reset the file tree snapshot so the next request sends a full tree again.
+// Called when a new folder is opened to ensure fresh context.
+app.post("/api/file-tracking/reset-snapshot", (_req, res) => {
+  try {
+    const svc = getFileTrackingService();
+    svc.resetFileTreeSnapshot();
+    res.json({ ok: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "Unknown error" });
   }
 });
 

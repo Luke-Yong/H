@@ -16,6 +16,7 @@ AI-powered coding agent using DeepSeek.
 - [Built-in Browser](#built-in-browser-desktop)
 - [Language Support (LSP)](#language-support-lsp)
 - [File Management](#file-management)
+- [Smart File Tracking](#smart-file-tracking)
 - [Security](#security)
 - [Agent Tools](#agent-tools-deepseek-powered)
   - [Filesystem](#filesystem)
@@ -444,6 +445,114 @@ All tools operate relative to the project root. The agent can browse, create, ed
 | `/api/fs/delete` | DELETE | Deletes a file or directory (recursive for dirs) |
 | `/api/fs/rename` | POST | Renames / moves a file or directory |
 | `/api/fs/read-binary` | GET | Read a file as binary (used by `browser_upload_file`) |
+
+## Smart File Tracking
+
+Harness uses a dynamic file tracking system that auto-detects Git availability — following the "workspace trust" pattern used by modern IDEs.
+
+### How It Works
+
+```
+┌─ On startup / folder open ───────────────────────────────────────┐
+│                                                                    │
+│  checkGitAvailable() → git --version                               │
+│       │                                                            │
+│       ├── Git exists ──► Git mode                                  │
+│       │   Uses git status/diff for file change tracking            │
+│       │   Full SCM support (branches, commits, push/pull)          │
+│       │                                                            │
+│       └── No Git ──────► Watcher mode                              │
+│           Uses fs.watch (built-in Node API) to monitor changes     │
+│           Metadata cache stored in ~/.harness/file-tracking.json   │
+│           No dependencies needed                                   │
+│                                                                    │
+│  → Status bar shows spinner + "Scanning..." during init            │
+│  → File tree snapshot built eagerly (ready before first agent run) │
+│                                                                    │
+└────────────────────────────────────────────────────────────────────┘
+                              │
+┌─ Git installed mid-session ────────────────────────────────────────┐
+│                                                                    │
+│  Periodic check (every 30s) detects git --version returns success  │
+│       │                                                            │
+│       ▼                                                            │
+│  Frontend shows dialog: "Git detected! Switch to Git tracking?"    │
+│       │                                                            │
+│       ├── Confirm → switchToGit()                                  │
+│       │   • Stops file watcher                                     │
+│       │   • git init (if no repo exists)                           │
+│       │   • Compares cache state with filesystem                   │
+│       │   • Auto-commits if needed                                 │
+│       │   • Clears watcher cache                                   │
+│       │                                                            │
+│       └── Not Now → stay in watcher mode                           │
+│                                                                    │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+### Tracking Modes
+
+| Mode | Detection | File Changes | SCM Panel | Status Bar |
+|------|-----------|-------------|-----------|------------|
+| **git** | Git found on startup or switch | `git status --porcelain` | Fully functional | Branch icon + "main" |
+| **watcher** | No Git available | `fs.watch` recursive + JSON cache | Disabled | Crosshair icon + "Watcher" |
+| **loading** | Folder just opened | Scanning filesystem + building snapshot | — | Spinner + "Scanning..." |
+| **none** | No folder open | — | — | — |
+
+### File Tree Context for AI Agent
+
+When the agent runs, Harness sends the project file tree as part of the system prompt context. The snapshot is built **eagerly** on folder open (not deferred to the first agent call), so it's always ready.
+
+```
+┌─ Folder open ───────────────────────────────────────────────────────┐
+│  → buildSnapshot() walks entire project (skips node_modules/.git)   │
+│  → Snapshot saved to ~/.harness/file-tree-snapshot-<hash>.json       │
+│  → Status bar: spinner + "Scanning..." during the walk              │
+└────────────────────────────────────────────────────────────────────┘
+                              │
+┌─ First agent run ──────────────────────────────────────────────────┐
+│  → "(no file tree changes since last update)" — snapshot matches    │
+└────────────────────────────────────────────────────────────────────┘
+                              │
+┌─ Subsequent agent runs (same folder) ──────────────────────────────┐
+│  → Only patches sent: "+ added files" / "- deleted files"          │
+│  → Snapshot updated after each send                                │
+└────────────────────────────────────────────────────────────────────┘
+                              │
+┌─ Large changes (>100 files differ) ────────────────────────────────┐
+│  → e.g. after git checkout to a different branch                   │
+│  → Falls back to sending a full tree instead of a massive patch    │
+│  → Snapshot updated, subsequent calls return to normal patch mode  │
+└────────────────────────────────────────────────────────────────────┘
+                              │
+┌─ Cross-session continuity ─────────────────────────────────────────┐
+│  → Snapshot persists to disk                                       │
+│  → Restarting IDE does not re-send full tree unless folder changed │
+│  → New folder open → snapshot rebuilt → ready before first run     │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+### API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/file-tracking/status` | GET | Current tracking mode, Git availability, workspace path |
+| `/api/file-tracking/init` | POST | Initialize tracking for a workspace (`{ workspacePath }`) |
+| `/api/file-tracking/git-detected` | GET | Polled by frontend — returns `{ gitDetected: true }` when Git appears mid-session |
+| `/api/file-tracking/switch-to-git` | POST | Switch from watcher to git; auto-inits repo, compares state |
+| `/api/file-tracking/changes` | GET | Get changed files (works in both modes) |
+| `/api/file-tracking/refresh` | POST | Force re-scan workspace in watcher mode |
+| `/api/file-tracking/file-tree-context` | GET | Full tree (first call) or patch (subsequent calls) for agent system prompt |
+| `/api/file-tracking/reset-snapshot` | POST | Reset snapshot so next context call returns full tree |
+
+### Files
+
+| File | Role |
+|------|------|
+| `server/fileTracking.ts` | `FileTrackingService` — singleton orchestrating Git or watcher mode, periodic Git detection, snapshot/patch logic |
+| `server/fileTrackingStore.ts` | `FileTrackingStore` — lightweight JSON-backed cache (`~/.harness/file-tracking.json`) for file metadata |
+| `~/.harness/file-tracking.json` | On-disk metadata cache for watcher mode |
+| `~/.harness/file-tree-snapshot-<hash>.json` | Per-workspace file tree snapshot for patch-based agent context (hash derived from workspace path) |
 
 ## Security
 
@@ -1232,6 +1341,8 @@ Harness/
 │   ├── mcp-server.ts                # Standalone MCP server entry point (stdio mode)
 │   ├── memory.ts                    # SQLite persistent memory store (~/.harness/memory.db): keyword + embedding search, used by agent remember/recall/forget tools
 │   │                                  # API keys also stored under ~/.harness/api-keys.json (persistent, survives restarts/updates)
+│   ├── fileTracking.ts              # Smart file tracking service: auto-detects Git vs fs.watch watcher mode, mid-session Git detection, snapshot/patch file tree context
+│   ├── fileTrackingStore.ts         # JSON-backed file metadata cache (~/.harness/file-tracking.json) for watcher mode
 │   └── __tests__/                   # 5 test files: tool definitions, filesystem ops, command execution, agent loop, API integration
 │
 ├── client/

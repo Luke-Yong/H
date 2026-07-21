@@ -33,6 +33,9 @@ export interface EditorPaneHandle {
   setLineEnding: (le: string) => void;
   setEncoding: (enc: string) => Promise<void>;
   getConsoleContext: () => string;
+  /** Pre-fetch the file tree context from the backend. Call before getConsoleContext()
+   *  to ensure the latest full/patch file tree is included in the snapshot. */
+  fetchFileTreeContext: () => Promise<void>;
   executeBrowserAction: (toolName: string, params: Record<string, unknown>) => Promise<string>;
   getProjectFiles: () => Promise<string[]>;
   getFsBasePath: () => string;
@@ -1418,9 +1421,29 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
 
   // Build a text snapshot of the entire console state (problems, debug, output,
   // browser console, DOM tree) so DeepSeek can see what's happening.
+  // File tree context is pre-fetched via fetchFileTreeContext() before each agent run
+  // and cached here. First call sends full tree; subsequent calls send patches only.
+  const fileTreeContextRef = useRef("");
+
+  const fetchFileTreeContext = useCallback(async () => {
+    if (!fsBasePath) { fileTreeContextRef.current = ""; return; }
+    try {
+      const res = await fetch("/api/file-tracking/file-tree-context");
+      if (!res.ok) return;
+      const data = await res.json();
+      fileTreeContextRef.current = data.text || "";
+    } catch { /* non-fatal */ }
+  }, [fsBasePath]);
+
   const getConsoleContext = useCallback((): string => {
     const lines: string[] = [];
     lines.push("### CONSOLE STATE SNAPSHOT ###");
+
+    // ── File tree context (pre-fetched by fetchFileTreeContext) ──
+    if (fileTreeContextRef.current) {
+      lines.push(fileTreeContextRef.current);
+      lines.push("");
+    }
 
     // ── Problems (errors/warnings from editor) ──
     const problems = problemEntries;
@@ -1495,33 +1518,6 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
       lines.push(`  ${f.name}${f.id === activeFileId ? " *ACTIVE*" : ""}${dirtyFiles.has(f.id) ? " [unsaved]" : ""}`);
     }
 
-    // ── Project file tree ──
-    if (fsRoot && fsRoot.length > 0) {
-      lines.push(`Project tree (${fsBasePath}):`);
-      const trim = (p: string) => p.replace(/\\/g, "/").replace(/\/$/, "");
-      const root = trim(fsBasePath);
-      // Recursively flatten the entry tree (breadth-first, capped).
-      const queue: { entry: FsEntry; depth: number }[] = fsRoot.map((e) => ({ entry: e, depth: 1 }));
-      let shown = 0, maxShown = 30;
-      while (queue.length > 0 && shown < maxShown) {
-        const { entry, depth } = queue.shift()!;
-        const relName = trim(entry.path).startsWith(root)
-          ? trim(entry.path).slice(root.length + 1)
-          : entry.name;
-        const isOpen = files.some((f) => f._fsPath && normPath(f._fsPath) === normPath(entry.path));
-        const marker = entry.isDirectory ? "/" : "";
-        const openTag = isOpen ? " (open)" : "";
-        const indent = "  ".repeat(depth);
-        lines.push(`${indent}${relName}${marker}${openTag}`);
-        shown++;
-        // Only expand one level deep (depth 1 entries) for a compact snapshot.
-        // Deeper expansion happens on-demand via the files panel UI.
-      }
-      if (shown >= maxShown) lines.push("  ... (more entries not shown)");
-    } else if (fsBasePath) {
-      lines.push(`Project: ${fsBasePath} (loading...)`);
-    }
-
     // ── Git status on active file ──
     if (activeFile?._fsPath) {
       const gs = gitChanges.get(normPath(activeFile._fsPath));
@@ -1529,7 +1525,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     }
 
     return lines.join("\n");
-  }, [problemEntries, debugEntries, outputEntries, browserConsoleMap, activeBrowserTabId, browserTabs, files, activeFileId, activeFile, dirtyFiles, gitChanges, fsRoot, fsBasePath]);
+  }, [problemEntries, debugEntries, outputEntries, browserConsoleMap, activeBrowserTabId, browserTabs, files, activeFileId, activeFile, dirtyFiles, gitChanges]);
 
   // Execute a browser tool on behalf of the agent.
   const executeBrowserAction = useCallback(async (toolName: string, params: Record<string, unknown>): Promise<string> => {
@@ -1632,7 +1628,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     goToLine: handleGoToLine, goToBracket: handleGoToBracket,
     setLanguage: handleSetLanguage, setIndent: handleIndentChange,
     setLineEnding: handleLineEnding, setEncoding,
-    getConsoleContext, executeBrowserAction, getProjectFiles, getFsBasePath,
+    getConsoleContext, fetchFileTreeContext, executeBrowserAction, getProjectFiles, getFsBasePath,
     getActiveFilePath: () => {
       const f = files.find((x) => x.id === activeFileIdRef.current);
       return f?._fsPath || null;

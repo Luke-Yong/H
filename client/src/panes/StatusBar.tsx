@@ -48,6 +48,8 @@ interface Props {
   hasFsRoot: boolean;
   hasEditor: boolean;
   lspError?: string;
+  trackingMode?: "git" | "watcher" | "none";
+  trackingLoading?: boolean;
   onSelectLanguage: (lang: string) => void;
   onGoToLine?: (line: number) => void;
   onGoToBracket?: () => void;
@@ -115,7 +117,7 @@ function ResourceMonitor() {
 }
 
 export default function StatusBar({
-  cursorLine, cursorColumn, language, encoding, fsBasePath, hasFsRoot, hasEditor, lspError,
+  cursorLine, cursorColumn, language, encoding, fsBasePath, hasFsRoot, hasEditor, lspError, trackingMode, trackingLoading,
   onSelectLanguage, onGoToLine, onGoToBracket, onIndentChange, onLineEndingChange, onEncodingChange,
 }: Props) {
   const [langOpen, setLangOpen] = useState(false);
@@ -153,8 +155,14 @@ export default function StatusBar({
     <div className="status-bar">
       <div className="status-bar-left">
         <ResourceMonitor />
-        {hasFsRoot && (
-          <span className="status-item" title="Source Control: main">
+        {trackingLoading && (
+          <span className="status-item" title="Scanning file tree...">
+            <span className="status-spinner" />
+            Scanning...
+          </span>
+        )}
+        {hasFsRoot && trackingMode === "git" && (
+          <span className="status-item" title="Source Control: Git tracking active (main)">
             <svg width="12" height="12" viewBox="0 0 16 16" fill="none" style={{ marginRight: 4 }}>
               <circle cx="5" cy="5" r="1.5" fill="currentColor"/>
               <circle cx="11" cy="11" r="1.5" fill="currentColor"/>
@@ -162,6 +170,15 @@ export default function StatusBar({
               <path d="M5 6.5V9.5M6.5 8H9.5" stroke="currentColor" strokeWidth="1.2"/>
             </svg>
             main
+          </span>
+        )}
+        {hasFsRoot && trackingMode === "watcher" && (
+          <span className="status-item" title="File Watcher tracking active (no Git detected)">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" style={{ marginRight: 4, opacity: 0.7 }}>
+              <circle cx="8" cy="8" r="2" fill="none" stroke="currentColor" strokeWidth="1.2"/>
+              <path d="M8 3V5.5M8 10.5V13M3 8H5.5M10.5 8H13" stroke="currentColor" strokeWidth="1.2"/>
+            </svg>
+            Watcher
           </span>
         )}
         {lspError && (

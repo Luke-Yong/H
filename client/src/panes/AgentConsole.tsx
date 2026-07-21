@@ -133,6 +133,8 @@ interface Props {
   goal: string;
   onGoalChange: (value: string) => void;
   getConsoleContext?: () => string;
+  /** Pre-fetch file tree context before each agent run (called by parent via EditorPane). */
+  refreshFileTreeContext?: () => Promise<void>;
   executeBrowserAction?: (name: string, params: Record<string, unknown>) => Promise<string>;
   getProjectFiles?: () => Promise<string[]>;
   getFsBasePath?: () => string;
@@ -160,7 +162,7 @@ interface Props {
 
 // ── Component ──
 
-export default function AgentConsole({ goal, onGoalChange, getConsoleContext, executeBrowserAction, getProjectFiles, getFsBasePath, refreshEditor, applyAgentFileChanges, onRefreshFs, setAgentFileActionRef, openEditorFile, acceptEditorChange, rejectEditorChange, closeEditorFile, renameEditorFile, agentTerminalBridge }: Props) {
+export default function AgentConsole({ goal, onGoalChange, getConsoleContext, refreshFileTreeContext, executeBrowserAction, getProjectFiles, getFsBasePath, refreshEditor, applyAgentFileChanges, onRefreshFs, setAgentFileActionRef, openEditorFile, acceptEditorChange, rejectEditorChange, closeEditorFile, renameEditorFile, agentTerminalBridge }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const consoleListRef = useRef<HTMLDivElement>(null);
   const userScrolledUpRef = useRef(false);
@@ -897,6 +899,8 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
   }, [refreshEditor, applyAgentFileChanges, getFsBasePath]);
 
   const runAgent = useCallback(async (threadId: string, userMessage: string, signal: AbortSignal) => {
+    // Pre-fetch latest file tree context (full on first call, patch on subsequent)
+    await refreshFileTreeContext?.();
     const consoleSnapshot = getConsoleContext?.() || "";
     // Append current terminal output if available (from running run_in_terminal commands)
     const termOut = agentTermOutputRef.current || "";
@@ -2012,7 +2016,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, ex
 
     // Keep loading if a file tool (edit/write/delete) is waiting for Accept/Reject
     setLoading(deferredToolRef.current != null);
-  }, [getConsoleContext, executeBrowserAction, push, getFsBasePath, applyEditorFiles, onRefreshFs, threads]);
+  }, [getConsoleContext, refreshFileTreeContext, executeBrowserAction, push, getFsBasePath, applyEditorFiles, onRefreshFs, threads]);
 
   // helper: push a message with explicit id
   const pushRaw = useCallback((id: string, msg: Omit<ConsoleMessage, "id" | "when">) => {

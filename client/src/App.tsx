@@ -116,6 +116,13 @@ export default function App() {
   const isBrowserFs = useRef(false);
   const prevFsBasePathRef = useRef("");
 
+  // File tracking state
+  const [trackingMode, setTrackingMode] = useState<"git" | "watcher" | "none">("none");
+  const [trackingLoading, setTrackingLoading] = useState(false);
+  const [gitDetectedMidSession, setGitDetectedMidSession] = useState(false);
+  const [showGitSwitchDialog, setShowGitSwitchDialog] = useState(false);
+  const gitDetectedPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   // Persist open editor tabs per folder
   const TAB_STORAGE_KEY = "harness-open-tabs";
 
@@ -397,8 +404,71 @@ export default function App() {
       await detectProject(data.path);
       ensureTerminalVisible(shouldRestartTerminal);
       restoreOpenTabs(data.path);
+      // Initialize file tracking
+      initFileTracking(data.path);
     } catch (err) { alert(`Failed to open folder: ${err}`); }
   }, [detectProject, ensureTerminalVisible, addRecentPath, restoreOpenTabs, saveOpenTabs]);
+
+  // ── File Tracking initialization ──
+  const initFileTracking = useCallback(async (workspacePath: string) => {
+    setTrackingLoading(true);
+    // Yield to the event loop so React renders the spinner before we block on fetch
+    await new Promise((r) => setTimeout(r, 0));
+    try {
+      const res = await fetch("/api/file-tracking/init", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspacePath }),
+      });
+      const data = await res.json();
+      setTrackingMode(data.mode || "none");
+      setGitDetectedMidSession(data.gitDetectedMidSession || false);
+
+      // Start periodic Git availability polling if in watcher mode
+      startGitDetectionPoll();
+    } catch (err) {
+      console.error("File tracking init failed:", err);
+      setTrackingMode("none");
+    } finally {
+      setTrackingLoading(false);
+    }
+  }, []);
+
+  const startGitDetectionPoll = useCallback(() => {
+    // Clear any existing poll
+    if (gitDetectedPollRef.current) {
+      clearInterval(gitDetectedPollRef.current);
+    }
+    gitDetectedPollRef.current = setInterval(async () => {
+      try {
+        const res = await fetch("/api/file-tracking/git-detected");
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.gitDetected && data.mode === "watcher") {
+          // Git detected mid-session — notify user
+          clearInterval(gitDetectedPollRef.current!);
+          gitDetectedPollRef.current = null;
+          setGitDetectedMidSession(true);
+          setShowGitSwitchDialog(true);
+        }
+        // If already in git mode, stop polling
+        if (data.mode === "git") {
+          clearInterval(gitDetectedPollRef.current!);
+          gitDetectedPollRef.current = null;
+          setTrackingMode("git");
+        }
+      } catch { /* ignore poll errors */ }
+    }, 30_000);
+  }, []);
+
+  // Cleanup polling on unmount
+  useEffect(() => {
+    return () => {
+      if (gitDetectedPollRef.current) {
+        clearInterval(gitDetectedPollRef.current);
+      }
+    };
+  }, []);
 
   const openFolderImmediate = useCallback(async () => {
     const desktop = window.harnessDesktop;
@@ -434,8 +504,13 @@ export default function App() {
       const data = await res.json();
       setFsRoot(data.entries || []);
     } catch (err) { console.error("refreshFs error:", err); }
+    // Refresh git status in editor (works in both modes)
     editorRef.current?.refreshGitStatus?.();
-  }, [fsBasePath]);
+    // Also poke file tracking to keep it fresh
+    if (trackingMode === "watcher") {
+      fetch("/api/file-tracking/refresh", { method: "POST" }).catch(() => {});
+    }
+  }, [fsBasePath, trackingMode]);
 
   // Refresh file tree when window regains focus (e.g. after external file changes).
   useEffect(() => {
@@ -447,6 +522,30 @@ export default function App() {
       window.removeEventListener("focus", refreshFs);
     };
   }, [refreshFs]);
+
+  // ── Git switch handlers (after refreshFs declaration) ──
+  const handleSwitchToGit = useCallback(async () => {
+    try {
+      const res = await fetch("/api/file-tracking/switch-to-git", { method: "POST" });
+      const data = await res.json();
+      if (data.success) {
+        setTrackingMode("git");
+        setShowGitSwitchDialog(false);
+        setGitDetectedMidSession(false);
+        // Refresh file tree and git status after switching
+        refreshFs();
+      } else {
+        alert(`Failed to switch to Git: ${data.message}`);
+      }
+    } catch (err) {
+      console.error("Switch to git failed:", err);
+    }
+  }, [refreshFs]);
+
+  const handleDismissGitSwitch = useCallback(() => {
+    setShowGitSwitchDialog(false);
+    setGitDetectedMidSession(false);
+  }, []);
 
   const createNewProject = useCallback(async (projectName: string) => {
     try {
@@ -619,7 +718,7 @@ export default function App() {
         }},
         // Conditionals
         ...(fsBasePath
-          ? [{ label: "Close Folder", shortcut: "Ctrl+K F", action: () => { saveOpenTabs(); setFsRoot(null); setFsBasePath(""); isBrowserFs.current = false; setProjectVenvDir(""); setProjectActivateScript(""); handleBrowserClose(); setTermVisible(false); setShowConsole(false); } } as MenuItem]
+          ? [{ label: "Close Folder", shortcut: "Ctrl+K F", action: () => { saveOpenTabs(); setFsRoot(null); setFsBasePath(""); isBrowserFs.current = false; setProjectVenvDir(""); setProjectActivateScript(""); handleBrowserClose(); setTermVisible(false); setShowConsole(false); setTrackingMode("none"); setTrackingLoading(false); setGitDetectedMidSession(false); if (gitDetectedPollRef.current) { clearInterval(gitDetectedPollRef.current); gitDetectedPollRef.current = null; } } } as MenuItem]
           : []),
         ...(statusBar.hasEditor
           ? [{ label: "Close File", shortcut: "Ctrl+W", action: () => { editorRef.current?.closeActiveTab(); } } as MenuItem]
@@ -721,6 +820,7 @@ export default function App() {
             goal={goal}
             onGoalChange={setGoal}
             getConsoleContext={() => editorRef.current?.getConsoleContext() || ""}
+            refreshFileTreeContext={() => editorRef.current?.fetchFileTreeContext() ?? Promise.resolve()}
             executeBrowserAction={(name, params) => editorRef.current?.executeBrowserAction(name, params) ?? Promise.resolve("Browser not available")}
             getProjectFiles={() => editorRef.current?.getProjectFiles() ?? Promise.resolve([])}
             getFsBasePath={() => editorRef.current?.getFsBasePath() || ""}
@@ -747,6 +847,8 @@ export default function App() {
         hasFsRoot={statusBar.hasFsRoot}
         hasEditor={statusBar.hasEditor}
         lspError={statusBar.lspError}
+        trackingMode={trackingMode}
+        trackingLoading={trackingLoading}
         onSelectLanguage={(lang) => editorRef.current?.setLanguage(lang)}
         onGoToLine={(line) => editorRef.current?.goToLine(line)}
         onGoToBracket={() => editorRef.current?.goToBracket()}
@@ -764,6 +866,34 @@ export default function App() {
         }}
         onCancel={() => setNameDialog(null)}
       />
+      {/* Git detection mid-session dialog */}
+      {showGitSwitchDialog && (
+        <div className="git-switch-overlay" onClick={handleDismissGitSwitch}>
+          <div className="git-switch-dialog" onClick={(e) => e.stopPropagation()}>
+            <div className="git-switch-icon">
+              <svg width="32" height="32" viewBox="0 0 16 16" fill="none">
+                <circle cx="5" cy="5" r="1.5" fill="#e1251b"/>
+                <circle cx="11" cy="11" r="1.5" fill="#ae852d"/>
+                <circle cx="11" cy="5" r="1.5" fill="#53575a"/>
+                <path d="M5 6.5V9.5M6.5 8H9.5" stroke="currentColor" strokeWidth="1.2"/>
+              </svg>
+            </div>
+            <h3>Git Detected!</h3>
+            <p>
+              Git has been detected on your system. Would you like to switch to Git-based file tracking?
+              This will enable branch management, commit history, and diff viewing.
+            </p>
+            <div className="git-switch-actions">
+              <button className="git-switch-btn primary" onClick={handleSwitchToGit}>
+                Switch to Git
+              </button>
+              <button className="git-switch-btn secondary" onClick={handleDismissGitSwitch}>
+                Not Now
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
