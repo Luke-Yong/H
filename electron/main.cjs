@@ -546,6 +546,11 @@ function registerIpc() {
   ipcMain.handle("harness:isMaximized", (event) => {
     return BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false;
   });
+
+  // New Window
+  ipcMain.on("harness:newWindow", () => {
+    createMainWindow();
+  });
 }
 
 async function loadUrlWhenReady(win, targetUrl, healthUrl, timeoutMs, title) {

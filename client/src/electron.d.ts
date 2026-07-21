@@ -15,6 +15,7 @@ declare global {
       maximize?: () => void;
       close?: () => void;
       isMaximized?: () => Promise<boolean>;
+      newWindow?: () => void;
     };
   }
 

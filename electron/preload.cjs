@@ -21,4 +21,5 @@ contextBridge.exposeInMainWorld("harnessDesktop", {
   maximize: () => ipcRenderer.send("harness:maximize"),
   close: () => ipcRenderer.send("harness:close"),
   isMaximized: () => ipcRenderer.invoke("harness:isMaximized"),
+  newWindow: () => ipcRenderer.send("harness:newWindow"),
 });

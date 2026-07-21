@@ -617,6 +617,8 @@ export default function App() {
         ...(statusBar.hasEditor
           ? [{ label: "Close File", shortcut: "Ctrl+W", action: () => { editorRef.current?.closeActiveTab(); } } as MenuItem]
           : []),
+        "---" as const,
+        { label: "New Window", shortcut: "Ctrl+Shift+N", action: () => { window.harnessDesktop?.newWindow?.(); } },
       ),
     },
     {

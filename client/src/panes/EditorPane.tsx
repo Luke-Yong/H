@@ -675,6 +675,14 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     prevBasePathRef.current = fsBasePath;
   }, [fsBasePath]);
 
+  // Safety: clear activeFileId when active file is removed from files (close folder, closeAllFiles, etc.)
+  useEffect(() => {
+    if (activeFileId && activeFileId !== BROWSER_EDITOR_TAB_ID && !files.some((f) => f.id === activeFileId)) {
+      setActiveFileId(browserTabs.length > 0 ? BROWSER_EDITOR_TAB_ID : "");
+      setCursorPos({ line: 1, column: 1 });
+    }
+  }, [files, activeFileId, browserTabs.length]);
+
   // Fetch git diff for active file
   useEffect(() => {
     const f = files.find((x) => x.id === activeFileId);
@@ -1627,7 +1635,6 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     refreshGitStatus,
     closeActiveTab: () => {
       if (!activeFileIdRef.current) return;
-      // Inline close-tab logic to avoid forward-reference to closeTab.
       const id = activeFileIdRef.current;
       if (id === BROWSER_EDITOR_TAB_ID) {
         onCloseBrowser();
@@ -1640,17 +1647,13 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
       if (pendingProblemSelectionRef.current?.fileId === id) {
         pendingProblemSelectionRef.current = null;
       }
-      setFiles((prev) => {
-        const idx = prev.findIndex((f) => f.id === id);
-        const remaining = prev.filter((f) => f.id !== id);
-        if (remaining.length > 0) {
-          const next = remaining[Math.min(Math.max(idx, 0), Math.max(0, remaining.length - 1))];
-          setActiveFileId(next?.id || "");
-        } else {
-          setActiveFileId(browserTabsRef.current.length > 0 ? BROWSER_EDITOR_TAB_ID : "");
-        }
-        return remaining;
-      });
+      const idx = files.findIndex((f) => f.id === id);
+      const remaining = files.filter((f) => f.id !== id);
+      const nextId = remaining.length > 0
+        ? remaining[Math.min(Math.max(idx, 0), Math.max(0, remaining.length - 1))]?.id || ""
+        : (browserTabsRef.current.length > 0 ? BROWSER_EDITOR_TAB_ID : "");
+      setFiles(remaining);
+      setActiveFileId(nextId);
     },
     closeAllFiles: () => {
       setFiles([]);
