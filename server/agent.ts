@@ -13,6 +13,8 @@ import { getMemoryStore } from "./memory";
 import { killSession, getLastCreatedSessionId } from "./terminalManager";
 import fs from "fs";
 import path from "path";
+import os from "os";
+import crypto from "crypto";
 import { execSync, spawn } from "child_process";
 
 // ── Types ──
@@ -125,7 +127,7 @@ export const SUB_AGENT_PROFILES: Record<string, SubAgentConfig> = {
   },
   "code-search": {
     name: "Code Search Agent",
-    tools: ["read_file", "list_files", "search_files", "grep"],
+    tools: ["read_file", "list_files", "search_files", "grep", "read_graph"],
     headless: true,
     maxIterations: 20,
     systemPrompt: `You are a code-search specialist running as a sub-agent. Your ONLY job is to find and read relevant code in the project.
@@ -137,7 +139,7 @@ export const SUB_AGENT_PROFILES: Record<string, SubAgentConfig> = {
   "code-writer": {
     name: "Code Writer Agent",
     tools: ["read_file", "write_file", "edit_file", "list_files", "search_files", "grep",
-            "run_command", "read_problems", "read_command_output", "create_directory", "delete_file", "rename_file"],
+            "run_command", "read_problems", "read_command_output", "read_graph", "create_directory", "delete_file", "rename_file"],
     headless: true,
     maxIterations: 50,
     systemPrompt: `You are a code-writing specialist running as a sub-agent. Your job is to implement a specific feature or fix a specific bug.
@@ -156,7 +158,7 @@ Do NOT call task_complete or write_summary.`,
   },
   "researcher": {
     name: "Research Agent",
-    tools: ["read_file", "list_files", "search_files", "grep", "run_command"],
+    tools: ["read_file", "list_files", "search_files", "grep", "run_command", "read_graph"],
     headless: true,
     maxIterations: 25,
     systemPrompt: `You are a codebase researcher running as a sub-agent. Explore the project to answer the user's question.
@@ -271,7 +273,8 @@ export const TOOLS: ToolDef[] = [
     description:
       "Read a file or list a directory's contents. Returns the file text with line numbers, "
       + "or a directory listing showing files and subdirectories. "
-      + "For large files, use offset and limit to paginate — e.g. offset=100 limit=50 reads lines 100-149.",
+      + "For large files, use offset and limit to paginate — e.g. offset=100 limit=50 reads lines 100-149. "
+      + "For structural queries (what exports X? who imports from Y?), use read_graph instead.",
     parameters: {
       type: "object",
       properties: {
@@ -346,7 +349,8 @@ export const TOOLS: ToolDef[] = [
     description:
       "Search file contents for a regex pattern across the project. "
       + "Returns file paths, line numbers, and matching lines. "
-      + "Use this to find where a function, class, variable, or string is used.",
+      + "Use this to find where a function, class, variable, or string is used. "
+      + "For dependency queries (what depends on X? what does Y import?), prefer read_graph — it's faster and doesn't scan file contents.",
     parameters: {
       type: "object",
       properties: {
@@ -600,6 +604,27 @@ export const TOOLS: ToolDef[] = [
       + "Returns linter errors, TypeScript errors, etc. Use this after making changes to verify "
       + "that no new errors were introduced and existing problems were resolved.",
     parameters: { type: "object", properties: {}, required: [] },
+  },
+  {
+    name: "read_graph",
+    description:
+      "Query the codebase knowledge graph. The graph tracks every file, directory, exported symbol "
+      + "(functions, classes, types, etc.), and their relationships (CONTAINS, EXPORTS, IMPORTS, IMPORTS_SYMBOL). "
+      + "Use this for structural/dependency questions — it's faster than grepping or reading files. "
+      + "For file contents, use read_file. For content search, use grep. "
+      + "Query types:\n"
+      + "- 'exports <file>' — list all symbols exported by a file (functions, classes, consts, types, interfaces, enums)\n"
+      + "- 'imports_of <file>' — list all symbols imported by a file (with their source files)\n"
+      + "- 'exporters_of <symbol>' — find which files export a symbol with this name\n"
+      + "- 'dependents <file>' — find which files import from this file\n"
+      + "- 'structure' — print the full directory tree (dirs and files, no symbols)",
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Query string in the format '<query_type> <target>'. Examples: 'exports server/fileTracking.ts', 'exporters_of getFileTrackingService', 'imports_of client/src/App.tsx'." },
+      },
+      required: ["query"],
+    },
   },
   {
     name: "remember",
@@ -1157,7 +1182,166 @@ export async function runFsTool(name: string, params: Record<string, unknown>, r
     if (!Array.isArray(todos)) return "Error: todos must be an array.";
     return `Todos updated (${todos.length} items).`;
   }
+  if (name === "read_graph") {
+    return runGraphQuery(String(params.query || ""), root);
+  }
   return null; // not a filesystem tool
+}
+
+// ── Knowledge Graph Query ──
+
+function runGraphQuery(query: string, projectRoot: string): string {
+  const hash = crypto.createHash("md5").update(path.resolve(projectRoot)).digest("hex").slice(0, 12);
+  const kgDir = path.resolve(os.homedir(), ".harness");
+  const kgPath = path.join(kgDir, `file-tree-snapshot-${hash}.kg`);
+
+  if (!fs.existsSync(kgPath)) {
+    return "Knowledge graph not built yet. Open the project folder in Harness to generate it.";
+  }
+
+  const raw = fs.readFileSync(kgPath, "utf-8");
+  const lines = raw.split(/\r?\n/).filter((l) => l && !l.startsWith("#"));
+
+  // Parse nodes
+  const nodes = new Map<string, { type: string; parentId: string; name: string; kind: string }>();
+  for (const line of lines) {
+    if (!line.startsWith("n")) continue;
+    const parts = line.split("|");
+    if (parts.length < 6) continue;
+    nodes.set("n" + parts[0].slice(1), {
+      type: parts[1], parentId: parts[2] ? "n" + parts[2] : "", name: parts[4], kind: parts[5],
+    });
+  }
+
+  // Parse edges
+  const edges: Array<{ from: string; to: string; type: string }> = [];
+  for (const line of lines) {
+    if (!line.startsWith("e")) continue;
+    const parts = line.split("|");
+    if (parts.length < 4) continue;
+    edges.push({ from: "n" + parts[0].slice(1), to: parts[2], type: parts[3] });
+  }
+
+  // Build parent chain path resolver
+  const pathCache = new Map<string, string>();
+  const resolvePath = (id: string): string => {
+    if (pathCache.has(id)) return pathCache.get(id)!;
+    const node = nodes.get(id);
+    if (!node) return "";
+    if (!node.parentId) { pathCache.set(id, node.name); return node.name; }
+    const parentPath = resolvePath(node.parentId);
+    const p = parentPath ? parentPath + "/" + node.name : node.name;
+    pathCache.set(id, p);
+    return p;
+  };
+
+  // Parse query
+  const trimmed = query.trim();
+  const spaceIdx = trimmed.indexOf(" ");
+  const qType = spaceIdx >= 0 ? trimmed.slice(0, spaceIdx).toLowerCase() : trimmed.toLowerCase();
+  const qTarget = spaceIdx >= 0 ? trimmed.slice(spaceIdx + 1).trim() : "";
+
+  if (qType === "structure") {
+    // Print directory tree (dirs + files, no symbols)
+    const dirPaths: string[] = [];
+    for (const [id, node] of nodes) {
+      if (node.type === "dir" || node.type === "file") {
+        dirPaths.push(resolvePath(id));
+      }
+    }
+    dirPaths.sort();
+    return `Directory tree (${dirPaths.length} entries):\n${dirPaths.join("\n")}`;
+  }
+
+  if (qType === "exports") {
+    // Find the file node matching qTarget
+    let fileId = "";
+    for (const [id, node] of nodes) {
+      if (node.type === "file" && resolvePath(id).includes(qTarget)) {
+        fileId = id; break;
+      }
+    }
+    if (!fileId) return `File not found in graph: ${qTarget}`;
+    const symEdges = edges.filter((e) => e.type === "EXPORTS" && e.from === fileId);
+    if (symEdges.length === 0) return `${resolvePath(fileId)} exports nothing (or is not a TypeScript file).`;
+    const syms = symEdges.map((e) => {
+      const sym = nodes.get(e.to);
+      return sym ? `${sym.name}:${sym.kind}` : "?";
+    });
+    return `${resolvePath(fileId)} exports:\n${syms.join("\n")}`;
+  }
+
+  if (qType === "exporters_of") {
+    // Find all symbol nodes matching qTarget and their parent files
+    const results: string[] = [];
+    for (const [id, node] of nodes) {
+      if (node.type === "symbol" && node.name.toLowerCase() === qTarget.toLowerCase()) {
+        results.push(`${resolvePath(node.parentId)} → ${node.name}:${node.kind}`);
+      }
+    }
+    if (results.length === 0) return `No symbol named '${qTarget}' found in the graph.`;
+    return `Files exporting '${qTarget}':\n${results.join("\n")}`;
+  }
+
+  if (qType === "imports_of") {
+    let fileId = "";
+    for (const [id, node] of nodes) {
+      if (node.type === "file" && resolvePath(id).includes(qTarget)) {
+        fileId = id; break;
+      }
+    }
+    if (!fileId) return `File not found in graph: ${qTarget}`;
+    // Get IMPORTS_SYMBOL edges from this file
+    const symImports = edges.filter((e) => e.type === "IMPORTS_SYMBOL" && e.from === fileId);
+    const fileImports = edges.filter((e) => e.type === "IMPORTS" && e.from === fileId);
+    const parts: string[] = [];
+    if (symImports.length > 0) {
+      parts.push("Symbol-level imports:");
+      for (const e of symImports) {
+        const sym = nodes.get(e.to);
+        const filePath = sym ? resolvePath(sym.parentId) : "?";
+        parts.push(`  ${sym?.name || "?"} from ${filePath}`);
+      }
+    }
+    if (fileImports.length > 0) {
+      parts.push(`File-level imports (${fileImports.length}):`);
+      for (const e of fileImports) {
+        parts.push(`  ${resolvePath(e.to)}`);
+      }
+    }
+    if (parts.length === 0) return `${resolvePath(fileId)} imports nothing.`;
+    return `${resolvePath(fileId)} imports:\n${parts.join("\n")}`;
+  }
+
+  if (qType === "dependents") {
+    let fileId = "";
+    for (const [id, node] of nodes) {
+      if (node.type === "file" && resolvePath(id).includes(qTarget)) {
+        fileId = id; break;
+      }
+    }
+    if (!fileId) return `File not found in graph: ${qTarget}`;
+    const deps = edges.filter((e) =>
+      (e.type === "IMPORTS" || e.type === "IMPORTS_SYMBOL") && e.to === fileId
+    );
+    // Also check for symbol-level: files that import symbols exported by this file
+    const exportedSyms = edges.filter((e) => e.type === "EXPORTS" && e.from === fileId).map((e) => e.to);
+    const symDepSets = new Set<string>();
+    for (const symId of exportedSyms) {
+      for (const e of edges) {
+        if (e.type === "IMPORTS_SYMBOL" && e.to === symId) symDepSets.add(e.from);
+      }
+    }
+    const allDeps = new Set<string>();
+    for (const e of deps) allDeps.add(e.from);
+    for (const id of symDepSets) allDeps.add(id);
+
+    if (allDeps.size === 0) return `No files depend on ${resolvePath(fileId)}.`;
+    const depList = [...allDeps].map((id) => resolvePath(id)).sort();
+    return `${resolvePath(fileId)} is imported by:\n${depList.join("\n")}`;
+  }
+
+  return `Unknown query type '${qType}'. Valid types: 'exports <file>', 'imports_of <file>', 'exporters_of <symbol>', 'dependents <file>', 'structure'.`;
 }
 
 // ── Memory tools ──
@@ -1540,6 +1724,7 @@ You have access to tools that let you read/write files, run commands, interact w
 - Use \`list_files\` to browse a specific directory.
 - Use \`search_files\` to find any file or folder anywhere in the project (by name pattern).
 - Use \`grep\` to search file contents for a string or regex — find definitions, usages, references.
+- Use \`read_graph\` for dependency/structural queries (what exports X? who imports from Y?) — much faster than grep for these questions.
 
 Current time: ${new Date().toISOString()}`;
 

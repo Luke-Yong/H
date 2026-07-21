@@ -291,6 +291,8 @@ export class FileTrackingService {
   private flushTimer: ReturnType<typeof setInterval> | null = null;
   /** Last snapshot of file paths sent to the agent (for patch-based updates). */
   private lastSentSnapshot: Set<string> | null = null;
+  /** Debounced graph rebuild timer (triggers after file changes settle). */
+  private graphRebuildTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor() {
     this.store = getFileTrackingStore();
@@ -564,6 +566,7 @@ export class FileTrackingService {
     this.stopWatcher();
     this.stopPeriodicGitCheck();
     this.stopFlushTimer();
+    this.clearGraphRebuildTimer();
     this.saveSnapshot();
     this.store.flush();
     this.changeCallbacks.clear();
@@ -839,6 +842,7 @@ export class FileTrackingService {
       this.watcher = null;
     }
     this.stopFlushTimer();
+    this.clearGraphRebuildTimer();
     this.store.flush();
   }
 
@@ -894,6 +898,9 @@ export class FileTrackingService {
     for (const cb of this.changeCallbacks) {
       try { cb(event); } catch { /* */ }
     }
+
+    // Schedule debounced knowledge graph rebuild (keeps .kg file current)
+    this.scheduleGraphRebuild();
   }
 
   // ── Private: Change Detection ──
@@ -977,6 +984,41 @@ export class FileTrackingService {
     if (this.flushTimer) {
       clearInterval(this.flushTimer);
       this.flushTimer = null;
+    }
+  }
+
+  // ── Private: Debounced Graph Rebuild ──
+
+  /** Schedule a knowledge graph rebuild after file changes settle (2s debounce). */
+  private scheduleGraphRebuild(): void {
+    if (this.graphRebuildTimer) clearTimeout(this.graphRebuildTimer);
+    this.graphRebuildTimer = setTimeout(() => {
+      this.graphRebuildTimer = null;
+      // Only rebuild in watcher mode; in git mode, git status handles detection
+      if (this.mode !== "watcher") return;
+      console.log("[FileTracking] Rebuilding knowledge graph after external changes...");
+      try {
+        const graph = buildKnowledgeGraph(this.workspacePath);
+        const kgPath = this.getSnapshotPath();
+        fs.writeFileSync(kgPath, serializeGraph(graph), "utf-8");
+        fs.writeFileSync(this.getVizPath(), visualizeGraph(graph), "utf-8");
+        // Update lastSentSnapshot from the new graph
+        const filePaths: string[] = [];
+        for (const node of graph.nodes.values()) {
+          if (node.type === "file") filePaths.push(node.absPath);
+        }
+        this.lastSentSnapshot = new Set(filePaths);
+        console.log(`[FileTracking] Graph rebuilt: ${graph.nodes.size} nodes, ${graph.edges.length} edges`);
+      } catch (err) {
+        console.error("[FileTracking] Graph rebuild failed:", err);
+      }
+    }, 2000);
+  }
+
+  private clearGraphRebuildTimer(): void {
+    if (this.graphRebuildTimer) {
+      clearTimeout(this.graphRebuildTimer);
+      this.graphRebuildTimer = null;
     }
   }
 }

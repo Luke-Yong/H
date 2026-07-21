@@ -786,6 +786,84 @@ Agent calls run_in_terminal
 | Tool | Description |
 |------|-------------|
 | `read_problems` | Read current IDE diagnostics — linter errors, TypeScript errors, warnings, hints, debug console, output, browser console. Call after making changes to verify no new errors. |
+| `read_graph` | Query the codebase knowledge graph for structural/dependency information — what a file exports, who imports from a file, which files export a given symbol, the full directory tree. Much faster than grep for dependency questions. |
+
+#### `read_graph` — Knowledge Graph Queries
+
+`read_graph` queries the codebase knowledge graph (see [Knowledge Graph](#knowledge-graph) for schema details). It reads the `.kg` file from `~/.harness/` and answers structural questions without scanning file contents. Use it for dependency analysis, symbol discovery, and project structure exploration.
+
+##### Query Types
+
+| Query | Format | Description | Example |
+|-------|--------|-------------|---------|
+| **Exports** | `exports <file>` | List all symbols exported by a file | `exports server/fileTracking.ts` |
+| **Imports of** | `imports_of <file>` | List all symbols and files imported by a file | `imports_of client/src/App.tsx` |
+| **Exporters of** | `exporters_of <symbol>` | Find which files export a symbol with this name | `exporters_of getFileTrackingService` |
+| **Dependents** | `dependents <file>` | Find which files import from this file (reverse dependency) | `dependents server/fileTracking.ts` |
+| **Structure** | `structure` | Print the full directory tree (dirs + files, no symbols) | `structure` |
+
+##### Query Details
+
+**`exports <file>`** — Returns every exported symbol with its kind:
+```
+server/fileTracking.ts exports:
+FileTrackingService:class
+getFileTrackingService:function
+TrackingMode:type
+```
+
+**`imports_of <file>`** — Returns both symbol-level and file-level imports:
+```
+client/src/App.tsx imports:
+Symbol-level imports:
+  EditorPane from client/src/panes/EditorPane.tsx
+  StatusBar from client/src/panes/StatusBar.tsx
+File-level imports (3):
+  client/src/App.css
+  client/src/index.css
+  client/src/vite-env.d.ts
+```
+
+**`exporters_of <symbol>`** — Case-insensitive symbol search. Useful when you know a function name but not its location:
+```
+Files exporting 'getFileTrackingService':
+server/fileTracking.ts → getFileTrackingService:function
+server/index.ts → getFileTrackingService:function
+```
+
+**`dependents <file>`** — Reverse dependency lookup. Shows which files import from a target, including indirect dependents via exported symbols:
+```
+server/fileTracking.ts is imported by:
+client/src/App.tsx
+client/src/panes/StatusBar.tsx
+server/agent.ts
+server/index.ts
+```
+
+**`structure`** — Full directory tree for orientation. Returns sorted paths — no nesting, just one path per line for token efficiency:
+```
+Directory tree (384 entries):
+Harness
+Harness/.eslintrc.js
+Harness/client
+Harness/client/index.html
+Harness/client/package.json
+...
+```
+
+##### When to Use `read_graph` vs `read_file` vs `grep`
+
+| Question | Use | Why |
+|----------|-----|-----|
+| "What does `fileTracking.ts` export?" | `read_graph exports` | Direct lookup — no file scanning |
+| "What is the content of `fileTracking.ts`?" | `read_file` | Content, not structure |
+| "Where is `initFileTracking` called?" | `grep` | Content search across files |
+| "Who imports from `fileTracking.ts`?" | `read_graph dependents` | Reverse dependency — impossible with grep alone |
+| "What files export a function named `foo`?" | `read_graph exporters_of` | Symbol-level query — grep would match comments, strings, calls |
+| "Find all `.ts` files in `server/`" | `list_files` or `search_files` | File/directory listing |
+| "What does this project look like?" | `read_graph structure` | Full tree in one call |
+
+**Key principle:** `read_graph` answers structural questions (what exists, how things connect). `read_file` and `grep` answer content questions (what's inside, where is it used). When unsure, prefer `read_graph` for dependency/export queries — it's a single call vs potentially dozens of grep searches.
 
 ### Control
 
@@ -834,9 +912,9 @@ Parent resumes ← result pushed to parent's state.messages
 | Profile | Tools | Iterations | Description |
 |---------|-------|-----------|-------------|
 | `browser` | `browser_navigate`, `browser_info`, `browser_screenshot`, `browser_get_dom`, `browser_click`, `browser_type`, `browser_clear`, `browser_select`, `browser_press_key`, `browser_console`, `browser_request_errors`, `browser_scroll`, `browser_wait`, `browser_move_mouse`, `browser_right_click`, `browser_upload_file` | 100 | Full browser automation — unlimited turns for intensive testing. Navigates, clicks, types, scrolls, fills forms, inspects DOM/console/network. |
-| `code-search` | `read_file`, `list_files`, `search_files`, `grep` | 20 | Read-only code exploration. Finds files, reads code, reports findings. Never edits. |
-| `code-writer` | Full filesystem + `run_command`, `read_problems` | 50 | Implements features or fixes bugs. Reads, edits, builds, and verifies. |
-| `researcher` | `read_file`, `list_files`, `search_files`, `grep`, `run_command` | 25 | Explores codebase to answer questions. Reports with file paths and line numbers. |
+| `code-search` | `read_file`, `list_files`, `search_files`, `grep`, `read_graph` | 20 | Read-only code exploration. Finds files, reads code, reports findings. Never edits. |
+| `code-writer` | Full filesystem + `run_command`, `read_problems`, `read_graph` | 50 | Implements features or fixes bugs. Reads, edits, builds, and verifies. |
+| `researcher` | `read_file`, `list_files`, `search_files`, `grep`, `run_command`, `read_graph` | 25 | Explores codebase to answer questions. Reports with file paths and line numbers. |
 
 #### Key Design
 
@@ -1288,6 +1366,7 @@ The agent works with a fixed tool registry. To prevent it from inventing tools t
 - **Writing files** → use `write_file` (never `echo >`, `cp`)
 - **Running commands** → use `run_command` for short tasks, `run_in_terminal` for servers (never background with `&` or `nohup`)
 - **Checking diagnostics** → use `read_problems` (not `tsc`, `eslint`, or `pylint` directly — those go through `run_command`)
+- **Dependency/structural queries** → use `read_graph` (what exports X? who imports from Y?) — much faster than grep for these
 - **Starting servers** → use `run_in_terminal` only (never `run_command` for `python app.py`, `npm start`, etc.)
 
 ## MCP (Model Context Protocol)
