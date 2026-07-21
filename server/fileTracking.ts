@@ -12,6 +12,7 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import { getFileTrackingStore, type FileTrackingStore } from "./fileTrackingStore";
+import { buildKnowledgeGraph, serializeGraph, visualizeGraph } from "./knowledgeGraph";
 
 // ── Types ──
 
@@ -45,6 +46,112 @@ const IGNORE_DIRS = new Set([
   "node_modules", ".git", "__pycache__", ".venv", "venv", ".env",
   "dist", ".next", "build", ".cache",
 ]);
+
+// ── File Tree Builder (nested { } structure for token-efficient output) ──
+
+interface TreeNode {
+  name: string;
+  children: Map<string, TreeNode>;
+  isDir: boolean;
+}
+
+/** Build a nested tree from a list of relative paths (e.g. ["src/a.ts", "src/b.ts"]). */
+function buildFileTree(relPaths: string[]): TreeNode {
+  const root: TreeNode = { name: "", children: new Map(), isDir: true };
+  for (const p of relPaths) {
+    const parts = p.split("/");
+    let node = root;
+    for (let i = 0; i < parts.length; i++) {
+      const name = parts[i];
+      const isDir = i < parts.length - 1;
+      if (!node.children.has(name)) {
+        node.children.set(name, { name, children: new Map(), isDir });
+      }
+      node = node.children.get(name)!;
+    }
+  }
+  return root;
+}
+
+/** Count total nodes (dirs + files) in the tree. */
+function countNodes(node: TreeNode): number {
+  let count = 0;
+  for (const child of node.children.values()) {
+    count += 1 + countNodes(child);
+  }
+  return count;
+}
+
+const INDENT = "  ";
+
+/**
+ * Format a tree node for full-tree output:
+ *   dirname {
+ *     subdir {
+ *       file.ts
+ *     }
+ *   }
+ */
+function formatTreeNode(node: TreeNode, depth: number, maxEntries: number): string {
+  const lines: string[] = [];
+  const entries = [...node.children.values()].sort((a, b) => {
+    if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  let shown = 0;
+  for (const child of entries) {
+    if (shown >= maxEntries) {
+      lines.push(`${INDENT.repeat(depth + 1)}... (${entries.length - shown} more)`);
+      break;
+    }
+    const prefix = INDENT.repeat(depth + 1);
+    if (child.isDir) {
+      lines.push(`${prefix}${child.name} {`);
+      lines.push(formatTreeNode(child, depth + 1, maxEntries - shown));
+      lines.push(`${prefix}}`);
+    } else {
+      lines.push(`${prefix}${child.name}`);
+    }
+    shown++;
+  }
+
+  return lines.join("\n");
+}
+
+/**
+ * Format a tree node for patch output:
+ *   + dirname {
+ *   +   file.ts
+ *   + }
+ *   - deleted.ts
+ */
+function formatPatchTree(node: TreeNode, depth: number, maxEntries: number, marker: string): string {
+  const lines: string[] = [];
+  const entries = [...node.children.values()].sort((a, b) => {
+    if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  let shown = 0;
+  for (const child of entries) {
+    if (shown >= maxEntries) {
+      lines.push(`${INDENT.repeat(depth + 1)}... (${entries.length - shown} more)`);
+      break;
+    }
+    const prefix = INDENT.repeat(depth + 1);
+    if (child.isDir) {
+      lines.push(`${prefix}${marker} ${child.name} {`);
+      lines.push(formatPatchTree(child, depth + 1, maxEntries - shown, marker));
+      lines.push(`${prefix}${marker} }`);
+    } else {
+      lines.push(`${prefix}${marker} ${child.name}`);
+    }
+    shown++;
+  }
+
+  return lines.join("\n");
+}
 
 // ── Lightweight fs.watch-based Watcher ──
 
@@ -516,17 +623,27 @@ export class FileTrackingService {
   /** Force the next call to getFileTreeContext() to send a full snapshot. */
   resetFileTreeSnapshot(): void {
     this.lastSentSnapshot = null;
-    const fp = this.getSnapshotPath();
-    try { if (fs.existsSync(fp)) fs.unlinkSync(fp); } catch {}
+    const cel = this.getSnapshotPath();
+    const viz = this.getVizPath();
+    try { if (fs.existsSync(cel)) fs.unlinkSync(cel); } catch {}
+    try { if (fs.existsSync(viz)) fs.unlinkSync(viz); } catch {}
   }
 
   // ── Private: Snapshot Persistence ──
 
-  /** Derive a workspace-specific snapshot filename from the workspace path. */
+  /**
+   * Compact Edge List (CEL) / Knowledge Graph format.
+   * One relative path per line for files; full .kg graph for the snapshot.
+   */
   private getSnapshotPath(): string {
     const dir = path.resolve(os.homedir(), ".harness");
     const hash = crypto.createHash("md5").update(this.workspacePath).digest("hex").slice(0, 12);
-    return path.join(dir, `file-tree-snapshot-${hash}.json`);
+    return path.join(dir, `file-tree-snapshot-${hash}.kg`);
+  }
+
+  /** Human-readable visualization sidecar for verification. */
+  private getVizPath(): string {
+    return this.getSnapshotPath().replace(/\.kg$/, ".txt");
   }
 
   private loadSnapshot(): void {
@@ -535,8 +652,48 @@ export class FileTrackingService {
       const fp = this.getSnapshotPath();
       if (!fs.existsSync(fp)) return;
       const raw = fs.readFileSync(fp, "utf-8");
-      const arr: string[] = JSON.parse(raw);
-      this.lastSentSnapshot = new Set(arr);
+      const lines = raw.trim().split(/\r?\n/).filter((l) => l && !l.startsWith("#"));
+      const absPrefix = this.workspacePath.replace(/\\/g, "/") + "/";
+
+      // Parse .kg node lines: n<id>|<type>|<parentId>||<name>|<ext>
+      // Reconstruct absolute paths from the tree structure
+      const nodeMap = new Map<string, { name: string; parentId: string; type: string }>();
+      for (const line of lines) {
+        if (!line.startsWith("n")) continue;
+        const parts = line.split("|");
+        if (parts.length < 5) continue;
+        nodeMap.set("n" + parts[0].slice(1), {
+          type: parts[1],
+          parentId: "n" + (parts[2] || ""),
+          name: parts[4],
+        });
+      }
+
+      // Build paths by walking up the tree
+      const pathCache = new Map<string, string>();
+      const resolvePath = (id: string): string => {
+        if (pathCache.has(id)) return pathCache.get(id)!;
+        const node = nodeMap.get(id);
+        if (!node) return "";
+        if (!node.parentId || node.parentId === "n") {
+          // Root node — use workspace path
+          const p = absPrefix.slice(0, -1); // remove trailing /
+          pathCache.set(id, p);
+          return p;
+        }
+        const parentPath = resolvePath(node.parentId);
+        const p = parentPath + "/" + node.name;
+        pathCache.set(id, p);
+        return p;
+      };
+
+      const fileSet = new Set<string>();
+      for (const [id, node] of nodeMap) {
+        if (node.type === "file") {
+          fileSet.add(resolvePath(id));
+        }
+      }
+      this.lastSentSnapshot = fileSet;
     } catch {
       this.lastSentSnapshot = null;
     }
@@ -544,9 +701,25 @@ export class FileTrackingService {
 
   private saveSnapshot(): void {
     try {
-      const fp = this.getSnapshotPath();
-      const arr = this.lastSentSnapshot ? [...this.lastSentSnapshot] : [];
-      fs.writeFileSync(fp, JSON.stringify(arr), "utf-8");
+      // Build full knowledge graph (nodes + CONTAINS edges + parsed IMPORTS)
+      const graph = buildKnowledgeGraph(this.workspacePath);
+
+      // .kg file: serialized knowledge graph
+      const kgPath = this.getSnapshotPath();
+      fs.writeFileSync(kgPath, serializeGraph(graph), "utf-8");
+
+      // .txt file: human-readable nested tree with import annotations
+      fs.writeFileSync(this.getVizPath(), visualizeGraph(graph), "utf-8");
+
+      // Also cache flat file paths for fast diff computation
+      const root = this.workspacePath.replace(/\\/g, "/") + "/";
+      const filePaths: string[] = [];
+      for (const node of graph.nodes.values()) {
+        if (node.type === "file") {
+          filePaths.push(node.absPath);
+        }
+      }
+      this.lastSentSnapshot = new Set(filePaths);
     } catch { /* non-fatal */ }
   }
 
@@ -581,48 +754,44 @@ export class FileTrackingService {
 
   private formatFullTree(files: string[]): string {
     if (files.length === 0) return "### Project File Tree (full)\n(empty project)";
+
+    const rootName = path.basename(this.workspacePath) || this.workspacePath;
     const root = this.workspacePath.replace(/\\/g, "/");
     const relFiles = files.map((f) => f.replace(/\\/g, "/").replace(root + "/", ""));
-    const dirs = new Set<string>();
-    const treeLines: string[] = [];
+    const tree = buildFileTree(relFiles);
 
-    // Build a compact tree structure
-    for (const rf of relFiles) {
-      const parts = rf.split("/");
-      // Register all parent directories
-      for (let i = 0; i < parts.length - 1; i++) {
-        dirs.add(parts.slice(0, i + 1).join("/") + "/");
-      }
-      treeLines.push(rf);
-    }
+    const body = formatTreeNode(tree, 0, 200);
+    const total = countNodes(tree);
 
-    const allSorted = [...dirs].sort().concat(treeLines.sort());
-    const body = allSorted
-      .map((l) => (l.endsWith("/") ? `  ${l}` : `  ${l}`))
-      .join("\n");
+    let header = `### Project File Tree (full`;
+    if (total > 200) header += ` — ${total} entries, showing first 200`;
+    header += `)`;
 
-    const truncated = allSorted.length > 200
-      ? body.split("\n").slice(0, 200).join("\n") + `\n  ... and ${allSorted.length - 200} more entries`
-      : body;
-
-    return `### Project File Tree (full — ${files.length} files)\n${truncated}`;
+    return `${header}\n${rootName} ${body}`;
   }
 
   private formatPatch(added: string[], deleted: string[]): string {
     const root = this.workspacePath.replace(/\\/g, "/");
     const rel = (p: string) => p.replace(/\\/g, "/").replace(root + "/", "");
+
     const lines: string[] = [];
     lines.push(`### File Tree Changes (patch)`);
+
     if (added.length > 0) {
-      lines.push(`Added (${added.length}):`);
-      for (const f of added.slice(0, 50)) lines.push(`  + ${rel(f)}`);
-      if (added.length > 50) lines.push(`  ... and ${added.length - 50} more`);
+      const addedTree = buildFileTree(added.map(rel));
+      const addedBody = formatPatchTree(addedTree, 0, 50, "+");
+      const shown = Math.min(added.length, 50);
+      lines.push(`Added (${shown}${added.length > 50 ? ` of ${added.length}` : ""}):`);
+      lines.push(addedBody);
     }
+
     if (deleted.length > 0) {
-      lines.push(`Deleted (${deleted.length}):`);
-      for (const f of deleted.slice(0, 50)) lines.push(`  - ${rel(f)}`);
-      if (deleted.length > 50) lines.push(`  ... and ${deleted.length - 50} more`);
+      lines.push(`Deleted (${Math.min(deleted.length, 50)}${deleted.length > 50 ? ` of ${deleted.length}` : ""}):`);
+      const delTree = buildFileTree(deleted.map(rel));
+      const delBody = formatPatchTree(delTree, 0, 50, "-");
+      lines.push(delBody);
     }
+
     return lines.join("\n");
   }
 

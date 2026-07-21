@@ -2127,8 +2127,10 @@ if (process.env.NODE_ENV !== "test") {
 }
 
 process.on("SIGINT", async () => {
+  try { fs.unlinkSync(path.join(os.homedir(), ".harness", "express-port")); } catch {}
   process.exit();
 });
 process.on("SIGTERM", async () => {
+  try { fs.unlinkSync(path.join(os.homedir(), ".harness", "express-port")); } catch {}
   process.exit();
 });

@@ -17,6 +17,7 @@ AI-powered coding agent using DeepSeek.
 - [Language Support (LSP)](#language-support-lsp)
 - [File Management](#file-management)
 - [Smart File Tracking](#smart-file-tracking)
+- [Knowledge Graph](#knowledge-graph)
 - [Security](#security)
 - [Agent Tools](#agent-tools-deepseek-powered)
   - [Filesystem](#filesystem)
@@ -67,11 +68,13 @@ This starts both the backend and frontend. The OS assigns both ports; check cons
 **Port discovery flow:**
 
 1. Express starts → `server.listen(0)` → OS assigns a free port → port written to `~/.harness/express-port`
-2. Vite starts → polls `~/.harness/express-port` every 200 ms until found → configures proxy to that port
+2. Vite starts → polls `~/.harness/express-port` every 200 ms → pings `GET /api/health` to verify the port is live (not a stale file from a previous crash) → configures proxy to that port
 3. Vite then binds → `port: 0` → OS assigns a free port → port written to `~/.harness/vite-port`
 4. Electron (desktop mode) reads both files to connect to Express and load the Vite dev page
 
 Both servers let the OS decide — no hardcoded port numbers anywhere.
+
+**Stale port cleanup:** On shutdown (Ctrl+C, SIGTERM), Express deletes `~/.harness/express-port`. If Express crashes unexpectedly and the file lingers, Vite's health check (step 2) detects the dead port, removes the stale file, and keeps polling until a live server appears.
 
 ## Architecture
 
@@ -506,7 +509,8 @@ When the agent runs, Harness sends the project file tree as part of the system p
 ```
 ┌─ Folder open ───────────────────────────────────────────────────────┐
 │  → buildSnapshot() walks entire project (skips node_modules/.git)   │
-│  → Snapshot saved to ~/.harness/file-tree-snapshot-<hash>.json       │
+│  → Knowledge graph built (~/.harness/file-tree-snapshot-<hash>.kg) │
+│  → Visualization written to ~/.harness/file-tree-snapshot-<hash>.txt │
 │  → Status bar: spinner + "Scanning..." during the walk              │
 └────────────────────────────────────────────────────────────────────┘
                               │
@@ -551,8 +555,112 @@ When the agent runs, Harness sends the project file tree as part of the system p
 |------|------|
 | `server/fileTracking.ts` | `FileTrackingService` — singleton orchestrating Git or watcher mode, periodic Git detection, snapshot/patch logic |
 | `server/fileTrackingStore.ts` | `FileTrackingStore` — lightweight JSON-backed cache (`~/.harness/file-tracking.json`) for file metadata |
+| `server/knowledgeGraph.ts` | `buildKnowledgeGraph()` — builds codebase graph with CONTAINS + IMPORTS edges, `.kg` serialization, `.txt` visualization |
 | `~/.harness/file-tracking.json` | On-disk metadata cache for watcher mode |
-| `~/.harness/file-tree-snapshot-<hash>.json` | Per-workspace file tree snapshot for patch-based agent context (hash derived from workspace path) |
+| `~/.harness/file-tree-snapshot-<hash>.kg` | Per-workspace Knowledge Graph — nodes (dirs/files) + CONTAINS edges + parsed IMPORTS |
+| `~/.harness/file-tree-snapshot-<hash>.txt` | Human-readable visualization sidecar (nested tree with import annotations) |
+
+## Knowledge Graph
+
+Harness builds a **codebase knowledge graph** on folder open — a structured representation of every file, directory, exported symbol, and their relationships. This feeds the agent's system prompt as a compact nested tree and persists to disk as a `.kg` file for graph-based queries.
+
+### Schema
+
+The graph has three node types and four edge types:
+
+| Node Type | Field | Description |
+|-----------|-------|-------------|
+| `dir` | `name` | Directory |
+| `file` | `name`, `kind` (extension) | Source file, config, doc |
+| `symbol` | `name`, `kind` | Exported function, class, const, type, interface, enum, or default export |
+
+| Edge Type | From → To | Description |
+|-----------|-----------|-------------|
+| `CONTAINS` | dir → file \| dir | Structural: parent directory contains child |
+| `EXPORTS` | file → symbol | A file exports a named symbol |
+| `IMPORTS` | file → file | File-level import (e.g. `import './utils'`) |
+| `IMPORTS_SYMBOL` | file → symbol | Precise symbol-level import (e.g. `import { foo } from './utils'`) |
+
+### Symbol Parsing
+
+For TypeScript/JavaScript files (`.ts`, `.tsx`, `.mts`, `.cts`), the TypeScript compiler API parses the AST to extract exports:
+
+| Kind | Detected from |
+|------|---------------|
+| `function` | `export function foo()` |
+| `class` | `export class Foo {}` |
+| `const` | `export const x = ...`, `export { x }` |
+| `type` | `export type T = ...` |
+| `interface` | `export interface I {}` |
+| `enum` | `export enum E {}` |
+| `default` | `export default function/class/expr` |
+
+Named imports (`import { foo, bar } from './module'`) are matched to target file exports to create precise `IMPORTS_SYMBOL` edges — so the graph knows exactly *which symbol* depends on *which symbol*, not just which files.
+
+### .kg Format (on disk)
+
+A compact edge-list format in `~/.harness/file-tree-snapshot-<hash>.kg`:
+
+```
+# Knowledge Graph v2 — D:\Work Projects\Harness
+# Nodes: 384  Edges: 512
+# Format: n<id>|<type>|<parentId>||<name>|<kind>
+#   type: dir|file|symbol
+
+n0|dir|||Harness|
+n1|file|n0||README.md|md
+n2|dir|n0||server|
+n3|file|n2||index.ts|ts
+n4|symbol|n3||app|const
+n5|file|n2||fileTracking.ts|ts
+n6|symbol|n5||getFileTrackingService|function
+n7|symbol|n5||FileTrackingService|class
+
+e0|n0|n1|CONTAINS
+e47|n5|n6|EXPORTS
+e72|n3|n6|IMPORTS_SYMBOL
+```
+
+Each line is self-contained — parse with `split("|")`, reconstruct paths by walking parent chains. No JSON overhead, trivially diffable with line-based tools.
+
+### .txt Visualization (human-readable)
+
+A nested tree with export/import annotations, written alongside the `.kg` file:
+
+```
+Harness {
+  server {
+    index.ts  (exports: app:const; → getFileTrackingService, FileTrackingService)
+    fileTracking.ts  (exports: getFileTrackingService:function, FileTrackingService:class, ...)
+    knowledgeGraph.ts  (exports: buildKnowledgeGraph:function, KnowledgeGraph:interface, ...)
+  }
+  client {
+    src {
+      App.tsx  (→ EditorPane)
+      panes {
+        EditorPane.tsx  (exports: EditorPaneHandle:interface; → FilesPanel, fileModel)
+      }
+    }
+  }
+}
+# 124 exports
+# 47 file-level imports
+# 89 symbol-level imports
+```
+
+### Filtering
+
+The graph excludes secrets (`.env`), VCS internals (`.git/`), dependencies (`node_modules/`, `vendor/`), build output (`dist/`, `.next/`), IDE caches, binary/media files, and lock files. Project config dotfiles (`.eslintrc.js`, `.prettierrc`, `.editorconfig`) and dot-directories (`.github/`, `.husky/`, `.storybook/`, `.vscode/`) are included.
+
+### Groundwork for Graph-Based Reasoning
+
+The knowledge graph is designed as input for graph machine learning and path prediction:
+
+- **One-hop queries**: "What file exports `getFileTrackingService`?" — follow `EXPORTS` backward.
+- **Call graph traversal**: `IMPORTS_SYMBOL` edges form a precise dependency graph — follow them to understand data flow.
+- **PageRank**: Files imported by many others have higher centrality — identifies core modules.
+- **Markov chain path prediction**: Transition probabilities over `IMPORTS_SYMBOL` edges answer "if you just edited symbol X, what file is most likely to need changes next?"
+- **GNN input**: Nodes carry features `(type, kind, name)` and edges carry `(type)`. An adjacency matrix can be built directly from the `.kg` file for training graph neural networks on codebase structure.
 
 ## Security
 
@@ -1343,6 +1451,7 @@ Harness/
 │   │                                  # API keys also stored under ~/.harness/api-keys.json (persistent, survives restarts/updates)
 │   ├── fileTracking.ts              # Smart file tracking service: auto-detects Git vs fs.watch watcher mode, mid-session Git detection, snapshot/patch file tree context
 │   ├── fileTrackingStore.ts         # JSON-backed file metadata cache (~/.harness/file-tracking.json) for watcher mode
+│   ├── knowledgeGraph.ts            # Codebase knowledge graph builder: dir/file nodes, CONTAINS + IMPORTS edges, .kg serialization, visualization
 │   └── __tests__/                   # 5 test files: tool definitions, filesystem ops, command execution, agent loop, API integration
 │
 ├── client/
