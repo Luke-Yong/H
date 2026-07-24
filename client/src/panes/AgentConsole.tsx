@@ -347,7 +347,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
 
   // Save/update a preset — dedup by model id
   const saveAsPreset = useCallback(() => {
-    const model = editModelInput.trim() || "deepseek-chat";
+    const model = editModelInput.trim();
     // Remove any existing preset with the same model id
     const filtered = presets.filter((p) => p.model !== model);
     if (activePreset) {
@@ -365,7 +365,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
   }, [activePreset, isThinking, editModelInput, presets]);
 
   const savePresetAsNew = useCallback(() => {
-    const model = editModelInput.trim() || "deepseek-chat";
+    const model = editModelInput.trim();
     const filtered = presets.filter((p) => p.model !== model);
     const p: ModelPreset = { id: `pr-${Date.now()}`, model, thinking: isThinking };
     const next = [...filtered, p];
@@ -401,7 +401,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
   }, []);
 
   const saveModelAndClose = useCallback(() => {
-    const id = editModelInput.trim() || "deepseek-chat";
+    const id = editModelInput.trim();
     setSelectedModel(id);
     localStorage.setItem("harness-model", id);
     setModelPickerOpen(false);
@@ -1785,7 +1785,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
           sessionId: sid,
           toolCallId: tcid,
           toolResult: accepted ? "OK" : "rejected",
-          model: selectedModel || "deepseek-chat",
+          model: selectedModel,
           thinking: isThinking,
           consoleContext: getConsoleContext?.() || "",
         });
@@ -1872,7 +1872,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
                 toolCallId: toolCallId || sid,
                 permissionGranted: granted,
                 toolResult: termResult ?? undefined,
-                model: selectedModel || "deepseek-chat",
+                model: selectedModel,
                 thinking: isThinking,
                 consoleContext: getConsoleContext?.() || "",
               });
@@ -1975,7 +1975,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
             sessionId, toolCallId,
             permissionGranted: granted,
             toolResult: termResult ?? undefined,
-            model: selectedModel || "deepseek-chat", thinking: isThinking,
+            model: selectedModel, thinking: isThinking,
             consoleContext: getConsoleContext?.() || "",
           });
         }
@@ -2003,7 +2003,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
           });
         }
         if (!signal.aborted) {
-          await continueStreaming({ sessionId, toolCallId, toolResult, model: selectedModel || "deepseek-chat", thinking: isThinking, consoleContext: getConsoleContext?.() || "" });
+          await continueStreaming({ sessionId, toolCallId, toolResult, model: selectedModel, thinking: isThinking, consoleContext: getConsoleContext?.() || "" });
         } else {
           agentDoneRef.current = true;
         }
@@ -3419,8 +3419,10 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
         {/* ── Model selector ── */}
         <div className="agent-model-bar">
           <div className="agent-model-selector" ref={modelPickerRef}>
-            <button className="agent-model-btn" onClick={() => { setModelPickerOpen((v) => { if (!v) { setEditingModel(false); setEditingApiKey(false); } return !v; }); void refreshAgentConfig(); }} title="Configure model">
-              {!apiKeyConfigured ? (
+            <button className="agent-model-btn" onClick={() => { if (!apiKeyConfigured) return; setModelPickerOpen((v) => { if (!v) { setEditingModel(false); setEditingApiKey(false); } return !v; }); void refreshAgentConfig(); }} title={apiKeyConfigured ? "Configure model" : "Add an API key to start chatting"}>
+              {!configChecked ? (
+                <span style={{color: "#888"}}>Checking...</span>
+              ) : !apiKeyConfigured ? (
                 <>
                   <i className="codicon codicon-warning" style={{color: "#d29922"}} />
                   <span style={{color: "#d29922"}}>Add API Key</span>
@@ -3428,13 +3430,13 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
               ) : (
                 <>
                   <i className="codicon codicon-symbol-method" />
-                  <span>{selectedModel || "deepseek-chat"}</span>
+                  <span>{selectedModel || <span style={{color: "#888", fontStyle: "italic"}}>Select model...</span>}</span>
                   <span className="agent-model-mode-badge">{isThinking ? "Thinking" : "Chat"}</span>
                 </>
               )}
               <i className={`codicon codicon-chevron-${modelPickerOpen ? "down" : "up"}`} />
             </button>
-            {modelPickerOpen && (
+            {modelPickerOpen && apiKeyConfigured && (
               <div className="agent-model-popup">
                 <div className="agent-model-popup-title">Saved Configurations</div>
                 {/* Preset list */}
@@ -3474,10 +3476,13 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
                       <input
                         className="agent-model-apikey-input"
                         type="text"
-                        placeholder="deepseek-chat"
+                        placeholder="Enter model name..."
                         value={editModelInput}
                         onChange={(e) => { setEditModelInput(e.target.value); }}
                       />
+                      {apiKeyConfigured && !editModelInput.trim() && (
+                        <div className="agent-mention-hint">Enter a model name to save this configuration.</div>
+                      )}
                     </div>
                     {/* Thinking / Non-thinking toggle */}
                     <button className="agent-model-item" onClick={toggleThinking}>
@@ -3530,11 +3535,11 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
                     <div className="agent-model-popup-divider" />
                     {/* Save / Clear buttons */}
                     <div className="agent-model-preset-save-row">
-                      <button className="agent-model-apikey-save" onClick={saveAsPreset} style={{background: "#4ec94e"}}>
+                      <button className="agent-model-apikey-save" onClick={saveAsPreset} disabled={!editModelInput.trim()} style={{background: "#4ec94e"}}>
                         <i className="codicon codicon-save" /> {activePreset ? "Update" : "Save"}
                       </button>
                       {activePreset && (
-                        <button className="agent-model-apikey-save" onClick={savePresetAsNew}>
+                        <button className="agent-model-apikey-save" onClick={savePresetAsNew} disabled={!editModelInput.trim()}>
                           <i className="codicon codicon-diff-added" /> Save as New
                         </button>
                       )}

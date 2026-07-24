@@ -34,7 +34,6 @@ export async function generateEmbedding(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "deepseek-chat",
         input: text,
       }),
     });
@@ -197,7 +196,6 @@ export async function chatDeepSeek(
   apiKey: string,
 ): Promise<string> {
   const res = await deepseekFetch(apiKey, {
-    model: "deepseek-chat",
     messages: [
       {
         role: "system",
@@ -253,7 +251,7 @@ export async function chatDeepSeekTool(
   logOutgoing("tool", messages as any[], cacheCtx);
 
   const res = await deepseekFetch(opts?.apiKey || "", {
-    model: opts?.model || "deepseek-chat",
+    model: opts?.model || "",
     messages: messages,
     tools: tools.map((t) => ({
       type: "function",
@@ -267,7 +265,7 @@ export async function chatDeepSeekTool(
   const data: any = await res.json();
   const choice = data.choices?.[0]?.message;
   const usage = normalizeUsage(data.usage);
-  logApiUsage("block", String(opts?.model || "deepseek-chat"), usage, cacheCtx);
+  logApiUsage("block", String(opts?.model || ""), usage, cacheCtx);
   return {
     text: choice?.content || null,
     reasoningContent: choice?.reasoning_content || null,
@@ -357,7 +355,7 @@ export async function* chatDeepSeekToolStream(
   logOutgoing("stream", messages as any[], cacheCtx);
 
   const res = await deepseekFetch(opts.apiKey, {
-    model: opts.model || "deepseek-chat",
+    model: opts.model || "",
     messages,
     tools: tools.map((t) => ({
       type: "function",
@@ -432,5 +430,5 @@ export async function* chatDeepSeekToolStream(
     usage: finalUsage,
     toolCalls: finalToolCalls,
   };
-  logApiUsage("stream", String(opts.model || "deepseek-chat"), finalUsage, cacheCtx);
+  logApiUsage("stream", String(opts.model || ""), finalUsage, cacheCtx);
 }

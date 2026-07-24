@@ -52,7 +52,7 @@ describe("API Endpoints", () => {
 
       const res = await agent
         .post("/api/chat/agent")
-        .send({ message: "Hi" });
+        .send({ message: "Hi", model: "test-model" });
       expect(res.status).toBe(200);
       expect(res.body.phase).toBe("done");
       expect(res.body.reply).toBe("Hello from agent!");
@@ -103,7 +103,7 @@ describe("API Endpoints", () => {
 
       const res = await agent
         .post("/api/chat/agent/stream")
-        .send({ message: "Hi" })
+        .send({ message: "Hi", model: "test-model" })
         .buffer(true)
         .parse((res, cb) => {
           let data = "";

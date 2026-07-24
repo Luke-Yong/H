@@ -257,8 +257,8 @@ app.post("/api/chat/agent/continue", async (req, res) => {
 
 app.post("/api/chat/agent/stream", async (req, res) => {
   const { message, context, projectRoot, model, thinking, sessionId: clientSessionId } = req.body || {};
-  const effectiveModel = model || "deepseek-chat";
   if (!message) return res.status(400).json({ error: "Missing message" });
+  if (!model) return res.status(400).json({ error: "Missing model. Select a model in the client." });
   const { apiKey } = getEffectiveApiKey(req);
   if (!apiKey) return res.status(400).json({ error: "No API key configured. Add one in the client." });
 
@@ -283,7 +283,7 @@ app.post("/api/chat/agent/stream", async (req, res) => {
       res.write(`data: ${data}\n\n`);
     };
 
-    const modelOpts = { model: effectiveModel, apiKey };
+    const modelOpts = { model, apiKey };
     for await (const event of agentLoopStream(root, state, context || "", sessionId, modelOpts)) {
       sendEvent(event);
       if (event.type === "browser_tool" || event.type === "permission_required" || event.type === "done" || event.type === "error") break;
@@ -306,8 +306,8 @@ app.post("/api/chat/agent/stream", async (req, res) => {
 
 app.post("/api/chat/agent/stream/stepbystep", async (req, res) => {
   const { message, context, projectRoot, model, sessionId: clientSessionId } = req.body || {};
-  const effectiveModel = model || "deepseek-chat";
   if (!message) return res.status(400).json({ error: "Missing message" });
+  if (!model) return res.status(400).json({ error: "Missing model. Select a model in the client." });
   const { apiKey } = getEffectiveApiKey(req);
   if (!apiKey) return res.status(400).json({ error: "No API key configured. Add one in the client." });
 
@@ -332,7 +332,7 @@ app.post("/api/chat/agent/stream/stepbystep", async (req, res) => {
       res.write(`data: ${data}\n\n`);
     };
 
-    const modelOpts = { model: effectiveModel, apiKey };
+    const modelOpts = { model, apiKey };
     for await (const event of agentLoopStepByStep(root, state, context || "", sessionId, modelOpts)) {
       sendEvent(event);
       if (event.type === "done" || event.type === "error") break;
@@ -351,7 +351,6 @@ app.post("/api/chat/agent/stream/stepbystep", async (req, res) => {
 
 app.post("/api/chat/agent/stream/continue", async (req, res) => {
   const { sessionId, toolCallId, toolResult, permissionGranted, model, thinking, consoleContext } = req.body || {};
-  const effectiveModel = model || "deepseek-chat";
   if (!sessionId || !toolCallId) {
     return res.status(400).json({ error: "Missing sessionId or toolCallId" });
   }
@@ -376,7 +375,7 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
       state.pendingSubAgent = undefined;
       const subResult = await resumeSubAgent(
         psa.subState, psa.config, toolCallId, String(toolResult),
-        { model: effectiveModel, apiKey },
+        { model, apiKey },
       );
       if (subResult.phase === "browser_tool") {
         state.pendingSubAgent = { ...psa, subState: subResult.subState };
@@ -429,7 +428,7 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
         })),
       } as AgentSseEvent);
       const continueContext = typeof consoleContext === "string" ? consoleContext : "";
-      for await (const event of agentLoopStream(state.projectRoot, state, continueContext, sessionId, { model: effectiveModel, apiKey })) {
+      for await (const event of agentLoopStream(state.projectRoot, state, continueContext, sessionId, { model, apiKey })) {
         sendEvent(event);
         if (event.type === "browser_tool" || event.type === "done" || event.type === "error") break;
       }
@@ -521,7 +520,7 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
     }
 
     const continueContext = typeof consoleContext === "string" ? consoleContext : "";
-    for await (const event of agentLoopStream(state.projectRoot, state, continueContext, sessionId, { model: effectiveModel, apiKey })) {
+    for await (const event of agentLoopStream(state.projectRoot, state, continueContext, sessionId, { model, apiKey })) {
       sendEvent(event);
       if (event.type === "browser_tool" || event.type === "done" || event.type === "error") break;
     }
@@ -580,7 +579,6 @@ app.get("/api/chat/agent/config", (req, res) => {
   res.json({
     apiKeyConfigured: Boolean(apiKey),
     source,
-    modelDefault: "deepseek-chat",
   });
 });
 
