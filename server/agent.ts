@@ -3600,7 +3600,7 @@ export async function* agentLoopStream(
       // ── Read-only + auto-execute filesystem tools (no Accept/Reject prompt) ──
       const isFsTool = [
         "read_file", "list_files", "search_files", "grep", "create_directory", "write_todos", "read_command_output",
-        "write_file", "delete_file", "rename_file",
+        "write_file", "delete_file", "rename_file", "read_graph",
       ].includes(fnName);
 
       if (isFsTool) {
