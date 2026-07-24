@@ -55,6 +55,8 @@ Harness uses a **client-entered API key** model. Enter your DeepSeek API key onc
 
 The key is sent once to the server and stored persistently on disk (`~/.harness/api-keys.json`) — it is never persisted in browser `localStorage`, survives app restarts and updates, and is never re-sent in agent request bodies. The key remains stored until explicitly removed via "Remove API Key" in the UI or the `~/.harness/` directory is deleted.
 
+All client-side state (selected model, chat history, recent folder paths, open editor tabs, model presets, terminal history) is stored in browser `localStorage` and **mirrored to `~/.harness/client-state.json`** on every change and on app exit. This ensures data survives reinstalls, since `%USERPROFILE%\.harness\` is outside the Electron installer's scope. On startup, the client fetches `GET /api/client/state` and restores any previously saved state.
+
 Get a key at [platform.deepseek.com](https://platform.deepseek.com).
 
 ## Start
@@ -1140,6 +1142,7 @@ Next session:
 |--------|-------|
 | Database | SQLite (WAL mode) at `~/.harness/memory.db` (global, not in project dir) |
 | API Keys | JSON file at `~/.harness/api-keys.json` (persistent, survives restarts and app updates) |
+| Client State | JSON file at `~/.harness/client-state.json` — mirrors all browser `localStorage` data (model, chat history, recent paths, open tabs, presets, terminal history) so it survives reinstalls |
 | Schema | `id`, `key` (unique), `value`, `category`, `tags`, `embedding` (BLOB), `created_at`, `updated_at` |
 | Embeddings | Generated via DeepSeek `/v1/embeddings` endpoint (optional; graceful fallback to keyword search if unavailable) |
 | Retrieval | Embedding cosine similarity search → keyword `LIKE` fallback → list-all |
@@ -1567,6 +1570,7 @@ Harness/
 │   ├── mcp-server.ts                # Standalone MCP server entry point (stdio mode)
 │   ├── memory.ts                    # SQLite persistent memory store (~/.harness/memory.db): keyword + embedding search, used by agent remember/recall/forget tools
 │   │                                  # API keys also stored under ~/.harness/api-keys.json (persistent, survives restarts/updates)
+│   │                                  # Client state mirrored to ~/.harness/client-state.json (survives reinstalls)
 │   ├── fileTracking.ts              # Smart file tracking service: auto-detects Git vs fs.watch watcher mode, mid-session Git detection, snapshot/patch file tree context
 │   ├── fileTrackingStore.ts         # JSON-backed file metadata cache (~/.harness/file-tracking.json) for watcher mode
 │   ├── knowledgeGraph.ts            # Codebase knowledge graph builder: dir/file nodes, CONTAINS + IMPORTS edges, .kg serialization, visualization
@@ -1582,6 +1586,7 @@ Harness/
 │       ├── App.tsx                  # Root component: folder picker, session state, resizable layout (editor + agent console)
 │       ├── App.css                  # Global dark-theme styles: pane layout, editor chrome, agent cards, welcome screen
 │       ├── electron.d.ts            # Type declarations for window.harnessDesktop bridge and <webview> JSX
+│       ├── stateSync.ts             # Client state persistence: mirrors all localStorage to ~/.harness/client-state.json (survives reinstalls)
 │       ├── panes/
 │       │   ├── EditorPane.tsx       # Main editor: Monaco tabs, file tree, browser tab strip, terminal, menu bar, status bar
 │       │   ├── AgentConsole.tsx     # Agent chat UI: streaming messages, diff previews, permission prompts, tool cards, markdown rendering

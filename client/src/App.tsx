@@ -10,6 +10,7 @@ import type { DebugConsoleEntry, OutputEntry } from "./panes/TerminalPane";
 import { pickAndEnumerateFolder, pickAndReadFile, enumerateHandle } from "./panes/browserFs";
 import NameDialog from "./panes/NameDialog";
 import { createAgentTerminalBridge, type AgentTerminalBridge, type AgentTerminalBridgeInternal } from "./panes/AgentTerminalBridge";
+import { loadPersistedState, startAutoSave, triggerSave } from "./stateSync";
 
 interface BrowserTab {
   id: string;
@@ -63,6 +64,7 @@ export default function App() {
       try { localStorage.setItem(RECENT_PATHS_KEY, JSON.stringify(next)); } catch {}
       return next;
     });
+    triggerSave();
   }, []);
 
   const removeRecentPath = useCallback((p: string) => {
@@ -71,6 +73,7 @@ export default function App() {
       try { localStorage.setItem(RECENT_PATHS_KEY, JSON.stringify(next)); } catch {}
       return next;
     });
+    triggerSave();
   }, []);
 
   const checkPathExists = useCallback(async (p: string): Promise<boolean> => {
@@ -99,8 +102,27 @@ export default function App() {
     }
   }, [recentPaths, checkPathExists]);
 
-  // Validate that recent paths still exist on mount
-  useEffect(() => { validateRecentPaths(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  // Restore client state from ~/.harness/client-state.json (survives reinstalls)
+  const [stateRestored, setStateRestored] = useState(false);
+  useEffect(() => {
+    loadPersistedState().then(() => {
+      // Force re-read localStorage (may have been populated by server restore)
+      try {
+        const raw = localStorage.getItem(RECENT_PATHS_KEY);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) setRecentPaths(parsed.filter((p) => typeof p === "string").slice(0, 5));
+        }
+      } catch {}
+      setStateRestored(true);
+    });
+    return startAutoSave();
+  }, []);
+
+  // Validate that recent paths still exist on mount (after state restore)
+  useEffect(() => {
+    if (stateRestored) validateRecentPaths();
+  }, [stateRestored]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Validate recent paths when window regains focus
   useEffect(() => {
@@ -143,6 +165,7 @@ export default function App() {
       }
       localStorage.setItem(TAB_STORAGE_KEY, JSON.stringify(stored));
     } catch {}
+    triggerSave();
   }, [fsBasePath]);
 
   // Keep a ref to the latest saveOpenTabs so beforeunload never goes stale
@@ -842,6 +865,7 @@ export default function App() {
         {showConsole && (
         <div className="pane pane-console" style={{ width: consoleW, minWidth: consoleW }}>
           <AgentConsole
+            key={stateRestored ? "loaded" : "loading"}
             goal={goal}
             onGoalChange={setGoal}
             getConsoleContext={() => editorRef.current?.getConsoleContext() || ""}

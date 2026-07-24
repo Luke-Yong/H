@@ -582,6 +582,34 @@ app.get("/api/chat/agent/config", (req, res) => {
   });
 });
 
+// ── Client state persistence (~/.harness/client-state.json) ──
+// Survives reinstalls because it's in the user's home directory.
+const CLIENT_STATE_FILE = path.join(os.homedir(), ".harness", "client-state.json");
+
+app.get("/api/client/state", (_req, res) => {
+  try {
+    if (fs.existsSync(CLIENT_STATE_FILE)) {
+      const raw = fs.readFileSync(CLIENT_STATE_FILE, "utf-8");
+      res.json(JSON.parse(raw));
+    } else {
+      res.json({});
+    }
+  } catch {
+    res.json({});
+  }
+});
+
+app.post("/api/client/state", (req, res) => {
+  try {
+    const dir = path.dirname(CLIENT_STATE_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(CLIENT_STATE_FILE, JSON.stringify(req.body || {}), "utf-8");
+    res.json({ ok: true });
+  } catch {
+    res.status(500).json({ error: "Failed to save client state" });
+  }
+});
+
 // ── Clear agent session by thread ID ──
 app.delete("/api/chat/agent/sessions/:threadId", (req, res) => {
   try {
