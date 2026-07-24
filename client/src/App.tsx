@@ -76,6 +76,8 @@ export default function App() {
   const checkPathExists = useCallback(async (p: string): Promise<boolean> => {
     try {
       const res = await fetch(`/api/fs/list?path=${encodeURIComponent(p)}`);
+      // 502/503 = Express not ready — keep the path, retry later
+      if (res.status === 502 || res.status === 503) return true;
       if (!res.ok) return false;
       const data = await res.json();
       return !data.error;
@@ -143,6 +145,17 @@ export default function App() {
     } catch {}
   }, [fsBasePath]);
 
+  // Keep a ref to the latest saveOpenTabs so beforeunload never goes stale
+  const saveOpenTabsRef = useRef(saveOpenTabs);
+  saveOpenTabsRef.current = saveOpenTabs;
+
+  // Save open tabs on app exit — ref pattern avoids stale closure
+  useEffect(() => {
+    const handler = () => { saveOpenTabsRef.current(); };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, []);
+
   const restoreOpenTabs = useCallback((folderPath: string) => {
     try {
       const stored: Record<string, { paths: string[]; activePath: string | null }> = JSON.parse(localStorage.getItem(TAB_STORAGE_KEY) || "{}");
@@ -153,11 +166,22 @@ export default function App() {
           for (const p of entry.paths) {
             editorRef.current?.openFileByFsPath(p);
           }
-          // Focus the previously active tab
+          // Focus the previously active tab — poll until it appears in open files
           if (entry.activePath) {
-            setTimeout(() => {
-              editorRef.current?.openFileByFsPath(entry.activePath!);
-            }, 100);
+            const normActive = entry.activePath.replace(/\\/g, "/");
+            let attempts = 0;
+            const tryFocus = () => {
+              const openFiles = editorRef.current?.getFiles() || [];
+              const found = openFiles.some(
+                (f) => f._fsPath && f._fsPath.replace(/\\/g, "/") === normActive
+              );
+              if (found) {
+                editorRef.current?.openFileByFsPath(entry.activePath!);
+              } else if (++attempts < 30) {
+                setTimeout(tryFocus, 200);
+              }
+            };
+            setTimeout(tryFocus, 200);
           }
         }, 50);
       }
@@ -395,6 +419,7 @@ export default function App() {
     try {
       const res = await fetch(`/api/fs/list?path=${encodeURIComponent(folderPath)}`);
       const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `Server error (${res.status})`);
       if (data.error) throw new Error(data.error);
       setFsRoot(data.entries || []);
       setFsBasePath(data.path);

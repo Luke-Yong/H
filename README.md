@@ -68,13 +68,13 @@ This starts both the backend and frontend. The OS assigns both ports; check cons
 **Port discovery flow:**
 
 1. Express starts → `server.listen(0)` → OS assigns a free port → port written to `~/.harness/express-port`
-2. Vite starts → polls `~/.harness/express-port` every 200 ms → pings `GET /api/health` to verify the port is live (not a stale file from a previous crash) → configures proxy to that port
-3. Vite then binds → `port: 0` → OS assigns a free port → port written to `~/.harness/vite-port`
+2. Vite starts immediately (no blocking) → proxies `/api`, `/ws`, `/_browser` via middleware that reads `~/.harness/express-port` on each request → returns `503 Service Unavailable` until Express is live, then forwards normally
+3. Vite binds → `port: 0` → OS assigns a free port → port written to `~/.harness/vite-port`
 4. Electron (desktop mode) reads both files to connect to Express and load the Vite dev page
 
 Both servers let the OS decide — no hardcoded port numbers anywhere.
 
-**Stale port cleanup:** On shutdown (Ctrl+C, SIGTERM), Express deletes `~/.harness/express-port`. If Express crashes unexpectedly and the file lingers, Vite's health check (step 2) detects the dead port, removes the stale file, and keeps polling until a live server appears.
+**Stale port cleanup:** On shutdown (Ctrl+C, SIGTERM), Express deletes `~/.harness/express-port`. If Express crashes unexpectedly and the file lingers, the Vite proxy middleware detects the dead port (`ECONNREFUSED`), invalidates the cached port, and re-reads the file on the next request.
 
 ## Architecture
 
