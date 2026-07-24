@@ -78,6 +78,8 @@ Both servers let the OS decide — no hardcoded port numbers anywhere.
 
 **Stale port cleanup:** On shutdown (Ctrl+C, SIGTERM), Express deletes `~/.harness/express-port`. If Express crashes unexpectedly and the file lingers, the Vite proxy middleware detects the dead port (`ECONNREFUSED`), invalidates the cached port, and re-reads the file on the next request.
 
+**Single-instance lock:** The desktop app uses `app.requestSingleInstanceLock()` to prevent multiple instances from running simultaneously. If a second instance is launched, it quits immediately and the first instance opens a new window instead. This prevents port file trampling and shared-state (`~/.harness/` files) corruption that would occur if two Express servers competed for the same resources.
+
 ## Architecture
 
 Harness is a client-server application with an optional Electron desktop shell.

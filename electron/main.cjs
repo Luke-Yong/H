@@ -646,6 +646,19 @@ async function createMainWindow() {
 // Must be set before app.whenReady() on Windows to apply the taskbar icon
 app.setAppUserModelId("com.harness.ide");
 
+// ── Single-instance lock ──
+// Prevents port file trampling and shared-state corruption when multiple
+// instances of the app are launched. The second instance quits immediately
+// and the first instance opens a new window instead.
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    createMainWindow();
+  });
+}
+
 app.whenReady().then(async () => {
   registerIpc();
   setupBrowserSession();
