@@ -53,9 +53,9 @@ Harness uses a **client-entered API key** model. Enter your DeepSeek API key onc
 2. Enter your API key (starts with `sk-...`)
 3. Click Save
 
-The key is sent once to the server and stored persistently on disk (`~/.harness/api-keys.json`) — it is never persisted in browser `localStorage`, survives app restarts and updates, and is never re-sent in agent request bodies. The key remains stored until explicitly removed via "Remove API Key" in the UI or the `~/.harness/` directory is deleted.
+The key is sent once to the server and stored persistently on disk (`~/.harness/store/api-keys.enc`, AES-256-GCM encrypted) — it is never persisted in browser `localStorage`, survives app restarts and updates, and is never re-sent in agent request bodies. The key remains stored until explicitly removed via "Remove API Key" in the UI or the `~/.harness/` directory is deleted.
 
-All client-side state (selected model, chat history, recent folder paths, open editor tabs, model presets, terminal history) is stored in browser `localStorage` and **mirrored to `~/.harness/client-state.json`** on every change and on app exit. This ensures data survives reinstalls, since `%USERPROFILE%\.harness\` is outside the Electron installer's scope. On startup, the client fetches `GET /api/client/state` and restores any previously saved state.
+All client-side state (selected model, chat history, recent folder paths, open editor tabs, model presets, terminal history) is stored in browser `localStorage` and **mirrored to `~/.harness/store/client-state.json`** on every change and on app exit. This ensures data survives reinstalls, since `%USERPROFILE%\.harness\` is outside the Electron installer's scope. On startup, the client fetches `GET /api/client/state` and restores any previously saved state.
 
 Get a key at [platform.deepseek.com](https://platform.deepseek.com).
 
@@ -69,14 +69,14 @@ This starts both the backend and frontend. The OS assigns both ports; check cons
 
 **Port discovery flow:**
 
-1. Express starts → `server.listen(0)` → OS assigns a free port → port written to `~/.harness/express-port`
-2. Vite starts immediately (no blocking) → proxies `/api`, `/ws`, `/_browser` via middleware that reads `~/.harness/express-port` on each request → returns `503 Service Unavailable` until Express is live, then forwards normally
-3. Vite binds → `port: 0` → OS assigns a free port → port written to `~/.harness/vite-port`
+1. Express starts → `server.listen(0)` → OS assigns a free port → port written to `~/.harness/ports/express-port`
+2. Vite starts immediately (no blocking) → proxies `/api`, `/ws`, `/_browser` via middleware that reads `~/.harness/ports/express-port` on each request → returns `503 Service Unavailable` until Express is live, then forwards normally
+3. Vite binds → `port: 0` → OS assigns a free port → port written to `~/.harness/ports/vite-port`
 4. Electron (desktop mode) reads both files to connect to Express and load the Vite dev page
 
 Both servers let the OS decide — no hardcoded port numbers anywhere.
 
-**Stale port cleanup:** On shutdown (Ctrl+C, SIGTERM), Express deletes `~/.harness/express-port`. If Express crashes unexpectedly and the file lingers, the Vite proxy middleware detects the dead port (`ECONNREFUSED`), invalidates the cached port, and re-reads the file on the next request.
+**Stale port cleanup:** On shutdown (Ctrl+C, SIGTERM), Express deletes `~/.harness/ports/express-port`. If Express crashes unexpectedly and the file lingers, the Vite proxy middleware detects the dead port (`ECONNREFUSED`), invalidates the cached port, and re-reads the file on the next request.
 
 **Single-instance lock:** The desktop app uses `app.requestSingleInstanceLock()` to prevent multiple instances from running simultaneously. If a second instance is launched, it quits immediately and the first instance opens a new window instead. This prevents port file trampling and shared-state (`~/.harness/` files) corruption that would occur if two Express servers competed for the same resources.
 
@@ -108,7 +108,7 @@ Harness is a client-server application with an optional Electron desktop shell.
 
 ### Server (`server/`)
 
-The Node.js Express server is the backbone. It owns all backend logic and never runs in the browser. The OS assigns a free port at startup, written to `~/.harness/express-port` for discovery.
+The Node.js Express server is the backbone. It owns all backend logic and never runs in the browser. The OS assigns a free port at startup, written to `~/.harness/ports/express-port` for discovery.
 
 | Layer | File | Role |
 |---|---|---|
@@ -470,7 +470,7 @@ Harness uses a dynamic file tracking system that auto-detects Git availability �
 │       │                                                            │
 │       └── No Git ──────► Watcher mode                              │
 │           Uses fs.watch (built-in Node API) to monitor changes     │
-│           Metadata cache stored in ~/.harness/file-tracking.json   │
+│           Metadata cache stored in ~/.harness/store/file-tracking.json   │
 │           No dependencies needed                                   │
 │                                                                    │
 │  → Status bar shows spinner + "Scanning..." during init            │
@@ -513,8 +513,8 @@ When the agent runs, Harness sends the project file tree as part of the system p
 ```
 ┌─ Folder open ───────────────────────────────────────────────────────┐
 │  → buildSnapshot() walks entire project (skips node_modules/.git)   │
-│  → Knowledge graph built (~/.harness/file-tree-snapshot-<hash>.kg) │
-│  → Visualization written to ~/.harness/file-tree-snapshot-<hash>.txt │
+│  → Knowledge graph built (~/.harness/snapshots/file-tree-snapshot-<hash>.kg) │
+│  → Visualization written to ~/.harness/snapshots/file-tree-snapshot-<hash>.txt │
 │  → Status bar: spinner + "Scanning..." during the walk              │
 └────────────────────────────────────────────────────────────────────┘
                               │
@@ -546,12 +546,12 @@ Each workspace gets a unique snapshot filename keyed by an MD5 hash of its resol
 
 ```
 d:\Work Projects\Harness   → MD5 → a1b2c3d4e5f6
-                             → ~/.harness/file-tree-snapshot-a1b2c3d4e5f6.kg
-                             → ~/.harness/file-tree-snapshot-a1b2c3d4e5f6.txt
+                             → ~/.harness/snapshots/file-tree-snapshot-a1b2c3d4e5f6.kg
+                             → ~/.harness/snapshots/file-tree-snapshot-a1b2c3d4e5f6.txt
 
 d:\Other Projects\app       → MD5 → f6e5d4c3b2a1
-                             → ~/.harness/file-tree-snapshot-f6e5d4c3b2a1.kg
-                             → ~/.harness/file-tree-snapshot-f6e5d4c3b2a1.txt
+                             → ~/.harness/snapshots/file-tree-snapshot-f6e5d4c3b2a1.kg
+                             → ~/.harness/snapshots/file-tree-snapshot-f6e5d4c3b2a1.txt
 ```
 
 - **Same folder, same hash** — reopening a project overwrites its existing snapshot (no stale duplicates).
@@ -577,11 +577,11 @@ d:\Other Projects\app       → MD5 → f6e5d4c3b2a1
 | File | Role |
 |------|------|
 | `server/fileTracking.ts` | `FileTrackingService` — singleton orchestrating Git or watcher mode, periodic Git detection, snapshot/patch logic |
-| `server/fileTrackingStore.ts` | `FileTrackingStore` — lightweight JSON-backed cache (`~/.harness/file-tracking.json`) for file metadata |
+| `server/fileTrackingStore.ts` | `FileTrackingStore` — lightweight JSON-backed cache (`~/.harness/store/file-tracking.json`) for file metadata |
 | `server/knowledgeGraph.ts` | `buildKnowledgeGraph()` — builds codebase graph with CONTAINS + IMPORTS edges, `.kg` serialization, `.txt` visualization |
-| `~/.harness/file-tracking.json` | On-disk metadata cache for watcher mode |
-| `~/.harness/file-tree-snapshot-<hash>.kg` | Per-workspace Knowledge Graph — nodes (dirs/files) + CONTAINS edges + parsed IMPORTS |
-| `~/.harness/file-tree-snapshot-<hash>.txt` | Human-readable visualization sidecar (nested tree with import annotations) |
+| `~/.harness/store/file-tracking.json` | On-disk metadata cache for watcher mode |
+| `~/.harness/snapshots/file-tree-snapshot-<hash>.kg` | Per-workspace Knowledge Graph — nodes (dirs/files) + CONTAINS edges + parsed IMPORTS |
+| `~/.harness/snapshots/file-tree-snapshot-<hash>.txt` | Human-readable visualization sidecar (nested tree with import annotations) |
 
 ## Knowledge Graph
 
@@ -622,7 +622,7 @@ Named imports (`import { foo, bar } from './module'`) are matched to target file
 
 ### .kg Format (on disk)
 
-A compact edge-list format in `~/.harness/file-tree-snapshot-<hash>.kg`:
+A compact edge-list format in `~/.harness/snapshots/file-tree-snapshot-<hash>.kg`:
 
 ```
 # Knowledge Graph v2 — D:\Work Projects\Harness
@@ -712,7 +712,7 @@ Harness gives the AI agent access to your filesystem, terminal, and browser. The
 ### API & Transport
 
 - All DeepSeek API calls use **HTTPS** (`https://api.deepseek.com/v1`).
-- Client-entered DeepSeek API keys are stored persistently on disk at `~/.harness/api-keys.json` (JSON file), keyed by an HTTP-only session cookie. Keys are never written to browser `localStorage`.
+- Client-entered DeepSeek API keys are stored persistently on disk at `~/.harness/store/api-keys.enc` (AES-256-GCM encrypted), keyed by an HTTP-only session cookie. Keys are never written to browser `localStorage`.
 - Agent requests and `/api/models` no longer include the raw key in request bodies or query strings after the initial credential submission.
 - The API key is never exposed to child processes (see Terminal Sandbox below).
 - `/api/chat/agent/config` exposes only configuration status (`apiKeyConfigured`, `source`), not the key value itself.
@@ -833,7 +833,7 @@ Agent calls run_in_terminal
 
 #### `read_graph` — Knowledge Graph Queries
 
-`read_graph` queries the codebase knowledge graph (see [Knowledge Graph](#knowledge-graph) for schema details). It reads the `.kg` file from `~/.harness/` and answers structural questions without scanning file contents. Use it for dependency analysis, symbol discovery, and project structure exploration.
+`read_graph` queries the codebase knowledge graph (see [Knowledge Graph](#knowledge-graph) for schema details). It reads the `.kg` file from `~/.harness/snapshots/` and answers structural questions without scanning file contents. Use it for dependency analysis, symbol discovery, and project structure exploration.
 
 ##### Query Types
 
@@ -1121,7 +1121,7 @@ Harness includes a **cross-session memory system** backed by SQLite. The agent c
 Agent detects an important fact
   → calls remember(key, value, category, tags)
   → value is optionally embedded via DeepSeek embeddings API
-  → stored in ~/.harness/memory.db (SQLite, global user store)
+  → stored in ~/.harness/store/memory.db (SQLite, global user store)
 
 Next session:
   → Agent calls recall(query: "UI framework")
@@ -1142,9 +1142,9 @@ Next session:
 
 | Detail | Value |
 |--------|-------|
-| Database | SQLite (WAL mode) at `~/.harness/memory.db` (global, not in project dir) |
-| API Keys | JSON file at `~/.harness/api-keys.json` (persistent, survives restarts and app updates) |
-| Client State | JSON file at `~/.harness/client-state.json` — mirrors all browser `localStorage` data (model, chat history, recent paths, open tabs, presets, terminal history) so it survives reinstalls |
+| Database | SQLite (WAL mode) at `~/.harness/store/memory.db` (global, not in project dir) |
+| API Keys | AES-256-GCM encrypted file at `~/.harness/store/api-keys.enc` (persistent, survives restarts and app updates) |
+| Client State | JSON file at `~/.harness/store/client-state.json` — mirrors all browser `localStorage` data (model, chat history, recent paths, open tabs, presets, terminal history) so it survives reinstalls |
 | Schema | `id`, `key` (unique), `value`, `category`, `tags`, `embedding` (BLOB), `created_at`, `updated_at` |
 | Embeddings | Generated via DeepSeek `/v1/embeddings` endpoint (optional; graceful fallback to keyword search if unavailable) |
 | Retrieval | Embedding cosine similarity search → keyword `LIKE` fallback → list-all |
@@ -1434,7 +1434,7 @@ When running Harness from source (`npm run dev`), you have both options:
 
 #### Option A: SSE (simplest — no extra config)
 
-Start the server, then point any MCP client at the running endpoint (check the console output for the port, or read `~/.harness/express-port`):
+Start the server, then point any MCP client at the running endpoint (check the console output for the port, or read `~/.harness/ports/express-port`):
 
 ```json
 {
@@ -1486,7 +1486,7 @@ Cursor config (`Settings > MCP > Add Server`):
 
 ### Electron desktop app (packaged)
 
-When Harness is installed as a desktop app, the server starts automatically. The port is written to `~/.harness/express-port`. Use SSE transport only — no `command`/`cwd` needed:
+When Harness is installed as a desktop app, the server starts automatically. The port is written to `~/.harness/ports/express-port`. Use SSE transport only — no `command`/`cwd` needed:
 
 ```json
 {
@@ -1570,17 +1570,17 @@ Harness/
 │   ├── lsp.ts                       # LSP client: spawns language servers (pyright, gopls, etc.), SSE diagnostic streaming, 30+ languages
 │   ├── mcp.ts                       # MCP server: JSON-RPC handler, tool set for external AI clients, stdio + SSE transport
 │   ├── mcp-server.ts                # Standalone MCP server entry point (stdio mode)
-│   ├── memory.ts                    # SQLite persistent memory store (~/.harness/memory.db): keyword + embedding search, used by agent remember/recall/forget tools
-│   │                                  # API keys also stored under ~/.harness/api-keys.json (persistent, survives restarts/updates)
-│   │                                  # Client state mirrored to ~/.harness/client-state.json (survives reinstalls)
+│   ├── memory.ts                    # SQLite persistent memory store (~/.harness/store/memory.db): keyword + embedding search, used by agent remember/recall/forget tools
+│   │                                  # API keys also stored under ~/.harness/store/api-keys.enc (AES-256-GCM encrypted, survives restarts/updates)
+│   │                                  # Client state mirrored to ~/.harness/store/client-state.json (survives reinstalls)
 │   ├── fileTracking.ts              # Smart file tracking service: auto-detects Git vs fs.watch watcher mode, mid-session Git detection, snapshot/patch file tree context
-│   ├── fileTrackingStore.ts         # JSON-backed file metadata cache (~/.harness/file-tracking.json) for watcher mode
+│   ├── fileTrackingStore.ts         # JSON-backed file metadata cache (~/.harness/store/file-tracking.json) for watcher mode
 │   ├── knowledgeGraph.ts            # Codebase knowledge graph builder: dir/file nodes, CONTAINS + IMPORTS edges, .kg serialization, visualization
 │   └── __tests__/                   # 5 test files: tool definitions, filesystem ops, command execution, agent loop, API integration
 │
 ├── client/
 │   ├── package.json                 # Client deps (React 18, Monaco, xterm.js), Vite + TypeScript
-│   ├── vite.config.ts               # Vite dev config: reads Express port from ~/.harness/express-port, proxies /api + /ws + /_browser
+│   ├── vite.config.ts               # Vite dev config: reads Express port from ~/.harness/ports/express-port, proxies /api + /ws + /_browser
 │   ├── tsconfig.json                # Client TypeScript config (ES2020, DOM, react-jsx)
 │   ├── index.html                   # SPA entry: mounts React app in <div id="root">
 │   └── src/
@@ -1588,7 +1588,7 @@ Harness/
 │       ├── App.tsx                  # Root component: folder picker, session state, resizable layout (editor + agent console)
 │       ├── App.css                  # Global dark-theme styles: pane layout, editor chrome, agent cards, welcome screen
 │       ├── electron.d.ts            # Type declarations for window.harnessDesktop bridge and <webview> JSX
-│       ├── stateSync.ts             # Client state persistence: mirrors all localStorage to ~/.harness/client-state.json (survives reinstalls)
+│       ├── stateSync.ts             # Client state persistence: mirrors all localStorage to ~/.harness/store/client-state.json (survives reinstalls)
 │       ├── panes/
 │       │   ├── EditorPane.tsx       # Main editor: Monaco tabs, file tree, browser tab strip, terminal, menu bar, status bar
 │       │   ├── AgentConsole.tsx     # Agent chat UI: streaming messages, diff previews, permission prompts, tool cards, markdown rendering

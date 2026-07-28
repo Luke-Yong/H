@@ -7,8 +7,8 @@ import http from "http";
 import type { IncomingMessage, ServerResponse } from "http";
 import type { ViteDevServer } from "vite";
 
-const EXPRESS_PORT_FILE = path.join(os.homedir(), ".harness", "express-port");
-const VITE_PORT_FILE = path.join(os.homedir(), ".harness", "vite-port");
+const EXPRESS_PORT_FILE = path.join(os.homedir(), ".harness", "ports", "express-port");
+const VITE_PORT_FILE = path.join(os.homedir(), ".harness", "ports", "vite-port");
 
 function readExpressPort(): number {
   try {
@@ -142,7 +142,7 @@ function writeVitePortPlugin() {
     configureServer(server: ViteDevServer) {
       server.httpServer?.once("listening", () => {
         try {
-          const dir = path.join(os.homedir(), ".harness");
+          const dir = path.join(os.homedir(), ".harness", "ports");
           fs.mkdirSync(dir, { recursive: true });
           const addr = server.httpServer!.address();
           const port = typeof addr === "object" && addr ? addr.port : 0;

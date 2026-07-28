@@ -11,6 +11,7 @@ import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import os from "os";
+import { getSnapshotPath, getVizPath } from "./harnessPaths";
 import { getFileTrackingStore, type FileTrackingStore } from "./fileTrackingStore";
 import { buildKnowledgeGraph, serializeGraph, visualizeGraph } from "./knowledgeGraph";
 
@@ -644,14 +645,12 @@ export class FileTrackingService {
    * One relative path per line for files; full .kg graph for the snapshot.
    */
   private getSnapshotPath(): string {
-    const dir = path.resolve(os.homedir(), ".harness");
-    const hash = crypto.createHash("md5").update(this.workspacePath).digest("hex").slice(0, 12);
-    return path.join(dir, `file-tree-snapshot-${hash}.kg`);
+    return getSnapshotPath(crypto.createHash("md5").update(this.workspacePath).digest("hex").slice(0, 12));
   }
 
   /** Human-readable visualization sidecar for verification. */
   private getVizPath(): string {
-    return this.getSnapshotPath().replace(/\.kg$/, ".txt");
+    return getVizPath(crypto.createHash("md5").update(this.workspacePath).digest("hex").slice(0, 12));
   }
 
   private loadSnapshot(): void {
@@ -711,6 +710,9 @@ export class FileTrackingService {
     try {
       // Build full knowledge graph (nodes + CONTAINS edges + parsed IMPORTS)
       const graph = buildKnowledgeGraph(this.workspacePath);
+
+      // Ensure snapshots directory exists
+      fs.mkdirSync(path.dirname(this.getSnapshotPath()), { recursive: true });
 
       // .kg file: serialized knowledge graph
       const kgPath = this.getSnapshotPath();

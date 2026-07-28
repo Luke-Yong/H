@@ -3,12 +3,13 @@
 // conventions. Supports keyword search and (optionally) embedding-based
 // semantic search via DeepSeek embeddings API.
 //
-// Database file: ~/.harness/memory.db (global, not in project dir)
+// Database file: ~/.harness/store/memory.db (global, not in project dir)
 
 import Database from "better-sqlite3";
 import path from "path";
 import fs from "fs";
 import os from "os";
+import { MEMORY_DB_FILE } from "./harnessPaths";
 
 // ── Types ──
 
@@ -32,11 +33,8 @@ export class MemoryStore {
   private db: Database.Database;
 
   constructor() {
-    const dir = path.resolve(os.homedir(), ".harness");
-    fs.mkdirSync(dir, { recursive: true });
-    const dbPath = path.join(dir, "memory.db");
-
-    this.db = new Database(dbPath);
+    fs.mkdirSync(path.dirname(MEMORY_DB_FILE), { recursive: true });
+    this.db = new Database(MEMORY_DB_FILE);
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("foreign_keys = ON");
 

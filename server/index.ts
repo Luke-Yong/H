@@ -15,6 +15,8 @@ import os from "os";
 import crypto from "crypto";
 import { execSync } from "child_process";
 import { getFileTrackingService } from "./fileTracking";
+import { EXPRESS_PORT_FILE, API_KEYS_FILE, CLIENT_STATE_FILE } from "./harnessPaths";
+import { encryptApiKeys, decryptApiKeys } from "./cryptoStore";
 
 const app = express();
 const server = createServer(app);
@@ -27,14 +29,28 @@ app.use(express.json({ limit: "10mb" }));
 const CLIENT_API_KEY_COOKIE = "harness_api_session";
 const clientApiKeySessions = new Map<string, { apiKey: string; updatedAt: number }>();
 
-// ── Persistent API key storage (~/.harness/api-keys.json) ──
-const API_KEYS_DIR = path.join(os.homedir(), ".harness");
-const API_KEYS_FILE = path.join(API_KEYS_DIR, "api-keys.json");
+// ── Persistent API key storage (~/.harness/store/api-keys.enc) ──
+// Encrypted with AES-256-GCM using a machine-specific key at ~/.harness/.key.
+// Migrates from the old plaintext ~/.harness/api-keys.json on first startup.
+
+const OLD_API_KEYS_FILE = path.join(os.homedir(), ".harness", "api-keys.json");
 
 function loadApiKeys(): void {
   try {
+    // ── Migration: old plaintext → new encrypted ──
+    if (!fs.existsSync(API_KEYS_FILE) && fs.existsSync(OLD_API_KEYS_FILE)) {
+      const oldRaw = fs.readFileSync(OLD_API_KEYS_FILE, "utf-8");
+      const entries: [string, { apiKey: string; updatedAt: number }][] = JSON.parse(oldRaw);
+      const encrypted = encryptApiKeys(JSON.stringify(entries));
+      const dir = path.dirname(API_KEYS_FILE);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(API_KEYS_FILE, encrypted, "utf-8");
+      // Don't delete the old file — keep as backup
+    }
+
     if (!fs.existsSync(API_KEYS_FILE)) return;
-    const raw = fs.readFileSync(API_KEYS_FILE, "utf-8");
+    const encrypted = fs.readFileSync(API_KEYS_FILE, "utf-8");
+    const raw = decryptApiKeys(encrypted);
     const entries: [string, { apiKey: string; updatedAt: number }][] = JSON.parse(raw);
     for (const [token, session] of entries) {
       clientApiKeySessions.set(token, session);
@@ -44,8 +60,10 @@ function loadApiKeys(): void {
 
 function saveApiKeys(): void {
   try {
-    if (!fs.existsSync(API_KEYS_DIR)) fs.mkdirSync(API_KEYS_DIR, { recursive: true });
-    fs.writeFileSync(API_KEYS_FILE, JSON.stringify([...clientApiKeySessions.entries()], null, 2), "utf-8");
+    const dir = path.dirname(API_KEYS_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const encrypted = encryptApiKeys(JSON.stringify([...clientApiKeySessions.entries()]));
+    fs.writeFileSync(API_KEYS_FILE, encrypted, "utf-8");
   } catch { /* ignore write errors */ }
 }
 
@@ -582,9 +600,8 @@ app.get("/api/chat/agent/config", (req, res) => {
   });
 });
 
-// ── Client state persistence (~/.harness/client-state.json) ──
+// ── Client state persistence (~/.harness/store/client-state.json) ──
 // Survives reinstalls because it's in the user's home directory.
-const CLIENT_STATE_FILE = path.join(os.homedir(), ".harness", "client-state.json");
 
 app.get("/api/client/state", (_req, res) => {
   try {
@@ -2145,18 +2162,17 @@ if (process.env.NODE_ENV !== "test") {
     console.log(`Harness server running on http://localhost:${port}`);
     // Write port for Vite proxy + Electron discovery
     try {
-      const dir = path.join(os.homedir(), ".harness");
-      fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(path.join(dir, "express-port"), String(port));
+      fs.mkdirSync(path.dirname(EXPRESS_PORT_FILE), { recursive: true });
+      fs.writeFileSync(EXPRESS_PORT_FILE, String(port));
     } catch {}
   });
 }
 
 process.on("SIGINT", async () => {
-  try { fs.unlinkSync(path.join(os.homedir(), ".harness", "express-port")); } catch {}
+  try { fs.unlinkSync(EXPRESS_PORT_FILE); } catch {}
   process.exit();
 });
 process.on("SIGTERM", async () => {
-  try { fs.unlinkSync(path.join(os.homedir(), ".harness", "express-port")); } catch {}
+  try { fs.unlinkSync(EXPRESS_PORT_FILE); } catch {}
   process.exit();
 });

@@ -1,12 +1,13 @@
 // ── File Tracking Metadata Store ──
 // Lightweight JSON-file-backed cache for file watcher metadata when Git is
 // not available. Uses an in-memory Map that flushes to disk on every write.
-// File: ~/.harness/file-tracking.json
+// File: ~/.harness/store/file-tracking.json
 
 import path from "path";
 import fs from "fs";
 import os from "os";
 import crypto from "crypto";
+import { FILE_TRACKING_FILE } from "./harnessPaths";
 
 // ── Types ──
 
@@ -32,9 +33,8 @@ export class FileTrackingStore {
   private dirty = false;
 
   constructor() {
-    const dir = path.resolve(os.homedir(), ".harness");
-    fs.mkdirSync(dir, { recursive: true });
-    this.dataFile = path.join(dir, "file-tracking.json");
+    fs.mkdirSync(path.dirname(FILE_TRACKING_FILE), { recursive: true });
+    this.dataFile = FILE_TRACKING_FILE;
     this.load();
   }
 

@@ -9,6 +9,7 @@
 // Conversation state is held in memory keyed by session id.
 
 import { chatDeepSeekTool, chatDeepSeekToolStream, generateEmbedding, type DeepSeekApiUsage } from "./deepseek";
+import { getSnapshotPath } from "./harnessPaths";
 import { getMemoryStore } from "./memory";
 import { killSession, getLastCreatedSessionId } from "./terminalManager";
 import fs from "fs";
@@ -1192,8 +1193,7 @@ export async function runFsTool(name: string, params: Record<string, unknown>, r
 
 function runGraphQuery(query: string, projectRoot: string): string {
   const hash = crypto.createHash("md5").update(path.resolve(projectRoot)).digest("hex").slice(0, 12);
-  const kgDir = path.resolve(os.homedir(), ".harness");
-  const kgPath = path.join(kgDir, `file-tree-snapshot-${hash}.kg`);
+  const kgPath = getSnapshotPath(hash);
 
   if (!fs.existsSync(kgPath)) {
     return "Knowledge graph not built yet. Open the project folder in Harness to generate it.";

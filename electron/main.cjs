@@ -126,7 +126,7 @@ async function waitForUrl(url, timeoutMs) {
   return false;
 }
 
-const PORT_DIR = path.join(require("os").homedir(), ".harness");
+const PORT_DIR = path.join(require("os").homedir(), ".harness", "ports");
 const EXPRESS_PORT_FILE = path.join(PORT_DIR, "express-port");
 const VITE_PORT_FILE = path.join(PORT_DIR, "vite-port");
 
