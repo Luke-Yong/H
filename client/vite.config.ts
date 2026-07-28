@@ -38,15 +38,17 @@ function proxyRequest(req: IncomingMessage, res: ServerResponse) {
     return;
   }
 
+  // Remove hop-by-hop headers that Node re-adds
+  const headers = { ...req.headers } as Record<string, string | string[] | undefined>;
+  delete headers.host;
+
   const options: http.RequestOptions = {
     hostname: "localhost",
     port,
     path: req.url,
     method: req.method,
-    headers: { ...req.headers },
+    headers,
   };
-  // Remove hop-by-hop headers that Node re-adds
-  delete options.headers?.host;
 
   const proxyReq = http.request(options, (proxyRes) => {
     res.statusCode = proxyRes.statusCode || 200;
@@ -56,7 +58,7 @@ function proxyRequest(req: IncomingMessage, res: ServerResponse) {
     proxyRes.pipe(res);
   });
 
-  proxyReq.on("error", (err) => {
+  proxyReq.on("error", () => {
     // Express may have restarted — invalidate cache
     _cachedPort = 0;
     if (!res.headersSent && !res.destroyed) {
@@ -98,14 +100,16 @@ function harnessProxyPlugin() {
         const port = getExpressPort();
         if (!port) { socket.destroy(); return; }
 
+        const wsHeaders = { ...req.headers } as Record<string, string | string[] | undefined>;
+        delete wsHeaders.host;
+
         const options: http.RequestOptions = {
           hostname: "localhost",
           port,
           path: req.url,
           method: req.method,
-          headers: { ...req.headers },
+          headers: wsHeaders,
         };
-        delete options.headers?.host;
 
         // Suppress errors on both sockets
         socket.on("error", () => {});
