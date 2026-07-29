@@ -2,6 +2,8 @@
 
 AI-powered coding agent using DeepSeek.
 
+[中文文档](README_CN.md)
+
 ## Contents
 
 - [Setup](#setup)
