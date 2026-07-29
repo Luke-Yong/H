@@ -1565,6 +1565,20 @@ body.resizing iframe { pointer-events: none; }
 .agent-tool-card-code-writer .agent-tool-card-name { color: rgba(240, 201, 41, 0.85); }
 .agent-tool-card-researcher { border-left: 3px solid rgba(197, 134, 192, 0.55); }
 .agent-tool-card-researcher .agent-tool-card-name { color: rgba(212, 160, 216, 0.85); }
+.agent-tool-card-planner { border-left: 3px solid rgba(124, 111, 247, 0.55); }
+.agent-tool-card-planner .agent-tool-card-name { color: rgba(160, 148, 255, 0.85); }
+.agent-tool-card-frontend-specialist { border-left: 3px solid rgba(79, 193, 232, 0.55); }
+.agent-tool-card-frontend-specialist .agent-tool-card-name { color: rgba(110, 215, 250, 0.85); }
+.agent-tool-card-backend-specialist { border-left: 3px solid rgba(91, 155, 213, 0.55); }
+.agent-tool-card-backend-specialist .agent-tool-card-name { color: rgba(125, 185, 235, 0.85); }
+.agent-tool-card-security-auditor { border-left: 3px solid rgba(248, 81, 73, 0.55); }
+.agent-tool-card-security-auditor .agent-tool-card-name { color: rgba(255, 110, 100, 0.85); }
+.agent-tool-card-architect-analyst { border-left: 3px solid rgba(240, 160, 96, 0.55); }
+.agent-tool-card-architect-analyst .agent-tool-card-name { color: rgba(250, 185, 125, 0.85); }
+.agent-tool-card-docs-analyst { border-left: 3px solid rgba(168, 216, 112, 0.55); }
+.agent-tool-card-docs-analyst .agent-tool-card-name { color: rgba(190, 235, 140, 0.85); }
+.agent-tool-card-documentation-writer { border-left: 3px solid rgba(232, 144, 176, 0.55); }
+.agent-tool-card-documentation-writer .agent-tool-card-name { color: rgba(245, 170, 195, 0.85); }
 /* Sub-agent collapsible trace inside tool cards */
 .agent-sub-agent { margin: 4px 0; border: 1px solid rgba(140, 100, 220, 0.2); border-radius: 4px; overflow: hidden; }
 .agent-sub-agent-header {

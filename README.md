@@ -804,13 +804,13 @@ Agent calls run_in_terminal
 | Tool | Scope | Description |
 |------|-------|-------------|
 | **Navigation** |||
-| `browser_navigate` | Parent + Sub | Navigate to a URL (http/https only). Creates a new browser tab if none exists, or navigates the active tab. Waits for the browser view to mount before returning (up to 2s). |
-| `browser_info` | Parent + Sub | Get current browser tab state: URL, page title, load status, and open tab count. |
+| `browser_navigate` | Sub-agent only | Navigate to a URL (http/https only). Creates a new browser tab if none exists, or navigates the active tab. Waits for the browser view to mount before returning (up to 2s). |
+| `browser_info` | Sub-agent only | Get current browser tab state: URL, page title, load status, and open tab count. |
 | **Observation** (read-only) |||
-| `browser_screenshot` | Parent + Sub | Get a page overview: URL, title, and a standardized position-stable grid (`V:WxH`, `XX\|N` section headers, `NN\|tag#id[type] "label" FLAGS x,y:WxH ^ctx` per line). Capped at 500 elements, 80K chars. On dense pages (>400 shown elements), the grid auto-splits into horizontal bands (`Band 1/3 y:0-600` etc.) so the agent works one region at a time. Includes visible error text. |
-| `browser_get_dom` | Parent + Sub | Get the full indexed DOM in a standardized position-stable grid. Same rigid field format as `browser_screenshot`. Capped at 3,000 elements, 120K chars. On dense pages, auto-splits into horizontal bands (2 at >400, 3 at >800, 4 at >1,200) with global indices across bands so click/type references remain correct. Indices sorted top-to-bottom, left-to-right (pure geometry). Flags: `A`=clickable, `A+`=interactive, `disabled`, `checked`, `readonly`, `required`. Collapsed/hidden/occluded elements are filtered out. |
-| `browser_console` | Parent + Sub | Get the last 50 console entries (log, warn, error, dialogs) to check for JS errors |
-| `browser_request_errors` | Parent + Sub | Get failed network requests (4xx/5xx/CORS) to verify API calls and resource loads |
+| `browser_screenshot` | Sub-agent only | Get a page overview: URL, title, and a standardized position-stable grid (`V:WxH`, `XX\|N` section headers, `NN\|tag#id[type] "label" FLAGS x,y:WxH ^ctx` per line). Capped at 500 elements, 80K chars. On dense pages (>400 shown elements), the grid auto-splits into horizontal bands (`Band 1/3 y:0-600` etc.) so the agent works one region at a time. Includes visible error text. |
+| `browser_get_dom` | Sub-agent only | Get the full indexed DOM in a standardized position-stable grid. Same rigid field format as `browser_screenshot`. Capped at 3,000 elements, 120K chars. On dense pages, auto-splits into horizontal bands (2 at >400, 3 at >800, 4 at >1,200) with global indices across bands so click/type references remain correct. Indices sorted top-to-bottom, left-to-right (pure geometry). Flags: `A`=clickable, `A+`=interactive, `disabled`, `checked`, `readonly`, `required`. Collapsed/hidden/occluded elements are filtered out. |
+| `browser_console` | Sub-agent only | Get the last 50 console entries (log, warn, error, dialogs) to check for JS errors |
+| `browser_request_errors` | Sub-agent only | Get failed network requests (4xx/5xx/CORS) to verify API calls and resource loads |
 | **Interaction** (sub-agent only) |||
 | `browser_click` | **Sub-agent only** | Click by DOM index or pixel coordinates. Dispatches full pointer/mouse event sequence. |
 | `browser_type` | **Sub-agent only** | Type text into an input by DOM index — clicks first, clears, then types with realistic keyboard events |
@@ -915,7 +915,7 @@ Harness/client/package.json
 | `write_todos` | Create or update a structured task list to track progress. In step-by-step mode, this is the ONLY tool available during planning — the agent must create a complete plan before any execution begins. |
 | `write_summary` | Write the final **structured summary** using the template: `### Changes Made`, `### Verification`, `### Outcome`. Vague summaries are **rejected**. If `write_todos` was used: the summary must also include a `### Todo Progress` section listing each item's final status. On success, the UI renders the summary once in `agent-body` as markdown preview instead of as a tool card. |
 | `task_complete` | Finalize the run. Has no parameters and is **rejected unless `write_summary` has been called**. Also rejected if any todo items are still pending/in_progress. The SSE `done` reply reuses the stored summary, but the client dedupes it so the final summary is not rendered twice. |
-| `delegate_task` | Delegate a sub-task to a specialized sub-agent (browser, code-search, code-writer, researcher) that runs independently with its own context window. Sub-agents run sequentially — each must complete before the next starts. |
+| `delegate_task` | Delegate a sub-task to a specialized sub-agent (browser, code-search, code-writer, researcher, planner, frontend-specialist, backend-specialist, security-auditor, architect-analyst, docs-analyst, documentation-writer) that runs independently with its own context window. Sub-agents run sequentially — each must complete before the next starts. |
 
 ### Multi-Agent Delegation
 
@@ -958,6 +958,13 @@ Parent resumes ← result pushed to parent's state.messages
 | `code-search` | `read_file`, `list_files`, `search_files`, `grep`, `read_graph` | 20 | Read-only code exploration. Finds files, reads code, reports findings. Never edits. |
 | `code-writer` | Full filesystem + `run_command`, `read_problems`, `read_graph` | 50 | Implements features or fixes bugs. Reads, edits, builds, and verifies. |
 | `researcher` | `read_file`, `list_files`, `search_files`, `grep`, `run_command`, `read_graph` | 25 | Explores codebase to answer questions. Reports with file paths and line numbers. |
+| `planner` | `read_file`, `list_files`, `search_files`, `grep`, `read_graph`, `write_todos` | 25 | Analyzes project and creates structured step-by-step plans. Outputs a todo list with ordered, actionable steps. |
+| `frontend-specialist` | Full filesystem + `run_command`, `read_problems`, `read_graph`, `browser_screenshot`, `browser_get_dom`, `browser_console`, `browser_request_errors` | 50 | Implements UI features and components. Visually verifies changes in the browser. |
+| `backend-specialist` | Full filesystem + `run_command`, `read_problems`, `read_graph` | 50 | Implements API routes, services, and database logic. Focuses on server-side patterns and data integrity. |
+| `security-auditor` | `read_file`, `list_files`, `search_files`, `grep`, `run_command`, `read_graph`, `read_problems` | 30 | Audits code for vulnerabilities. Runs security scans, reports findings with severity and remediation. Never edits. |
+| `architect-analyst` | `read_file`, `list_files`, `search_files`, `grep`, `read_graph` | 25 | Analyzes project architecture, dependency graphs, and module structure. Reports architectural concerns and recommendations. Never edits. |
+| `docs-analyst` | `read_file`, `list_files`, `search_files`, `grep`, `read_graph` | 20 | Audits documentation coverage and quality. Identifies gaps and outdated docs. Never edits. |
+| `documentation-writer` | `read_file`, `write_file`, `edit_file`, `list_files`, `search_files`, `grep`, `read_graph`, `create_directory` | 30 | Creates or improves documentation. Writes README sections, API docs, and guides. |
 
 #### Key Design
 
@@ -965,12 +972,12 @@ Parent resumes ← result pushed to parent's state.messages
 |---------|--------|
 | **Context isolation** | Each sub-agent has its own `AgentState` — messages do not pollute the parent's context |
 | **Tool allowlisting** | Sub-agents receive only the tools their profile specifies (e.g. code-search can never write files) |
-| **Headless execution** | Code-search, code-writer, and researcher sub-agents run entirely server-side — no browser or terminal tools |
-| **Browser delegation** | Parent has read-only browser tools only (navigate, info, screenshot, get_dom, console, errors). All interactive actions (click, type, scroll, etc.) MUST go through the browser sub-agent via `delegate_task agent_type: "browser"` |
+| **Headless execution** | All non-browser sub-agents run entirely server-side — no browser or terminal tools. Frontend-specialist has read-only browser tools for visual verification. |
+| **Browser delegation** | The parent agent has NO browser tools — not even read-only ones. ALL browser interaction (navigating, inspecting DOM, taking screenshots, checking console/network, clicking, typing, scrolling) goes through the browser sub-agent via `delegate_task agent_type: "browser"`. This keeps the main agent's context clean and forces structured delegation. |
 | **Live streaming** | Sub-agent tool calls stream live to the UI as colored tool cards in real-time. Parent appears paused during delegation. Sub-agent text events are filtered — only tool_start/tool_end cards are shown, preventing message pollution. |
 | **Result summarization** | Sub-agent results are compressed before returning to the parent, preserving context budget |
 | **Parallelism** | Not supported — sub-agents run sequentially. Each must complete before the next starts, managing RAM usage. The agent should call `delegate_task` multiple times for independent sub-tasks. |
-| **Color coding** | Every tool card has a left-border color: blue (main agent), teal (browser), green (code-search), amber (code-writer), purple (researcher). Makes it easy to identify which agent executed each tool call. |
+| **Color coding** | Every tool card has a left-border color: blue (main), teal (browser), green (code-search), amber (code-writer), purple (researcher), indigo (planner), cyan (frontend-specialist), blue (backend-specialist), red (security-auditor), orange (architect-analyst), lime (docs-analyst), pink (documentation-writer). Makes it easy to identify which agent executed each tool call. |
 | **Agent footer** | Shows "Completed" when the conversation finishes normally (SSE `done` event). Shows "Stopped" only on errors or a 5-minute safety timeout. The footer label corresponds strictly to SSE stream state — not app focus. |
 | **Background operation** | The SSE stream uses `fetch`-based streaming — operates independently of window focus. Agent conversations continue in background with no interruption when the app is minimized or behind other windows. |
 

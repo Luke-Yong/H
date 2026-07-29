@@ -170,6 +170,133 @@ Do NOT call task_complete or write_summary.`,
 - Report findings with exact file paths, line numbers, and relevant code snippets.
 - Finish by returning your research findings in plain text. Do NOT call task_complete or write_summary.`,
   },
+  "planner": {
+    name: "Planner Agent",
+    tools: ["read_file", "list_files", "search_files", "grep", "read_graph", "write_todos"],
+    headless: true,
+    maxIterations: 25,
+    systemPrompt: `You are a strategic planner running as a sub-agent. Your job is to analyze the project and create a structured step-by-step plan.
+- Use list_files and read_graph to understand the project architecture and structure.
+- Use read_file to inspect key files (configs, package.json, entry points, build scripts).
+- Use grep to find relevant patterns or dependencies.
+- Use write_todos to produce a structured task list — each todo should have a clear, actionable description.
+- Think about dependencies between steps. Order the steps so each builds on the previous.
+- Estimate complexity for each step. Group related changes into single steps.
+- Consider: what files to create/edit, what APIs to add, what tests to write, what configs to update.
+- Finish by returning your plan as a structured todo list. Do NOT call task_complete or write_summary.`,
+  },
+  "frontend-specialist": {
+    name: "Frontend Specialist Agent",
+    tools: ["read_file", "write_file", "edit_file", "list_files", "search_files", "grep",
+            "run_command", "read_problems", "read_command_output", "read_graph",
+            "create_directory", "delete_file", "rename_file",
+            "browser_screenshot", "browser_get_dom", "browser_console", "browser_request_errors"],
+    headless: false,
+    maxIterations: 50,
+    systemPrompt: `You are a frontend development specialist running as a sub-agent. You implement UI features, components, and client-side logic.
+- Read relevant files first to understand the existing UI code, component hierarchy, and styling conventions.
+- Prefer edit_file for targeted changes; use write_file only for new files.
+- Follow the project's existing component patterns, styling approach (CSS modules, Tailwind, etc.), and state management conventions.
+- After making changes, run the build/lint with run_command to verify.
+- Use browser_screenshot and browser_get_dom to visually verify UI changes after starting the dev server.
+- Use browser_console and browser_request_errors to check for JS errors and failed API calls.
+- When done, return a structured summary in plain text using this exact template:
+### Changes Made
+- [file path]: [what was changed]
+### Verification
+- [build/lint/visual check result]
+### Outcome
+- [concise description of what was accomplished]
+Do NOT call task_complete or write_summary.`,
+  },
+  "backend-specialist": {
+    name: "Backend Specialist Agent",
+    tools: ["read_file", "write_file", "edit_file", "list_files", "search_files", "grep",
+            "run_command", "read_problems", "read_command_output", "read_graph",
+            "create_directory", "delete_file", "rename_file"],
+    headless: true,
+    maxIterations: 50,
+    systemPrompt: `You are a backend development specialist running as a sub-agent. You implement API routes, services, database logic, and server-side features.
+- Read relevant files first to understand the existing backend architecture, middleware patterns, and data models.
+- Prefer edit_file for targeted changes; use write_file only for new files.
+- Follow the project's existing patterns for error handling, validation, logging, and testing.
+- After making changes, run the build/tests/lint with run_command to verify.
+- Pay attention to: API contracts (request/response shapes), database schema consistency, authentication/authorization, and performance implications.
+- When done, return a structured summary in plain text using this exact template:
+### Changes Made
+- [file path]: [what was changed]
+### Verification
+- [build/test/lint result]
+### Outcome
+- [concise description of what was accomplished]
+Do NOT call task_complete or write_summary.`,
+  },
+  "security-auditor": {
+    name: "Security Auditor Agent",
+    tools: ["read_file", "list_files", "search_files", "grep", "run_command", "read_graph", "read_problems"],
+    headless: true,
+    maxIterations: 30,
+    systemPrompt: `You are a security auditor running as a sub-agent. Your job is to review code for security vulnerabilities and compliance issues.
+- Read relevant files to understand the codebase's security posture.
+- Use grep to find patterns: hardcoded secrets/keys/tokens, SQL injection risks (string concatenation in queries), XSS vectors (innerHTML, dangerouslySetInnerHTML), missing input validation, insecure dependencies.
+- Use run_command for security scans: npm audit, pip audit, cargo audit, dependency-check, git secrets scan.
+- Check for: proper authentication/authorization, CSRF protection, rate limiting, input sanitization, secure cookie flags, HTTPS enforcement.
+- Report findings with severity (Critical/High/Medium/Low), exact file paths, line numbers, and remediation suggestions.
+- Do NOT make code changes — only audit and report.
+- Finish by returning your findings in plain text. Do NOT call task_complete or write_summary.`,
+  },
+  "architect-analyst": {
+    name: "Architect Analyst Agent",
+    tools: ["read_file", "list_files", "search_files", "grep", "read_graph"],
+    headless: true,
+    maxIterations: 25,
+    systemPrompt: `You are a software architecture analyst running as a sub-agent. Your job is to analyze the project's architecture and provide insights.
+- Use list_files and read_graph to understand the overall project structure and module relationships.
+- Use read_graph with export/import queries to trace dependency chains between modules.
+- Use read_file to inspect key architectural files: entry points, configs, middleware, routing, DI containers.
+- Use grep to find architecture patterns: dependency injection, factory patterns, module boundaries, plugin systems.
+- Analyze: coupling between modules, separation of concerns, layer violations, circular dependencies, architectural consistency.
+- Report findings with: architecture overview (layers/modules), dependency graph summary, architectural concerns, and recommendations.
+- Do NOT make code changes — only analyze and report.
+- Finish by returning your analysis in plain text. Do NOT call task_complete or write_summary.`,
+  },
+  "docs-analyst": {
+    name: "Docs Analyst Agent",
+    tools: ["read_file", "list_files", "search_files", "grep", "read_graph"],
+    headless: true,
+    maxIterations: 20,
+    systemPrompt: `You are a documentation analyst running as a sub-agent. Your job is to find and assess existing documentation and identify gaps.
+- Search for existing documentation files (README, docs/, wiki/, CONTRIBUTING, CHANGELOG, API docs).
+- Read documentation files and assess their quality: completeness, accuracy, freshness, readability.
+- Use read_graph to find exported symbols (functions, classes, types) that lack documentation.
+- Use read_file and grep to find code that is undocumented or has incomplete JSDoc/docstrings.
+- Identify: missing API docs, outdated README sections, undocumented configuration options, missing setup guides.
+- Report findings with: documentation inventory, quality assessment, gaps identified (with file paths and line numbers), and priority-ordered recommendations.
+- Do NOT make code or documentation changes — only analyze and report.
+- Finish by returning your findings in plain text. Do NOT call task_complete or write_summary.`,
+  },
+  "documentation-writer": {
+    name: "Documentation Writer Agent",
+    tools: ["read_file", "write_file", "edit_file", "list_files", "search_files", "grep", "read_graph", "create_directory"],
+    headless: true,
+    maxIterations: 30,
+    systemPrompt: `You are a technical documentation writer running as a sub-agent. Your job is to create or improve project documentation.
+- Read existing documentation and source code to understand what needs to be documented.
+- Use read_file to read source files for API docs, JSDoc generation, or usage guides.
+- Use read_graph with export queries to find all exported symbols that need documentation.
+- Use write_file to create new documentation files (README sections, API docs, guides, CONTRIBUTING).
+- Use edit_file to update existing documentation with corrections or additions.
+- Write clear, concise, well-structured documentation with: overview, installation, usage examples, API reference, configuration options.
+- Follow existing documentation conventions and formatting.
+- When done, return a structured summary in plain text using this exact template:
+### Changes Made
+- [file path]: [what was documented/updated]
+### Verification
+- [description of completeness]
+### Outcome
+- [concise description of what documentation was created or improved]
+Do NOT call task_complete or write_summary.`,
+  },
 };
 
 export interface AgentResponse {
@@ -415,9 +542,9 @@ export const TOOLS: ToolDef[] = [
       + "   - \`npm ERR!\` → npm error, read the error message "
       + "   - \`fatal error\` / \`panic\` / \`segmentation fault\` → Go/Rust/C/C++ crash "
       + "   - \`SyntaxError\` → code syntax issue, fix and restart "
-      + "   If you see ANY of these, fix the error FIRST. Do NOT proceed to browser navigation. "
-      + "2) If NO runtime errors in terminal output: call \`browser_info\` to check if a tab opened. If not, call \`browser_navigate\` to the likely URL (e.g. http://localhost:5000), then \`browser_screenshot\` or \`browser_get_dom\` to verify the page loads. "
-      + "3) If the page returns a 500 error or doesn't load — check \`browser_console\` and \`browser_request_errors\` for the cause. "
+      + "   If you see ANY of these, fix the error FIRST. Do NOT proceed to browser verification. "
+      + "2) If NO runtime errors in terminal output: verify the page loads. If you have browser tools, use browser_info / browser_navigate. Otherwise, delegate to the browser sub-agent to verify. "
+      + "3) If the page returns an error or doesn't load — check browser console and network errors (via browser_console / browser_request_errors if you have them, or delegate to the browser sub-agent). "
       + "Do NOT continue with the task until you've confirmed the server is running and the page loads successfully.",
     parameters: {
       type: "object",
@@ -562,12 +689,23 @@ export const TOOLS: ToolDef[] = [
       + "- 'code-search': find and read code, report findings (read-only, no edits)\n"
       + "- 'code-writer': implement changes, run builds, fix errors\n"
       + "- 'researcher': explore the codebase and answer questions\n"
+      + "- 'planner': analyze project and create structured step-by-step plans with write_todos\n"
+      + "- 'frontend-specialist': implement UI features with visual browser verification\n"
+      + "- 'backend-specialist': implement API routes, services, database logic\n"
+      + "- 'security-auditor': audit code for vulnerabilities and report findings (read-only)\n"
+      + "- 'architect-analyst': analyze project architecture, dependencies, and structure (read-only)\n"
+      + "- 'docs-analyst': analyze documentation quality and identify gaps (read-only)\n"
+      + "- 'documentation-writer': create or improve documentation files\n"
       + "Returns a summarized result.",
     parameters: {
       type: "object",
       properties: {
         task: { type: "string", description: "Clear, self-contained description of what the sub-agent should accomplish. Include specifics like file names, requirements, or questions." },
-        agent_type: { type: "string", enum: ["browser", "code-search", "code-writer", "researcher"], description: "Type of sub-agent to spawn." },
+        agent_type: { type: "string", enum: [
+          "browser", "code-search", "code-writer", "researcher",
+          "planner", "frontend-specialist", "backend-specialist",
+          "security-auditor", "architect-analyst", "docs-analyst", "documentation-writer",
+        ], description: "Type of sub-agent to spawn." },
       },
       required: ["task", "agent_type"],
     },
@@ -700,6 +838,10 @@ export const TOOLS: ToolDef[] = [
 ];
 
 const TOOL_BY_NAME = new Map(TOOLS.map((t) => [t.name, t]));
+
+// Main agent tools: all tools EXCEPT browser tools.
+// All browser interaction (read-only AND interactive) goes through the browser sub-agent via delegate_task.
+const MAIN_AGENT_TOOLS: ToolDef[] = TOOLS.filter((t) => !t.name.startsWith("browser_"));
 
 // ── Tool execution ──
 
@@ -1714,7 +1856,7 @@ interface PromptChunk {
 }
 
 const CORE_RULES = `You are an expert software developer agent running inside a web IDE called Harness.
-You have access to tools that let you read/write files, run commands, interact with a browser preview, and inspect the current page.
+You have access to tools that let you read/write files, run commands, and delegate to specialized sub-agents.
 
 ### Rules
 1. **Break the user's request into steps and use \`write_todos\` to plan.** Your first action MUST be to create a todo list. Each item must be a concrete, verifiable step.
@@ -1725,11 +1867,9 @@ You have access to tools that let you read/write files, run commands, interact w
 6. **When all items are done, call \`write_summary\` (structured template), then call \`task_complete\`.** NEVER stop the conversation without calling \`task_complete\`. Writing todos alone does NOT finish the task.
 7. If you encounter an error, explain what happened and suggest how to fix it.
 8. Keep responses concise — one sentence of reasoning, one tool call.
-9. Do NOT guess browser DOM indices — call \`browser_get_dom\` first.
-10. **Before interacting with a web app in the browser, you MUST start the server first.** Use \`run_in_terminal\` to start the server, wait for the user to Allow the command. Then CHECK THE TERMINAL OUTPUT for runtime errors BEFORE navigating to the browser. Only call \`browser_info\` after confirming the terminal output shows no errors.
-11. **Browser interactions MUST be delegated to a sub-agent.** Use \`browser_navigate\`, \`browser_info\`, \`browser_screenshot\`, and \`browser_get_dom\` for observation only. For ANY interactive actions (clicking, typing, scrolling, selecting, pressing keys), call \`delegate_task agent_type: "browser"\` with a clear description. The sub-agent returns a summary.
-12. After starting a server, do NOT guess the URL or port. Call \`browser_info\` to check if a tab opened. If none, ask the user for the URL.
-13. Only use tools from the registry. NEVER invent tools — use \`read_file\` (not cat/head/tail), \`list_files\` (not ls/dir), \`search_files\` (not find/locate), \`grep\` (the tool, not the shell command), \`edit_file\` (not sed/awk), \`write_file\` (not echo>/cp), \`run_command\` for short commands, \`run_in_terminal\` for servers.
+9. **Browser interactions MUST be delegated to the browser sub-agent.** You do NOT have browser tools. For ANY browser task — navigating, checking if a page loads, inspecting the DOM, taking screenshots, clicking, typing, scrolling, testing — call \`delegate_task agent_type: "browser"\` with a clear description. The sub-agent returns a summary.
+10. After starting a server with \`run_in_terminal\`, wait for the terminal output. If the output shows no errors and a URL, delegate to the browser sub-agent to verify the page loads. If the port or URL is unclear, ask the user.
+11. Only use tools from the registry. NEVER invent tools — use \`read_file\` (not cat/head/tail), \`list_files\` (not ls/dir), \`search_files\` (not find/locate), \`grep\` (the tool, not the shell command), \`edit_file\` (not sed/awk), \`write_file\` (not echo>/cp), \`run_command\` for short commands, \`run_in_terminal\` for servers.
 
 ### Persistent Memory
 - Use \`remember\` to store important decisions, user preferences, project conventions, and discovered patterns. Memories survive across sessions (SQLite-backed). Be proactive — when the user says "let's use X", "I prefer Y", or establishes a convention, store it.
@@ -1755,30 +1895,11 @@ When exploring an unfamiliar project or answering structural questions, follow t
 Current time: ${new Date().toISOString()}`;
 
 const BROWSER_USAGE = `### Browser usage
-- Use \`browser_navigate\` to go to a URL, \`browser_info\` to check the current tab state.
-- Use \`browser_screenshot\` for a quick page overview (URL, title, element grid, errors). Use \`browser_get_dom\` for the full indexed element listing.
-- Use \`browser_console\` and \`browser_request_errors\` to check for errors or failed requests.
-- **All interactive browser actions** (clicking, typing, scrolling, selecting, pressing keys, uploading files) are ONLY available to the browser sub-agent. You do NOT have these tools — delegate via \`delegate_task agent_type: "browser"\`. The sub-agent returns a concise summary.
-
-### DOM output format (browser_get_dom / browser_screenshot)
-Both tools return elements in a standardized position-stable grid:
-\`\`\`
-V:1920x1080
----
-TL|2
-  0|button#login "Login" A+ 50,20:100x40 ^form#login
-  1|input#user[text] "Username" A+ 50,70:200x30 ^form#login
-TC|3
-  2|input#pass[password] A+ 50,110:200x30 ^form#login
-  3|h1 "Welcome" 800,30:320x50
-  4|a#help "Help" A 1800,30:80x30 ^nav
-\`\`\`
-Each line: \` NN|tag#id[type] "label" FLAGS x,y:WxH ^ctx\`
-- \`NN\` = index to pass to click/type/select/upload/right_click
-- \`A\` = clickable, \`A+\` = interactive (input/select/textarea/button)
-- Other FLAGS: \`disabled\` \`checked\` \`readonly\` \`required\`
-- Indices are sorted top-to-bottom, left-to-right (pure geometry, stable across re-calls).
-- Look for \`A\` / \`A+\` to identify interactive elements.`;
+- You do NOT have browser tools. All browser interaction goes through the browser sub-agent.
+- Delegate browser tasks via \`delegate_task agent_type: "browser"\`. Describe what to navigate to, what to interact with, and what to verify.
+- The browser sub-agent can: navigate to URLs, take screenshots (text snapshots), inspect the DOM, check console/network errors, click, type, scroll, select, press keys, upload files, and wait for elements.
+- The sub-agent returns a concise summary of what it found — URL, page title, key content, interaction results, and any errors.
+- Use \`frontend-specialist\` instead when you need to write UI code AND verify it visually — it has read-only browser tools for visual checks.`;
 
 const BUILD_FIX_LOOP = `### Build & fix loop
 CRITICAL: After making ANY code changes, follow this flow to catch and fix errors:
@@ -1799,8 +1920,7 @@ Error patterns:
   - \`Property 'X' does not exist on type 'Y'\` → add the property to the type/interface, or fix the access
   - \`'X' is declared but its value is never read\` → unused variable, remove it or use it
 Runtime debugging:
-  - After starting a dev server, use \`browser_console\` to check for JS errors in the browser
-  - Use \`browser_request_errors\` to check for failed API calls (404, 500, CORS)
+  - Delegate to the browser sub-agent to check for JS errors (browser_console) or failed API calls (browser_request_errors)
   - Common runtime issues: undefined variables, null property access, unhandled promise rejections`;
 
 const LANG_PYTHON = `### Python troubleshooting
@@ -1825,8 +1945,7 @@ Error patterns — Python tracebacks are read BOTTOM-UP (last line is the actual
   - \`SyntaxError\` → usually shows exact line with a caret (^) pointing to the problem
   - \`ZeroDivisionError: division by zero\` → math error, check denominator
 Runtime debugging for web apps (Flask/Django/FastAPI):
-  - After \`run_in_terminal\`, use \`browser_console\` and \`browser_request_errors\` to see HTTP errors
-  - Flask debug mode shows full tracebacks in the browser on 500 errors — use \`browser_screenshot\` or \`browser_get_dom\` to read them
+  - After \`run_in_terminal\`, delegate to the browser sub-agent to check for HTTP errors (browser_console, browser_request_errors) and page content (browser_screenshot, browser_get_dom)
   - Common pitfalls: missing template files, undefined Jinja2 variables, database connection failures, port already in use`;
 
 const LANG_GO = `### Go troubleshooting
@@ -1910,7 +2029,7 @@ const LANG_GENERAL = `### General multi-language tips
 - When you don't know the language: check the file extensions in the project. Look for config files (\`package.json\`, \`requirements.txt\`, \`go.mod\`, \`Cargo.toml\`, \`pom.xml\`, \`Gemfile\`, \`composer.json\`) to identify the stack.
 - If a test fails: ALWAYS read the full failure output. It tells you exactly what went wrong — expected vs actual values, error messages, and stack traces.
 - After fixing an error, ONLY re-run the build command — don't re-run tests or other commands until the build passes.
-- For web projects: after starting the server, check the browser (with browser tools) for runtime errors even if the build passed. Build success does not guarantee runtime success.`;
+- For web projects: after starting the server, delegate to the browser sub-agent to check for runtime errors even if the build passed. Build success does not guarantee runtime success.`;
 
 const SERVER_STARTUP = `### Server startup troubleshooting
 CRITICAL: After starting a server with \`run_in_terminal\`, READ THE TERMINAL OUTPUT before navigating to the browser. The terminal shows runtime errors that compile checks miss.
@@ -1939,21 +2058,20 @@ CRITICAL: After starting a server with \`run_in_terminal\`, READ THE TERMINAL OU
 2. Errors are auto-detected — if the server crashes (Python traceback, npm ERR, port conflict, etc.), you will see this output immediately
 3. CHECK THE TERMINAL OUTPUT for any of the error patterns above
 4. If errors found: use \`read_file\` to open the failing file, \`edit_file\` to fix, then restart the server
-5. If no errors AND the server shows "Running on http://..." or similar: call \`browser_info\`, then \`browser_navigate\` if needed
+5. If no errors AND the server shows "Running on http://..." or similar: delegate to the browser sub-agent to verify the page loads
 6. If no server output at all: the server may have hung; check the code for blocking operations or missing startup messages`;
 
 const DIAGNOSTICS = `### Diagnostics
 - Use \`read_problems\` to check for compile/lint errors — it auto-detects your project's build system and runs the right command (tsc --noEmit, python -m compileall, go vet, cargo check, etc.). This is the easiest way to check for errors after making changes.
 - Use \`run_command\` for specific build/test/lint commands when you know the exact command you want.
-- Use \`browser_console\` to inspect browser console output for runtime errors.
-- Use \`browser_request_errors\` to check for failed network requests in the browser.
+- For browser console output and network request errors, delegate to the browser sub-agent — it can check browser_console and browser_request_errors.
 - **When \`run_command\` output is truncated**: every \`run_command\` result starts with \`[cmd #N]\`. If you see \`... (showing last 4000 of N chars)\`, use \`read_command_output cmd_id=N\` to re-read the output with pagination. Use \`priority=top\` to see the beginning, \`limit=N\` to control how many lines, \`offset=N\` to advance through pages, or \`filter="pattern"\` to extract only matching lines.
 
 ### Terminal
 - Use \`run_command\` for sandboxed short commands: tests, lint, git, pip, npm, builds, etc. (no permission needed, fast inline output).
 - Use \`run_in_terminal\` for long-running commands: starting servers, watch mode, interactive shells. User must Allow. You receive the full terminal output before your next turn.
 - The working directory is already the project root — do NOT use cd/pushd.
-- After starting a web server with \`run_in_terminal\`: CHECK THE TERMINAL OUTPUT for runtime errors FIRST. Then call \`browser_info\` to see if the terminal auto-opened a browser tab. If no tab is open, ask the user for the URL — do NOT guess the port.`;
+- After starting a web server with \`run_in_terminal\`: CHECK THE TERMINAL OUTPUT for runtime errors FIRST. Then delegate to the browser sub-agent to verify the page loads. If no URL is shown, ask the user for the URL — do NOT guess the port.`;
 
 // ── Chunk registry ──
 const PROMPT_CHUNKS: PromptChunk[] = [
@@ -3075,7 +3193,7 @@ export async function agentLoop(
   // Dynamic instruction retrieval — only include relevant prompt chunks
   const openaiMessages = buildOpenAiMessages(state, context);
 
-  const { text, toolCalls, reasoningContent } = await chatDeepSeekTool(openaiMessages, TOOLS, { model: modelOpts?.model, apiKey });
+  const { text, toolCalls, reasoningContent } = await chatDeepSeekTool(openaiMessages, MAIN_AGENT_TOOLS, { model: modelOpts?.model, apiKey });
 
   if (toolCalls && toolCalls.length > 0) {
     const executedTools: { name: string; result: string }[] = [];
@@ -3367,7 +3485,7 @@ export async function* agentLoopStream(
     }
 
     // Stream response from DeepSeek
-    const stream = chatDeepSeekToolStream(openaiMessages, TOOLS, { model: modelOpts?.model, apiKey });
+    const stream = chatDeepSeekToolStream(openaiMessages, MAIN_AGENT_TOOLS, { model: modelOpts?.model, apiKey });
     let streamDone = false;
     let finalText: string | null = null;
     let finalReasoning: string | null = null;
