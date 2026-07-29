@@ -1565,40 +1565,56 @@ The server only exposes **tools** capability — no resources or prompts.
 Harness/
 ├── .env.example                     # Template for environment variables (DeepSeek API key)
 ├── package.json                     # Root deps (Express, better-sqlite3, node-pty), scripts (dev, test, desktop:build)
+├── package-lock.json
 ├── tsconfig.json                    # TypeScript config for server (ES2022, strict, vitest globals)
 ├── vitest.config.ts                 # Vitest runner config (node env, 30s timeout)
 ├── README.md                        # You're reading it
 │
+├── build/
+│   └── icon assets (ico, png, svg)  # Electron app icons
+│
+├── scripts/
+│   ├── embed-icon.js                # Embeds icon into the Electron executable
+│   └── generate-icon.js             # Generates icon from SVG source
+│
 ├── server/
 │   ├── index.ts                     # Express server entry: API routes, WebSocket terminal, agent SSE streaming, MCP, browser proxy, system stats
-│   ├── agent.ts                     # Agent core: 24+ tool definitions, agentLoop/Stream/StepByStep, sub-agent delegation, permission gating, ITR system prompt builder, history compaction
+│   ├── agent.ts                     # Agent core: 27 tool definitions, 11 sub-agent profiles, delegate_task, agentLoop/Stream/StepByStep, permission gating, ITR system prompt builder, history compaction
 │   ├── deepseek.ts                  # DeepSeek API client: blocking + streaming chat w/ tool-calling, embeddings, KV cache tracking, usage reporting
 │   ├── terminalManager.ts           # Terminal session manager: PTY (node-pty) and pipe fallback, WebSocket I/O, venv auto-activation, localhost URL detection
 │   ├── lsp.ts                       # LSP client: spawns language servers (pyright, gopls, etc.), SSE diagnostic streaming, 30+ languages
 │   ├── mcp.ts                       # MCP server: JSON-RPC handler, tool set for external AI clients, stdio + SSE transport
 │   ├── mcp-server.ts                # Standalone MCP server entry point (stdio mode)
 │   ├── memory.ts                    # SQLite persistent memory store (~/.harness/store/memory.db): keyword + embedding search, used by agent remember/recall/forget tools
-│   │                                  # API keys also stored under ~/.harness/store/api-keys.enc (AES-256-GCM encrypted, survives restarts/updates)
-│   │                                  # Client state mirrored to ~/.harness/store/client-state.json (survives reinstalls)
-│   ├── fileTracking.ts              # Smart file tracking service: auto-detects Git vs fs.watch watcher mode, mid-session Git detection, snapshot/patch file tree context
+│   ├── cryptoStore.ts               # AES-256-GCM encrypted API key storage (~/.harness/store/api-keys.enc)
+│   ├── harnessPaths.ts              # Centralized path resolution for ~/.harness/ directory structure
+│   ├── fileTracking.ts              # Smart file tracking: auto-detects Git vs fs.watch watcher mode, mid-session Git detection, snapshot/patch file tree context
 │   ├── fileTrackingStore.ts         # JSON-backed file metadata cache (~/.harness/store/file-tracking.json) for watcher mode
 │   ├── knowledgeGraph.ts            # Codebase knowledge graph builder: dir/file nodes, CONTAINS + IMPORTS edges, .kg serialization, visualization
-│   └── __tests__/                   # 5 test files: tool definitions, filesystem ops, command execution, agent loop, API integration
+│   └── __tests__/
+│       ├── agent.tooldefs.test.ts    # Tool definition schema validation
+│       ├── agent.fs.test.ts          # Filesystem tool execution tests
+│       ├── agent.command.test.ts     # Command execution tests
+│       ├── agent.loop.test.ts        # Agent loop integration tests
+│       └── api.test.ts              # API endpoint integration tests
 │
 ├── client/
 │   ├── package.json                 # Client deps (React 18, Monaco, xterm.js), Vite + TypeScript
 │   ├── vite.config.ts               # Vite dev config: reads Express port from ~/.harness/ports/express-port, proxies /api + /ws + /_browser
 │   ├── tsconfig.json                # Client TypeScript config (ES2020, DOM, react-jsx)
 │   ├── index.html                   # SPA entry: mounts React app in <div id="root">
+│   ├── public/
+│   │   └── icon.svg                 # App icon SVG
 │   └── src/
 │       ├── main.tsx                 # React DOM entry: renders <App />
 │       ├── App.tsx                  # Root component: folder picker, session state, resizable layout (editor + agent console)
-│       ├── App.css                  # Global dark-theme styles: pane layout, editor chrome, agent cards, welcome screen
+│       ├── App.css                  # Global dark-theme styles: pane layout, editor chrome, agent cards, sub-agent color coding (11 agent types), welcome screen
 │       ├── electron.d.ts            # Type declarations for window.harnessDesktop bridge and <webview> JSX
+│       ├── vite-env.d.ts            # Vite client type declarations
 │       ├── stateSync.ts             # Client state persistence: mirrors all localStorage to ~/.harness/store/client-state.json (survives reinstalls)
 │       ├── panes/
 │       │   ├── EditorPane.tsx       # Main editor: Monaco tabs, file tree, browser tab strip, terminal, menu bar, status bar
-│       │   ├── AgentConsole.tsx     # Agent chat UI: streaming messages, diff previews, permission prompts, tool cards, markdown rendering
+│       │   ├── AgentConsole.tsx     # Agent chat UI: streaming messages, diff previews, permission prompts, tool cards with agent color coding, markdown rendering
 │       │   ├── TerminalPane.tsx     # xterm.js terminal: WebSocket-backed PTY, Ctrl+click links, scrollback, agent bridge
 │       │   ├── FilesPanel.tsx       # File explorer tree: virtual files + backend FsEntry, create/rename/delete
 │       │   ├── BrowserView.tsx      # Embedded browser: iframe proxy, getIndexedDom/clickElement/typeIntoElement agent APIs, DOM indexing helpers
