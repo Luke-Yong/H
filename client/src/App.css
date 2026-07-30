@@ -1010,6 +1010,72 @@ body.resizing iframe { pointer-events: none; }
   text-align: center;
 }
 
+/* ── Search panel ── */
+.search-panel {
+  display: flex; flex-direction: column;
+  height: 100%;
+  background: var(--bg-pane);
+  border-right: 1px solid var(--border);
+}
+.search-bar {
+  display: flex; align-items: center;
+  padding: 8px; gap: 4px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.search-input {
+  flex: 1;
+  background: #3c3c3c; border: 1px solid var(--border); border-radius: 4px;
+  color: var(--text); font-size: 12px; padding: 5px 8px;
+  outline: none; font-family: inherit;
+}
+.search-input:focus { border-color: var(--accent); }
+.search-input::placeholder { color: var(--text-dim); }
+.search-btn {
+  background: none; border: none; color: var(--text-dim);
+  cursor: pointer; padding: 4px; font-size: 16px;
+  display: flex; align-items: center; justify-content: center;
+}
+.search-btn:hover { color: var(--text); }
+.search-btn:disabled { opacity: 0.4; cursor: default; }
+.search-results {
+  flex: 1; overflow-y: auto;
+}
+.search-error {
+  padding: 12px; color: var(--fail); font-size: 11px; text-align: center;
+}
+.search-empty, .search-hint {
+  padding: 16px; color: var(--text-dim); font-size: 11px; text-align: center;
+}
+.search-result-item {
+  padding: 6px 10px; cursor: pointer;
+  border-bottom: 1px solid rgba(255,255,255,0.03);
+  display: flex; flex-direction: column; gap: 2px;
+}
+.search-result-item:hover { background: rgba(255,255,255,0.04); }
+.search-result-file {
+  font-size: 11px; font-weight: 600;
+  color: var(--text);
+  display: flex; align-items: baseline; gap: 6px;
+  overflow: hidden;
+}
+.search-result-path {
+  font-size: 10px; color: var(--text-dim); font-weight: 400;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.search-result-line {
+  display: flex; gap: 8px; font-size: 11px;
+  font-family: "Cascadia Code", "Fira Code", monospace;
+  overflow: hidden;
+}
+.search-result-lnum {
+  color: var(--text-dim); min-width: 32px; text-align: right;
+  flex-shrink: 0;
+}
+.search-result-text {
+  color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
 .files-panel {
   min-width: 140px;
   background: var(--bg-pane);

@@ -69,16 +69,27 @@ npm run dev
 
 **端口发现流程：**
 
-1. Express 启动 → `server.listen(0)` → 操作系统分配空闲端口 → 端口写入 `~/.harness/ports/express-port`
-2. Vite 立即启动（不阻塞）→ 通过中间件代理 `/api`、`/ws`、`/_browser`，该中间件在每次请求时读取 `~/.harness/ports/express-port` → 在 Express 可用之前返回 `503 Service Unavailable`，之后就正常转发
-3. Vite 绑定 → `port: 0` → 操作系统分配空闲端口 → 端口写入 `~/.harness/ports/vite-port`
+1. Express 启动 → `server.listen(0)` → 操作系统分配空闲端口 → 端口写入 `%TEMP%/harness-ports/express-port`
+2. Vite 立即启动（不阻塞）→ 通过中间件代理 `/api`、`/ws`、`/_browser`，该中间件在每次请求时读取 `%TEMP%/harness-ports/express-port` → 在 Express 可用之前返回 `503 Service Unavailable`，之后就正常转发
+3. Vite 绑定 → `port: 0` → 操作系统分配空闲端口 → 端口写入 `%TEMP%/harness-ports/vite-port`
 4. Electron（桌面模式）读取这两个文件以连接 Express 并加载 Vite 开发页面
 
 两个服务器都让操作系统自主决定端口 — 没有任何硬编码的端口号。
 
-**过期端口清理：** 在关闭时（Ctrl+C、SIGTERM），Express 会删除 `~/.harness/ports/express-port`。如果 Express 意外崩溃导致文件残留，Vite 代理中间件会检测到死端口（`ECONNREFUSED`），使缓存的端口失效，并在下次请求时重新读取文件。
+**过期端口清理：** 在关闭时（Ctrl+C、SIGTERM），Express 会删除端口文件。如果 Express 意外崩溃导致文件残留，Vite 代理中间件会检测到死端口（`ECONNREFUSED`），使缓存的端口失效，并在下次请求时重新读取文件。端口文件存储在 `%TEMP%/harness-ports/`（系统临时目录）以避免沙箱环境的文件系统权限问题。
 
-**单实例锁：** 桌面应用使用 `app.requestSingleInstanceLock()` 来防止同时运行多个实例。如果启动第二个实例，它会立即退出，由第一个实例打开一个新窗口。这避免了端口文件冲突和共享状态（`~/.harness/` 文件）损坏的问题。
+**单实例锁：** 桌面应用使用自定义 PID 文件锁替代 Electron 的 `app.requestSingleInstanceLock()`（Windows 沙箱环境下不可靠）。启动时将当前 PID 写入 `%TEMP%/harness-pid`；如果 PID 文件已存在且对应进程仍存活，新实例将退出。正常关闭时删除 PID 文件。这避免了端口文件冲突和共享状态（`~/.harness/` 文件）损坏的问题。
+
+**文件完整性：** 所有 `~/.harness/` 文件仅存储在用户本机。如被外部修改，影响为非破坏性的——应用会检测损坏并优雅重置：
+
+| 文件 | 如被篡改 |
+|------|----------|
+| `ports/express-port` | `waitForOwnServerPort` 通过 `/api/health` + PID 校验验证端口。PID 不匹配 → 超时 → 应用显示启动错误。 |
+| `ports/vite-port` | Electron 加载错误 URL → 连接被拒绝 → 加载页面超时。 |
+| `store/client-state.json` | `JSON.parse` 失败 → 所有状态重置为默认值。有效但错误的 JSON → UI 显示错误的模型/路径；模型字符串仅导致 API 调用失败；路径仅显示，不会自动打开。 |
+| `store/api-keys.enc` | AES-256-GCM 认证标签解密不匹配 → API 密钥重置。文件在没有 `~/.harness/.key` 机器密钥的情况下不可读。 |
+| `store/memory.db` | SQLite 损坏 → 记忆功能重置。 |
+| `.key` | 被替换或删除 → 现有 `api-keys.enc` 永久不可读（下次保存时生成新密钥）。 |
 
 ## 架构
 
@@ -108,7 +119,7 @@ Harness 是一个客户端-服务器应用，可选配 Electron 桌面壳。
 
 ### 服务端（`server/`）
 
-Node.js Express 服务器是骨干。它拥有所有后端逻辑，从不在浏览器中运行。操作系统在启动时分配空闲端口，并写入 `~/.harness/ports/express-port` 以供发现。
+Node.js Express 服务器是骨干。它拥有所有后端逻辑，从不在浏览器中运行。操作系统在启动时分配空闲端口，并写入 `%TEMP%/harness-ports/express-port` 以供发现。
 
 | 层 | 文件 | 职责 |
 |---|---|---|
@@ -1441,7 +1452,7 @@ Harness 可以作为 **MCP 服务器**，将其文件系统、终端、git 和�
 
 #### 选项 A：SSE（最简单 — 无需额外配置）
 
-启动服务器，然后将任何 MCP 客户端指向运行的端点（查看控制台输出获取端口，或读取 `~/.harness/ports/express-port`）：
+启动服务器，然后将任何 MCP 客户端指向运行的端点（查看控制台输出获取端口，或读取 `%TEMP%/harness-ports/express-port`）：
 
 ```json
 {
@@ -1493,7 +1504,7 @@ Cursor 配置（`Settings > MCP > Add Server`）：
 
 ### Electron 桌面应用（已打包）
 
-当 Harness 作为桌面应用安装时，服务器自动启动。端口写入 `~/.harness/ports/express-port`。仅使用 SSE 传输 — 无需 `command`/`cwd`：
+当 Harness 作为桌面应用安装时，服务器自动启动。端口写入 `%TEMP%/harness-ports/express-port`。仅使用 SSE 传输 — 无需 `command`/`cwd`：
 
 ```json
 {
@@ -1600,7 +1611,7 @@ Harness/
 │
 ├── client/
 │   ├── package.json                 # 客户端依赖（React 18、Monaco、xterm.js）、Vite + TypeScript
-│   ├── vite.config.ts               # Vite 开发配置：从 ~/.harness/ports/express-port 读取 Express 端口，代理 /api + /ws + /_browser
+│   ├── vite.config.ts               # Vite 开发配置：从 %TEMP%/harness-ports/express-port 读取 Express 端口，代理 /api + /ws + /_browser
 │   ├── tsconfig.json                # 客户端 TypeScript 配置（ES2020、DOM、react-jsx）
 │   ├── index.html                   # SPA 入口：在 <div id="root"> 中挂载 React 应用
 │   ├── public/

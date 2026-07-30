@@ -9,7 +9,9 @@ import os from "os";
 const HARNESS_DIR = path.join(os.homedir(), ".harness");
 
 export const STORE_DIR = path.join(HARNESS_DIR, "store");
-export const PORTS_DIR = path.join(HARNESS_DIR, "ports");
+// ── Ports ──
+// Use tmpdir to avoid sandbox permission issues on some machines
+export const PORTS_DIR = path.join(os.tmpdir(), "harness-ports");
 export const SNAPSHOTS_DIR = path.join(HARNESS_DIR, "snapshots");
 
 // ── Machine key (auto-generated, used for api-keys encryption) ──

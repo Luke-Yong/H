@@ -78,9 +78,20 @@ This starts both the backend and frontend. The OS assigns both ports; check cons
 
 Both servers let the OS decide — no hardcoded port numbers anywhere.
 
-**Stale port cleanup:** On shutdown (Ctrl+C, SIGTERM), Express deletes `~/.harness/ports/express-port`. If Express crashes unexpectedly and the file lingers, the Vite proxy middleware detects the dead port (`ECONNREFUSED`), invalidates the cached port, and re-reads the file on the next request.
+**Stale port cleanup:** On shutdown (Ctrl+C, SIGTERM), Express deletes the port file. If Express crashes unexpectedly and the file lingers, the Vite proxy middleware detects the dead port (`ECONNREFUSED`), invalidates the cached port, and re-reads the file on the next request. Port files are stored in `%TEMP%/harness-ports/` (platform temp directory) to avoid filesystem permission issues on sandboxed environments.
 
-**Single-instance lock:** The desktop app uses `app.requestSingleInstanceLock()` to prevent multiple instances from running simultaneously. If a second instance is launched, it quits immediately and the first instance opens a new window instead. This prevents port file trampling and shared-state (`~/.harness/` files) corruption that would occur if two Express servers competed for the same resources.
+**Single-instance lock:** The desktop app uses a custom PID-file lock instead of Electron's `app.requestSingleInstanceLock()` (which is unreliable on Windows sandboxed environments). On startup, it writes the current PID to `%TEMP%/harness-pid`; if a PID file already exists with a live process, the new instance quits. On clean shutdown, the PID file is removed. This prevents port file trampling and shared-state (`~/.harness/` files) corruption that would occur if two Express servers competed for the same resources.
+
+**File integrity:** All `~/.harness/` files are local to the user's machine. If modified by external actors, the effects are non-destructive — the app detects corruption and resets gracefully:
+
+| File | If tampered |
+|------|-------------|
+| `ports/express-port` | `waitForOwnServerPort` validates via `/api/health` + PID check. Wrong PID → timeout → app shows startup error. |
+| `ports/vite-port` | Electron loads wrong URL → connection refused → loading screen with timeout. |
+| `store/client-state.json` | `JSON.parse` failure → all state resets to defaults. Valid but wrong JSON → UI shows bad model/paths; model strings just fail API calls; paths are displayed, never auto-opened. |
+| `store/api-keys.enc` | AES-256-GCM auth tag mismatch on decrypt → API keys reset. File is unreadable without the machine key at `~/.harness/.key`. |
+| `store/memory.db` | SQLite corruption → memory features reset. |
+| `.key` | Replaced or deleted → existing `api-keys.enc` becomes permanently unreadable (new key generated on next save). |
 
 ## Architecture
 

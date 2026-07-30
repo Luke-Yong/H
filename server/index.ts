@@ -1600,6 +1600,66 @@ app.get("/api/lsp/status", (_req, res) => {
   }
 });
 
+// ── File search ──
+app.get("/api/search", (req, res) => {
+  try {
+    const q = String(req.query.q || "").trim();
+    const root = String(req.query.root || process.cwd());
+    if (!q || q.length < 2) return res.json({ results: [], query: q });
+
+    const resultLimit = 50;
+    const results: Array<{ file: string; line: number; text: string }> = [];
+
+    // Try ripgrep first, fall back to Node.js grep
+    try {
+      const cmd = `rg --no-heading -n -i --max-count ${resultLimit} --no-ignore-vcs -g '!.git' -g '!node_modules' -g '!dist' -g '!.next' -g '!*.min.js' -g '!*.map' ${JSON.stringify(q)}`;
+      const raw = execSync(cmd, { encoding: "utf8", timeout: 10000, cwd: root }).trim();
+      if (raw) {
+        for (const line of raw.split(/\r?\n/)) {
+          // ripgrep output: file:linenum:text
+          const m = line.match(/^(.+?):(\d+):(.*)$/);
+          if (m) results.push({ file: m[1], line: parseInt(m[2], 10), text: m[3].substring(0, 200) });
+        }
+      }
+    } catch {
+      // ripgrep not available or timed out — fall back to Node.js
+      results.length = 0;
+      const lower = q.toLowerCase();
+      function searchDir(dir: string, depth = 0) {
+        if (depth > 8 || results.length >= resultLimit) return;
+        let entries: fs.Dirent[];
+        try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+        for (const e of entries) {
+          if (results.length >= resultLimit) break;
+          const fp = path.join(dir, e.name);
+          if (e.isDirectory()) {
+            const skip = [".git", "node_modules", "dist", ".next", ".vscode", "__pycache__", "target"];
+            if (!skip.includes(e.name) && !e.name.startsWith(".")) searchDir(fp, depth + 1);
+          } else if (e.isFile()) {
+            const ext = path.extname(e.name).toLowerCase();
+            const textExts = [".ts", ".tsx", ".js", ".jsx", ".json", ".css", ".html", ".md", ".py", ".rs", ".go", ".java", ".c", ".cpp", ".h", ".hpp", ".yaml", ".yml", ".toml", ".xml", ".svg", ".txt", ".env", ".gitignore", ".sh", ".bat", ".ps1"];
+            if (!textExts.includes(ext)) continue;
+            try {
+              const content = fs.readFileSync(fp, "utf8");
+              const lines = content.split(/\r?\n/);
+              for (let i = 0; i < lines.length && results.length < resultLimit; i++) {
+                if (lines[i].toLowerCase().includes(lower)) {
+                  results.push({ file: path.relative(root, fp).replace(/\\/g, "/"), line: i + 1, text: lines[i].substring(0, 200) });
+                }
+              }
+            } catch { /* skip unreadable files */ }
+          }
+        }
+      }
+      searchDir(root);
+    }
+
+    res.json({ results: results.slice(0, resultLimit), query: q });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 // ── Health check ──
 app.get("/api/health", (_req, res) => {
   res.json({ status: "ok", pid: process.pid });
@@ -2165,6 +2225,9 @@ if (process.env.NODE_ENV !== "test") {
       fs.mkdirSync(path.dirname(EXPRESS_PORT_FILE), { recursive: true });
       fs.writeFileSync(EXPRESS_PORT_FILE, String(port));
     } catch {}
+  });
+  server.on("error", (err) => {
+    console.error(`[harness:server] Server error:`, err);
   });
 }
 

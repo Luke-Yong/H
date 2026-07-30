@@ -10,6 +10,7 @@ import { readFileFromHandle, writeFileToHandle } from "./browserFs";
 import { useResizable, ResizeHandle } from "../hooks/useResizable";
 import NameDialog from "./NameDialog";
 import ScmPanel from "./ScmPanel";
+import SearchPanel from "./SearchPanel";
 import type { FsEntry } from "./FilesPanel";
 
 interface BrowserTab {
@@ -2018,7 +2019,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
           <div className="activity-bar-spacer" />
           <button className="activity-bar-btn" title="Manage"><i className="codicon codicon-settings-gear" /></button>
         </div>
-        {sidebarVisible && sidebarPanel && sidebarPanel !== "browser" && sidebarPanel !== "files" && sidebarPanel !== "scm" && (
+        {sidebarVisible && sidebarPanel && sidebarPanel !== "browser" && sidebarPanel !== "files" && sidebarPanel !== "scm" && sidebarPanel !== "search" && (
           <div className="sidebar-placeholder">
             <div className="sidebar-placeholder-text">{sidebarItems.find((i) => i.id === sidebarPanel)?.label || ""}</div>
             {sidebarPanel === "search" && <div className="placeholder-sub">Search across files coming soon</div>}
@@ -2142,12 +2143,12 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
           <ResizeHandle onMouseDown={onFilePanelDrag} />
         </>
       )}
-      {sidebarVisible && sidebarPanel && sidebarPanel !== "files" && sidebarPanel !== "browser" && sidebarPanel !== "scm" && (
+      {sidebarVisible && sidebarPanel === "search" && (
+        <SearchPanel fsBasePath={fsBasePath} onOpenFile={openFileByFsPath} />
+      )}
+      {sidebarVisible && sidebarPanel && sidebarPanel !== "files" && sidebarPanel !== "browser" && sidebarPanel !== "scm" && sidebarPanel !== "search" && (
         <div className="sidebar-placeholder">
           <div className="sidebar-placeholder-text">{sidebarItems.find((i) => i.id === sidebarPanel)?.label || ""}</div>
-          {sidebarPanel === "search" && (
-            <div className="placeholder-sub">Search across files coming soon</div>
-          )}
           {sidebarPanel === "debug" && (
             <div className="placeholder-sub">Debug console coming soon</div>
           )}

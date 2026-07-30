@@ -126,9 +126,10 @@ async function waitForUrl(url, timeoutMs) {
   return false;
 }
 
-const PORT_DIR = path.join(require("os").homedir(), ".harness", "ports");
-const EXPRESS_PORT_FILE = path.join(PORT_DIR, "express-port");
-const VITE_PORT_FILE = path.join(PORT_DIR, "vite-port");
+// Use tmpdir for port files to avoid sandbox permission issues
+const PORTS_DIR = path.join(require("os").tmpdir(), "harness-ports");
+const EXPRESS_PORT_FILE = path.join(PORTS_DIR, "express-port");
+const VITE_PORT_FILE = path.join(PORTS_DIR, "vite-port");
 
 function readPortFile(filePath) {
   try {
@@ -554,16 +555,15 @@ function registerIpc() {
 }
 
 async function loadUrlWhenReady(win, targetUrl, healthUrl, timeoutMs, title) {
-  const dataUrl = `data:text/html;charset=utf-8,${encodeURIComponent(
-    loadingPageHtml(title, `Waiting for ${healthUrl}...`)
-  )}`;
+  // Use base64 data URL to avoid ERR_FAILED (-2) from large encodeURIComponent strings
+  const html = loadingPageHtml(title, `Waiting for ${healthUrl}...`);
+  const dataUrl = `data:text/html;base64,${Buffer.from(html, "utf8").toString("base64")}`;
   await win.loadURL(dataUrl);
 
   const ok = await waitForUrl(healthUrl, timeoutMs);
   if (!ok) {
-    const failUrl = `data:text/html;charset=utf-8,${encodeURIComponent(
-      loadingPageHtml(title, `Timed out waiting for ${healthUrl}.`)
-    )}`;
+    const failHtml = loadingPageHtml(title, `Timed out waiting for ${healthUrl}.`);
+    const failUrl = `data:text/html;base64,${Buffer.from(failHtml, "utf8").toString("base64")}`;
     await win.loadURL(failUrl);
     return false;
   }
@@ -578,10 +578,10 @@ async function createMainWindow() {
   const win = new BrowserWindow({
     width: 1400,
     height: 900,
+    show: false,
     frame: false,
     icon: path.join(__dirname, "..", "build", "icon.ico"),
     backgroundColor: "#1e1e1e",
-    show: !isDev, // dev: show manually after loading screen; prod: show immediately
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -595,19 +595,11 @@ async function createMainWindow() {
   attachPopupInterception(win.webContents);
 
   if (isDev) {
-    // Show loading page while waiting for Express server (window hidden until now)
-    const loadingUrl = `data:text/html;charset=utf-8,${encodeURIComponent(
-      loadingPageHtml("Harness", "Starting services...")
-    )}`;
-    await win.loadURL(loadingUrl);
-    win.show(); // Reveal with loading screen visible
-
     const expressPort = await waitForOwnServerPort(30_000);
     if (!expressPort) {
-      const failUrl = `data:text/html;charset=utf-8,${encodeURIComponent(
-        loadingPageHtml("Harness", "Express server failed to start.")
-      )}`;
-      await win.loadURL(failUrl);
+      const failHtml = loadingPageHtml("Harness", "Express server failed to start.");
+      win.loadURL(`data:text/html;base64,${Buffer.from(failHtml, "utf8").toString("base64")}`);
+      win.show();
       return;
     }
     serverPort = expressPort;
@@ -615,21 +607,26 @@ async function createMainWindow() {
     // Express ready — find Vite dev server
     const vitePort = await waitForPortFile(VITE_PORT_FILE, 120_000);
     if (!vitePort) {
-      const failUrl = `data:text/html;charset=utf-8,${encodeURIComponent(
-        loadingPageHtml("Harness", "Vite dev server failed to start.")
-      )}`;
-      await win.loadURL(failUrl);
+      const failHtml = loadingPageHtml("Harness", "Vite dev server failed to start.");
+      win.loadURL(`data:text/html;base64,${Buffer.from(failHtml, "utf8").toString("base64")}`);
+      win.show();
       return;
     }
-    await win.loadURL(`http://localhost:${vitePort}`);
+    await loadUrlWhenReady(
+      win,
+      `http://localhost:${vitePort}`,
+      `http://localhost:${vitePort}`,
+      10_000,
+      "Harness"
+    );
+    win.show();
     win.webContents.openDevTools({ mode: "detach" });
   } else {
     const port = await waitForOwnServerPort(30_000);
     if (!port) {
-      const failUrl = `data:text/html;charset=utf-8,${encodeURIComponent(
-        loadingPageHtml("Harness", "Express server failed to start.")
-      )}`;
-      await win.loadURL(failUrl);
+      const failHtml = loadingPageHtml("Harness", "Express server failed to start.");
+      win.loadURL(`data:text/html;base64,${Buffer.from(failHtml, "utf8").toString("base64")}`);
+      win.show();
       return;
     }
     serverPort = port;
@@ -640,24 +637,100 @@ async function createMainWindow() {
       2_000,
       "Harness"
     );
+    win.show();
   }
 }
 
 // Must be set before app.whenReady() on Windows to apply the taskbar icon
 app.setAppUserModelId("com.harness.ide");
 
-// ── Single-instance lock ──
-// Prevents port file trampling and shared-state corruption when multiple
-// instances of the app are launched. The second instance quits immediately
-// and the first instance opens a new window instead.
-const gotTheLock = app.requestSingleInstanceLock();
+// ── Custom single-instance lock (PID-file based) ──
+// Electron's requestSingleInstanceLock() is unreliable on Windows (ACCESS_DENIED).
+// We use a PID file to track the running instance.
+const PID_FILE = path.join(require("os").tmpdir(), "harness-pid");
+
+function isProcessAlive(pid) {
+  try {
+    // On Windows: use tasklist to check if PID exists
+    const { execSync } = require("child_process");
+    execSync(`tasklist /FI "PID eq ${pid}" 2>nul | findstr "${pid}"`, { timeout: 3000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function acquirePidLock() {
+  try {
+    const dir = path.dirname(PID_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+    if (fs.existsSync(PID_FILE)) {
+      const raw = fs.readFileSync(PID_FILE, "utf8").trim();
+      const stalePid = parseInt(raw, 10);
+      if (stalePid > 0 && isProcessAlive(stalePid)) {
+        return false; // Another instance is running
+      }
+      // Stale lock — remove it
+      try { fs.unlinkSync(PID_FILE); } catch {}
+    }
+
+    fs.writeFileSync(PID_FILE, String(process.pid));
+    return true;
+  } catch {
+    return true; // If we can't check, allow startup
+  }
+}
+
+function releasePidLock() {
+  try {
+    if (fs.existsSync(PID_FILE)) {
+      const raw = fs.readFileSync(PID_FILE, "utf8").trim();
+      const pid = parseInt(raw, 10);
+      if (pid === process.pid) {
+        fs.unlinkSync(PID_FILE);
+      }
+    }
+  } catch {}
+}
+
+// Clean up stale files from previous runs
+try { fs.unlinkSync(EXPRESS_PORT_FILE); } catch {}
+try { fs.unlinkSync(VITE_PORT_FILE); } catch {}
+try {
+  const portsDir = path.dirname(EXPRESS_PORT_FILE);
+  if (fs.existsSync(portsDir)) {
+    for (const f of fs.readdirSync(portsDir)) {
+      try { fs.unlinkSync(path.join(portsDir, f)); } catch {}
+    }
+  }
+} catch {}
+
+const gotTheLock = acquirePidLock();
 if (!gotTheLock) {
   app.quit();
 } else {
   app.on("second-instance", () => {
-    createMainWindow();
+    // Focus the existing window instead of creating a new one
+    const existingWin = BrowserWindow.getAllWindows()[0];
+    if (existingWin) {
+      if (existingWin.isMinimized()) existingWin.restore();
+      existingWin.focus();
+    }
   });
 }
+
+// Clean up port files and PID lock on exit
+app.on("before-quit", () => {
+  releasePidLock();
+  try { fs.unlinkSync(EXPRESS_PORT_FILE); } catch {}
+  try { fs.unlinkSync(VITE_PORT_FILE); } catch {}
+});
+process.on("exit", () => {
+  releasePidLock();
+  try { fs.unlinkSync(EXPRESS_PORT_FILE); } catch {}
+  try { fs.unlinkSync(VITE_PORT_FILE); } catch {}
+});
 
 app.whenReady().then(async () => {
   registerIpc();
