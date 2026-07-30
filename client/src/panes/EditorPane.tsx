@@ -50,7 +50,7 @@ export interface EditorPaneHandle {
   /** Reject agent changes for a file by its fsPath (restores original, clears decorations). */
   rejectAgentChange: (fsPath: string) => void;
   /** Switch active tab to a file by its fsPath. */
-  openFileByFsPath: (fsPath: string) => void;
+  openFileByFsPath: (fsPath: string, line?: number, query?: string) => void;
   /** Close a file tab by its fsPath. */
   closeFileByFsPath: (fsPath: string) => void;
   /** Rename a file tab by its old fsPath to a new fsPath. */
@@ -199,6 +199,8 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   const lspErrorsRef = useRef<Record<string, string>>({});
   const editorByFileIdRef = useRef<Record<string, EditorViewHandle | null>>({});
   const pendingProblemSelectionRef = useRef<PendingProblemSelection | null>(null);
+  const pendingSearchNavRef = useRef<{ fileId?: string; filePath?: string; line: number; query: string } | null>(null);
+  const searchHighlightDecoRef = useRef<Record<string, string[]>>({});
   const { size: filePanelW, onMouseDown: onFilePanelDrag } = useResizable(200, 120, 500);
   const { size: termH, onMouseDown: onTermDrag } = useResizable(220, 80, 600, true);
   const [sidebarPanel, setSidebarPanel] = useState<string>("");
@@ -1072,6 +1074,53 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     });
   }, [activeFileId, files]);
 
+  // Consume pending search navigation: scroll to line and highlight match
+  useEffect(() => {
+    const pending = pendingSearchNavRef.current;
+    if (!pending) return;
+    const resolvedFileId = pending.fileId
+      || files.find((f) => f._fsPath && pending.filePath && normPath(f._fsPath) === normPath(pending.filePath))?.id;
+    if (!resolvedFileId || resolvedFileId !== activeFileId) return;
+    pending.fileId = resolvedFileId;
+    const editor = editorByFileIdRef.current[resolvedFileId];
+    if (!editor) return;
+    requestAnimationFrame(() => {
+      const model = (editor as any).getModel?.();
+      if (!model) { pendingSearchNavRef.current = null; return; }
+      const maxLine = model.getLineCount?.() || 1;
+      const line = Math.min(pending.line, maxLine);
+      editor.revealPositionInCenter({ lineNumber: line, column: 1 });
+      editor.setPosition({ lineNumber: line, column: 1 });
+      editor.focus();
+
+      // Highlight the matched text on the line
+      const monaco = (window as any).monaco;
+      if (monaco && pending.query) {
+        // Clear previous search highlights for this file
+        const oldIds = searchHighlightDecoRef.current[resolvedFileId];
+        if (oldIds?.length) editor.deltaDecorations(oldIds, []);
+
+        const lineContent = model.getLineContent(line);
+        const lowerLine = lineContent.toLowerCase();
+        const lowerQuery = pending.query.toLowerCase();
+        let idx = 0;
+        const newDecos: any[] = [];
+        while ((idx = lowerLine.indexOf(lowerQuery, idx)) !== -1) {
+          newDecos.push({
+            range: new monaco.Range(line, idx + 1, line, idx + 1 + pending.query.length),
+            options: { inlineClassName: "search-result-highlight", overviewRuler: { color: "#4D6BFE", position: monaco.editor.OverviewRulerLane.Center } },
+          });
+          idx += pending.query.length;
+        }
+        if (newDecos.length) {
+          const ids = editor.deltaDecorations([], newDecos);
+          searchHighlightDecoRef.current[resolvedFileId] = ids;
+        }
+      }
+      pendingSearchNavRef.current = null;
+    });
+  }, [activeFileId, files]);
+
   // Keep browser pages under one top-level editor tab and focus it when a child tab is added.
   const prevBrowserCount = useRef(0);
   useEffect(() => {
@@ -1105,7 +1154,13 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   }, [files]);
 
   const openFsFile = useCallback(async (filePath: string, handle?: FileSystemFileHandle) => {
-    const target = normPath(filePath);
+    // Resolve relative paths against the project root (search returns project-relative paths,
+    // but the server's CWD is the Harness directory, not the opened project).
+    let resolvedPath = filePath;
+    if (!filePath.match(/^[a-zA-Z]:[\\/]/) && !filePath.startsWith("\\\\") && !filePath.startsWith("/") && fsBasePath) {
+      resolvedPath = fsBasePath.replace(/[/\\]$/, "") + "/" + filePath;
+    }
+    const target = normPath(resolvedPath);
     const name = filePath.split(/[/\\]/).pop() || "untitled";
     // Re-read from disk so external edits (saved via Ctrl+S / agent tools) are reflected.
     // Even if a tab is already open, fetch fresh content from disk.
@@ -1119,7 +1174,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     // Always re-read from disk (skip handles — those are browser File System API).
     if (!handle && !existing?._isNew) {
       try {
-        const res = await fetch(`/api/fs/read?path=${encodeURIComponent(filePath)}`);
+        const res = await fetch(`/api/fs/read?path=${encodeURIComponent(resolvedPath)}`);
         const data = await res.json();
         let openId = existing?.id || "";
         if (existing) {
@@ -1129,7 +1184,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
           openId = existing.id;
         } else {
           const f = createFile(name);
-          f._fsPath = filePath;
+          f._fsPath = resolvedPath;
           f.content = data.content;
           f._encoding = data.encoding || "utf8";
           openId = f.id;
@@ -1157,12 +1212,12 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     }
     try {
       const f = createFile(name);
-      f._fsPath = filePath;
+      f._fsPath = resolvedPath;
       if (handle) {
         f.content = await readFileFromHandle(handle);
         f._fsHandle = handle;
       } else {
-        const res = await fetch(`/api/fs/read?path=${encodeURIComponent(filePath)}`);
+        const res = await fetch(`/api/fs/read?path=${encodeURIComponent(resolvedPath)}`);
         const data = await res.json();
         f.content = data.content;
         f._encoding = data.encoding || "utf8";
@@ -1406,13 +1461,25 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     if (f) rejectAgentChanges(f.id);
   }, [files, rejectAgentChanges]);
 
-  // Switch to file by fsPath
-  const openFileByFsPath = useCallback((fsPath: string) => {
-    const f = files.find((x) => x._fsPath && normPath(x._fsPath) === normPath(fsPath));
-    if (f) { setActiveFileId(f.id); return; }
+  // Switch to file by fsPath, optionally scroll to line and highlight query
+  const openFileByFsPath = useCallback((fsPath: string, line?: number, query?: string) => {
+    // Resolve relative paths against project root
+    let resolvedFsPath = fsPath;
+    if (!fsPath.match(/^[a-zA-Z]:[\\/]/) && !fsPath.startsWith("\\\\") && !fsPath.startsWith("/") && fsBasePath) {
+      resolvedFsPath = fsBasePath.replace(/[/\\]$/, "") + "/" + fsPath;
+    }
+    if (line && query) {
+      pendingSearchNavRef.current = { filePath: resolvedFsPath, line, query };
+    }
+    const f = files.find((x) => x._fsPath && normPath(x._fsPath) === normPath(resolvedFsPath));
+    if (f) {
+      setActiveFileId(f.id);
+      if (line && query) pendingSearchNavRef.current!.fileId = f.id;
+      return;
+    }
     // File not open yet — open it from disk
     openFsFile(fsPath);
-  }, [files, openFsFile]);
+  }, [files, fsBasePath, openFsFile]);
 
   // Apply agent diff decorations when agent changes or active file changes
   useEffect(() => {

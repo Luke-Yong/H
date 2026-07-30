@@ -1601,57 +1601,182 @@ app.get("/api/lsp/status", (_req, res) => {
 });
 
 // ── File search ──
+// Aligned with agent grep (agent.ts): regex matching, secret-file excludes,
+// optional glob/subdir filtering, natural file-walk order.
+
+// One-time check: is ripgrep available?
+let _rgAvailable: boolean | null = null;
+function rgAvailable(): boolean {
+  if (_rgAvailable !== null) return _rgAvailable;
+  try { execSync("rg --version", { encoding: "utf8", timeout: 3000, stdio: "pipe" }); _rgAvailable = true; }
+  catch { _rgAvailable = false; }
+  return _rgAvailable;
+}
+
 app.get("/api/search", (req, res) => {
   try {
     const q = String(req.query.q || "").trim();
     const root = String(req.query.root || process.cwd());
+    const glob = String(req.query.glob || "").trim();
+    const subdir = String(req.query.subdir || "").trim();
     if (!q || q.length < 2) return res.json({ results: [], query: q });
 
-    const resultLimit = 50;
+    const resultLimit = 500;
     const results: Array<{ file: string; line: number; text: string }> = [];
+    const searchRoot = subdir ? path.resolve(root, subdir) : root;
 
-    // Try ripgrep first, fall back to Node.js grep
-    try {
-      const cmd = `rg --no-heading -n -i --max-count ${resultLimit} --no-ignore-vcs -g '!.git' -g '!node_modules' -g '!dist' -g '!.next' -g '!*.min.js' -g '!*.map' ${JSON.stringify(q)}`;
-      const raw = execSync(cmd, { encoding: "utf8", timeout: 10000, cwd: root }).trim();
-      if (raw) {
-        for (const line of raw.split(/\r?\n/)) {
-          // ripgrep output: file:linenum:text
-          const m = line.match(/^(.+?):(\d+):(.*)$/);
-          if (m) results.push({ file: m[1], line: parseInt(m[2], 10), text: m[3].substring(0, 200) });
+    // ── ripgrep content search ──
+    let usedFallback = !rgAvailable();
+    if (rgAvailable()) {
+      try {
+        // Build glob include filter if present (e.g. "*.ts" -> -g '*.ts')
+        const globArgs = glob ? `-g ${JSON.stringify(glob)}` : "";
+        const cmd = [
+          "rg", "--no-heading", "-n", "-i",
+          "--no-ignore-vcs",
+          // Dir excludes (matching agent's node_modules/.git + common build/virtual env dirs)
+          "-g", "'!**/.git/**'",
+          "-g", "'!**/node_modules/**'",
+          "-g", "'!**/dist/**'",
+          "-g", "'!**/.next/**'",
+          "-g", "'!**/venv/**'",
+          "-g", "'!**/.venv/**'",
+          "-g", "'!**/__pycache__/**'",
+          "-g", "'!**/.pytest_cache/**'",
+          "-g", "'!**/env/**'",
+          // Secret-file excludes (matching agent's SECRET_PATTERNS)
+          "-g", "'!*.env*'",
+          "-g", "'!*.key'",
+          "-g", "'!*.pem'",
+          "-g", "'!*.p12'",
+          "-g", "'!*.pfx'",
+          // Binary / generated file excludes
+          "-g", "'!*.min.js'",
+          "-g", "'!*.map'",
+          "-g", "'!*.lock'",
+          "-g", "'!*.pyc'",
+          "-g", "'!*.png'",
+          "-g", "'!*.jpg'",
+          "-g", "'!*.gif'",
+          "-g", "'!*.ico'",
+          "-g", "'!*.woff*'",
+          globArgs,
+          JSON.stringify(q),
+        ].filter(Boolean).join(" ");
+        const raw = execSync(cmd, { encoding: "utf8", timeout: 10000, cwd: searchRoot }).trim();
+        if (raw) {
+          for (const line of raw.split(/\r?\n/)) {
+            if (results.length >= resultLimit) break;
+            const m = line.match(/^(.+?):(\d+):(.*)$/);
+            if (m) results.push({ file: m[1], line: parseInt(m[2], 10), text: m[3].substring(0, 120) });
+          }
         }
+      } catch {
+        // rg timed out or errored — fall back to Node.js
+        usedFallback = true;
       }
-    } catch {
-      // ripgrep not available or timed out — fall back to Node.js
+    }
+    if (usedFallback) {
       results.length = 0;
-      const lower = q.toLowerCase();
-      function searchDir(dir: string, depth = 0) {
-        if (depth > 8 || results.length >= resultLimit) return;
+      let regex: RegExp;
+      try { regex = new RegExp(q, "gi"); } catch { regex = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"); }
+
+      function searchDir(dir: string) {
+        if (results.length >= resultLimit) return;
         let entries: fs.Dirent[];
         try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
         for (const e of entries) {
           if (results.length >= resultLimit) break;
-          const fp = path.join(dir, e.name);
+          const full = path.join(dir, e.name);
+          // Dir excludes — matching agent: only .git + node_modules + build/virtual env dirs
           if (e.isDirectory()) {
-            const skip = [".git", "node_modules", "dist", ".next", ".vscode", "__pycache__", "target"];
-            if (!skip.includes(e.name) && !e.name.startsWith(".")) searchDir(fp, depth + 1);
-          } else if (e.isFile()) {
-            const ext = path.extname(e.name).toLowerCase();
-            const textExts = [".ts", ".tsx", ".js", ".jsx", ".json", ".css", ".html", ".md", ".py", ".rs", ".go", ".java", ".c", ".cpp", ".h", ".hpp", ".yaml", ".yml", ".toml", ".xml", ".svg", ".txt", ".env", ".gitignore", ".sh", ".bat", ".ps1"];
-            if (!textExts.includes(ext)) continue;
-            try {
-              const content = fs.readFileSync(fp, "utf8");
-              const lines = content.split(/\r?\n/);
-              for (let i = 0; i < lines.length && results.length < resultLimit; i++) {
-                if (lines[i].toLowerCase().includes(lower)) {
-                  results.push({ file: path.relative(root, fp).replace(/\\/g, "/"), line: i + 1, text: lines[i].substring(0, 200) });
-                }
-              }
-            } catch { /* skip unreadable files */ }
+            const skip = [".git", "node_modules", "dist", ".next", "venv", ".venv", "__pycache__", ".pytest_cache", "env", ".vscode", "target"];
+            if (!skip.includes(e.name)) searchDir(full);
+            continue;
           }
+          // Secret-file guard (matches agent's SECRET_PATTERNS)
+          const lowerName = e.name.toLowerCase();
+          if (/\.env$/i.test(e.name) || /\.env\..*$/i.test(e.name)) continue;
+          if (/credentials|secret/i.test(e.name)) continue;
+          if (/\.(key|pem|p12|pfx)$/i.test(e.name)) continue;
+          if (/config\/.*(secret|key)/i.test(path.relative(searchRoot, full))) continue;
+          // Glob filter
+          if (glob) {
+            const ext = path.extname(e.name).toLowerCase();
+            if (glob.startsWith("*.")) { if (ext !== glob.slice(1).toLowerCase()) continue; }
+            else if (glob.startsWith(".")) { if (ext !== glob.toLowerCase()) continue; }
+            else if (!lowerName.includes(glob.toLowerCase())) continue;
+          }
+          // Skip binary / generated files
+          if (/\.(min\.js|map|lock|pyc|png|jpg|jpeg|gif|ico|woff2?|ttf|eot)$/i.test(e.name)) continue;
+          // Check filename match (in addition to content)
+          let nameMatch = false;
+          try { nameMatch = new RegExp(q, "i").test(e.name); } catch {}
+          try {
+            const text = fs.readFileSync(full, "utf-8");
+            const lines = text.split("\n");
+            let found = false;
+            for (let i = 0; i < lines.length; i++) {
+              if (results.length >= resultLimit) return;
+              if (regex.test(lines[i])) {
+                regex.lastIndex = 0;
+                const rel = path.relative(searchRoot, full).replace(/\\/g, "/");
+                results.push({ file: rel, line: i + 1, text: lines[i].trim().slice(0, 120) });
+                found = true;
+              }
+            }
+            // Fallback: if filename matches but no content match, add first line
+            if (!found && nameMatch) {
+              const rel = path.relative(searchRoot, full).replace(/\\/g, "/");
+              const firstLine = lines.find((l) => l.trim()) || "";
+              results.push({ file: rel, line: 1, text: firstLine.slice(0, 120) });
+            }
+          } catch { /* binary / unreadable */ }
         }
       }
-      searchDir(root);
+      searchDir(searchRoot);
+    }
+
+    // ── Filename matches ──
+    // Also include files whose name matches the query (content grep only searches body).
+    // Deduplicate: skip files already found via content search.
+    if (rgAvailable()) {
+      const seenFiles = new Set(results.map((r) => r.file));
+      try {
+        const nameCmd = [
+          "rg", "--files", "--no-ignore-vcs",
+          "-g", "'!**/.git/**'",
+          "-g", "'!**/node_modules/**'",
+          "-g", "'!**/dist/**'",
+          "-g", "'!**/.next/**'",
+          "-g", "'!**/venv/**'",
+          "-g", "'!**/.venv/**'",
+          "-g", "'!**/__pycache__/**'",
+          "-g", "'!**/.pytest_cache/**'",
+          "-g", "'!**/env/**'",
+          "-g", "'!*.env*'",
+          "-g", "'!*.key'", "-g", "'!*.pem'", "-g", "'!*.p12'", "-g", "'!*.pfx'",
+          "-g", "'!*.min.js'", "-g", "'!*.map'", "-g", "'!*.lock'", "-g", "'!*.pyc'",
+          "-g", "'!*.png'", "-g", "'!*.jpg'", "-g", "'!*.gif'", "-g", "'!*.ico'", "-g", "'!*.woff*'",
+          "--iglob", `'*${q.replace(/'/g, "'\\''")}*'`,
+        ].join(" ");
+        const nameRaw = execSync(nameCmd, { encoding: "utf8", timeout: 5000, cwd: searchRoot }).trim();
+        if (nameRaw) {
+          for (const filePath of nameRaw.split(/\r?\n/)) {
+            if (results.length >= resultLimit) break;
+            const rel = filePath.trim();
+            if (!rel || seenFiles.has(rel)) continue;
+            seenFiles.add(rel);
+            try {
+              const content = fs.readFileSync(path.join(searchRoot, rel), "utf8");
+              const firstLine = content.split(/\r?\n/).find((l) => l.trim()) || "";
+              results.push({ file: rel, line: 1, text: firstLine.slice(0, 120) });
+            } catch {
+              results.push({ file: rel, line: 0, text: "" });
+            }
+          }
+        }
+      } catch { /* rg --files failed — skip filename matching */ }
     }
 
     res.json({ results: results.slice(0, resultLimit), query: q });

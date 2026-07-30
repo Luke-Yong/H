@@ -526,12 +526,16 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
   }, [agentUsage, threads, activeThreadId]);
   const [showHistory, setShowHistory] = useState(false);
   const historyPanelRef = useRef<HTMLDivElement>(null);
+  const toolbarRef = useRef<HTMLDivElement>(null);
 
-  // Close history panel on outside click
+  // Close history panel on outside click (but not when clicking toolbar buttons)
   useEffect(() => {
     if (!showHistory) return;
     const handle = (e: MouseEvent) => {
-      if (historyPanelRef.current && !historyPanelRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      const clickInside = (historyPanelRef.current && historyPanelRef.current.contains(target)) ||
+                          (toolbarRef.current && toolbarRef.current.contains(target));
+      if (!clickInside) {
         setShowHistory(false);
       }
     };
@@ -2839,7 +2843,7 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
   return (
     <div className="console-panel">
       {/* ── Toolbar ── */}
-      <div className={`agent-toolbar${loading ? " agent-toolbar-locked" : ""}`}>
+      <div className={`agent-toolbar${loading ? " agent-toolbar-locked" : ""}`} ref={toolbarRef}>
         <button className="agent-toolbar-btn" disabled={loading} onClick={newTask} title={loading ? "Agent is running" : "New Task"}>
           <i className="codicon codicon-add" /> New Task
         </button>

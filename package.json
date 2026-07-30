@@ -10,8 +10,8 @@
   "scripts": {
     "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
     "dev:server": "npx tsx watch server/index.ts",
-    "dev:client": "cd client && npm run dev",
-    "desktop:dev": "set ELECTRON_DEV=1&& concurrently \"cd client && npm run dev\" \"electron electron/main.cjs\"",
+    "dev:client": "cd client && vite --config vite.config.ts",
+    "desktop:dev": "set ELECTRON_DEV=1&& concurrently \"cd client && vite --config vite.config.ts\" \"electron electron/main.cjs\"",
     "desktop:build": "cd client && npm run build",
     "desktop:pack": "npm run icon:generate && npm run desktop:build && electron-builder --win --dir && node scripts/embed-icon.js && electron-builder --win --prepackaged dist/win-unpacked",
     "icon:generate": "node scripts/generate-icon.js",
