@@ -158,6 +158,7 @@ interface EditorViewHandle {
   revealPositionInCenter: (position: { lineNumber: number; column: number }) => void;
   onDidChangeCursorPosition: (cb: (e: { position: { lineNumber: number; column: number } }) => void) => { dispose: () => void };
   getModel?: () => any;
+  deltaDecorations: (oldDecorations: string[], newDecorations: any[]) => string[];
 }
 
 // Module-level: track which languages have LSP completion providers registered
