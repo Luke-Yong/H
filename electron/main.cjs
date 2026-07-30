@@ -594,6 +594,23 @@ async function createMainWindow() {
 
   attachPopupInterception(win.webContents);
 
+  // Fast path: server is already running (subsequent windows)
+  if (serverPort > 0) {
+    if (isDev) {
+      const vitePort = readPortFile(VITE_PORT_FILE);
+      if (vitePort) {
+        win.loadURL(`http://localhost:${vitePort}`);
+        win.show();
+        win.webContents.openDevTools({ mode: "detach" });
+        return;
+      }
+    } else {
+      win.loadURL(`http://127.0.0.1:${serverPort}`);
+      win.show();
+      return;
+    }
+  }
+
   if (isDev) {
     const expressPort = await waitForOwnServerPort(30_000);
     if (!expressPort) {
