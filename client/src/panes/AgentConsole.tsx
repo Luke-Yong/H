@@ -525,6 +525,20 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
     return t?.usage ?? null;
   }, [agentUsage, threads, activeThreadId]);
   const [showHistory, setShowHistory] = useState(false);
+  const historyPanelRef = useRef<HTMLDivElement>(null);
+
+  // Close history panel on outside click
+  useEffect(() => {
+    if (!showHistory) return;
+    const handle = (e: MouseEvent) => {
+      if (historyPanelRef.current && !historyPanelRef.current.contains(e.target as Node)) {
+        setShowHistory(false);
+      }
+    };
+    document.addEventListener("mousedown", handle);
+    return () => document.removeEventListener("mousedown", handle);
+  }, [showHistory]);
+
   const [fileList, setFileList] = useState<string[]>([]);
   const [fileLoading, setFileLoading] = useState(false);
 
@@ -2841,7 +2855,7 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
 
       {/* ── History panel ── */}
       {showHistory && (
-        <div className="agent-history-panel">
+        <div className="agent-history-panel" ref={historyPanelRef}>
           {threads.length === 0 && <div className="agent-history-empty">No saved chats.</div>}
           {threads.map((t) => (
             <div key={t.id} className={`agent-history-item${t.id === activeThreadId ? " active" : ""}`}>
