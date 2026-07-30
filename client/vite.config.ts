@@ -159,7 +159,4 @@ function writeVitePortPlugin() {
 
 export default defineConfig({
   plugins: [react(), harnessProxyPlugin(), writeVitePortPlugin()],
-  server: {
-    port: 0,
-  },
 });
