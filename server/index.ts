@@ -379,16 +379,14 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
     const state = getAgentSession(sessionId);
     if (!state) return res.status(404).json({ error: "Session not found" });
 
-    // ── Step 1: Handle deferred file tool Accept/Reject ──
-    // File tools auto-execute and yield "Diff ready". The second /continue call
-    // carries Accept ("OK") or Reject ("rejected") from the user.
+    // ── Step 1: Handle permission Allow/Deny or browser tool results ──
     let cmdResult: string | null = null;
     let permissionToolName: string | undefined = undefined;
     let permissionToolParams: Record<string, unknown> | undefined;
     let statePushed = false; // skip generic push when already pushed (e.g. summarized terminal output)
-    
+
     // ── Sub-agent resume (streaming): check before normal flow ──
-    if (state.pendingSubAgent && !state.deferredTool && !(state.pendingPermission && state.pendingPermission.toolCallId === toolCallId)) {
+    if (state.pendingSubAgent && !(state.pendingPermission && state.pendingPermission.toolCallId === toolCallId)) {
       const psa = state.pendingSubAgent;
       state.pendingSubAgent = undefined;
       const subResult = await resumeSubAgent(
@@ -453,24 +451,7 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
       return res.end();
     }
 
-    if (state.deferredTool && state.deferredTool.toolCallId === toolCallId) {
-      const dt = state.deferredTool;
-      state.deferredTool = undefined;
-      const accepted = String(toolResult || "").toLowerCase() !== "rejected";
-      if (accepted) {
-        state.messages.push({ role: "tool", content: dt.result, tool_call_id: dt.toolCallId });
-      } else {
-        // Rejected — revert to original content (only edit_file is deferred now)
-        if (dt.originalContent != null && dt.filePath) {
-          try {
-            const resolvedPath = path.resolve(state.projectRoot, dt.filePath);
-            fs.writeFileSync(resolvedPath, dt.originalContent, "utf-8");
-          } catch { /* best effort */ }
-        }
-        state.messages.push({ role: "tool", content: "Rejected by user.", tool_call_id: dt.toolCallId });
-      }
-      cmdResult = accepted ? dt.result : "Rejected by user.";
-    } else if (state.pendingPermission && state.pendingPermission.toolCallId === toolCallId) {
+    if (state.pendingPermission && state.pendingPermission.toolCallId === toolCallId) {
       // ── Step 1 alternative: Handle permission Allow/Deny (run_in_terminal) ──
       const pp = state.pendingPermission;
       permissionToolName = pp.toolName;
@@ -527,7 +508,7 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
     };
 
     // Yield tool_end for permission-gated tools (run_in_terminal)
-    if (cmdResult !== null && !state.deferredTool) {
+    if (cmdResult !== null) {
       const termSandbox = typeof toolResult === "string" && toolResult.trim() ? toolResult : undefined;
       sendEvent({
         type: "tool_end",

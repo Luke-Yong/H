@@ -52,8 +52,6 @@ export interface AgentState {
    *  Only stores tasks and summaries, not tool results (which could be stale). */
   subAgentPrefix?: Record<string, AgentMessage[]>;
   pendingPermission?: { toolCallId: string; command: string; background?: boolean; toolName?: string; params?: Record<string, unknown> };
-  /** Deferred destructive file tool — executed on Allow, result held until Accept/Reject in UI. */
-  deferredTool?: { toolCallId: string; toolName: string; params: Record<string, unknown>; result: string; originalContent: string | null; filePath: string };
   /** Paused sub-agent waiting for a browser tool result. Resumed in /continue. */
   pendingSubAgent?: {
     subState: AgentState;
@@ -3638,50 +3636,6 @@ export async function* agentLoopStream(
         return;
       }
 
-      // ── File tools: auto-execute, yield diff for Accept/Reject in UI ──
-      const FILE_TOOLS = ["edit_file"];
-      if (FILE_TOOLS.includes(fnName)) {
-        const fp = String(params.path || params.oldPath || "");
-        // Push all tool calls as assistant messages; only this one gets executed
-        for (let j = 0; j < finalToolCalls.length; j++) {
-          const t = finalToolCalls[j];
-          state.messages.push({ role: "assistant", content: JSON.stringify([{ id: t.id, type: "function", function: { name: t.function.name, arguments: t.function.arguments } }]), name: t.function.name, ...rc(finalReasoning) });
-          if (j !== i) {
-            state.messages.push({ role: "tool", content: "NOT_EXECUTED: This tool was not run because it was batched with other tools. Do NOT interpret this as a real result. Call this tool BY ITSELF on your next turn to get the actual result.", tool_call_id: t.id });
-          }
-        }
-        // Capture original content before executing
-        let originalContent: string | null = null;
-        const resolvedPath = path.resolve(projectRoot, fp);
-        try { originalContent = fs.readFileSync(resolvedPath, "utf-8"); } catch { originalContent = null; }
-        // Execute the file change immediately (no Allow/Deny — user reviews after)
-        yield {
-          type: "tool_start", toolName: fnName, toolParams: params,
-          ...(originalContent !== null ? { originalContent } : {}),
-        };
-        const fsResult = await runFsTool(fnName, params, projectRoot);
-        // Defer the result — user must Accept/Reject before agent continues
-        state.deferredTool = {
-          toolCallId: tc.id,
-          toolName: fnName,
-          params: params as Record<string, unknown>,
-          result: fsResult || "Done.",
-          originalContent,
-          filePath: fp,
-        };
-        yield {
-          type: "tool_end",
-          toolName: fnName,
-          toolResult: "Diff ready",
-          toolParams: params,
-          toolCallId: tc.id,
-          originalContent,
-          executedTools,
-        };
-        executedTools.push({ name: fnName, result: fsResult?.slice(0, 500) || "" });
-        return;
-      }
-
       // ── read_problems: auto-detect project and run compile/lint ──
       if (fnName === "read_problems") {
         yield { type: "tool_start", toolName: fnName, toolParams: params };
@@ -3718,14 +3672,15 @@ export async function* agentLoopStream(
       // ── Read-only + auto-execute filesystem tools (no Accept/Reject prompt) ──
       const isFsTool = [
         "read_file", "list_files", "search_files", "grep", "create_directory", "write_todos", "read_command_output",
-        "write_file", "delete_file", "rename_file", "read_graph",
+        "write_file", "edit_file", "delete_file", "rename_file", "read_graph",
       ].includes(fnName);
 
       if (isFsTool) {
-        // For create_directory, capture the parent path (originalContent = parent dir contents)
+        // Capture original content for destructive file tools so the UI can show a diff and revert on reject
         let originalContent: string | null = null;
-        if (fnName === "read_file") {
-          // read_file needs originalContent for no reason; skip
+        if (fnName === "edit_file" || fnName === "write_file" || fnName === "delete_file") {
+          const targetPath = path.resolve(projectRoot, String(params.path || params.oldPath || ""));
+          try { originalContent = fs.readFileSync(targetPath, "utf-8"); } catch { originalContent = null; }
         }
         yield {
           type: "tool_start", toolName: fnName, toolParams: params,

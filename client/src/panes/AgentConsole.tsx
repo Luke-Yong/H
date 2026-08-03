@@ -61,7 +61,7 @@ interface FileChange {
   rejected?: boolean;
   /** Kind of change: "write" (default), "create" (new dir), "delete", "rename". */
   changeType?: "write" | "create" | "delete" | "rename";
-  /** Whether this change requires user Accept/Reject (only edit_file). */
+  /** Legacy gate flag — no longer set; file tools auto-apply without blocking the agent. */
   deferred?: boolean;
 }
 
@@ -1052,7 +1052,6 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
               status: "streaming",
               tokenCount,
               originalContent: orig ?? null,
-              deferred: true,
             });
           } else if (tn === "delete_file" && evt.toolParams?.path) {
             const p = String(evt.toolParams.path);
@@ -1265,20 +1264,6 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
           if (!assistantMsgId && !isTerminal) {
             assistantMsgId = nextId();
             pushRaw(assistantMsgId, { role: "assistant", content: "", state: "thinking" });
-          }
-          // If file tool Diff ready, defer — user must Accept/Reject before agent continues
-          const FILE_TOOLS = ["edit_file"];
-          if (FILE_TOOLS.includes(tn) && evt.toolResult === "Diff ready") {
-            const fp = String(evt.toolParams?.path || evt.toolParams?.oldPath || "");
-            deferredToolRef.current = {
-              sessionId,
-              toolCallId: evt.toolCallId || toolCallId,
-              filePath: fp,
-              name: fp.split(/[/\\]/).pop() || fp,
-              originalContent: evt.originalContent ?? null,
-            };
-            agentDoneRef.current = true;
-            return false;
           }
         } else if (evt.type === "permission_required") {
           toolCallId = evt.toolCallId || "";
@@ -1559,10 +1544,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
               const next = [...prev];
               const idx = next.findIndex((m) => m.id === id);
               if (idx >= 0) {
-                // Don't show raw "Diff ready" as tool-card content — the
-                // accept/reject buttons convey the action. Show nothing.
-                const isDiffReady = evt.toolResult === "Diff ready";
-                const patch: Partial<ConsoleMessage> = { content: isDiffReady ? "" : (evt.toolResult || ""), state: undefined };
+                const patch: Partial<ConsoleMessage> = { content: (evt.toolResult || ""), state: undefined };
                 if (evt.toolSandbox != null) patch.sandboxOutput = evt.toolSandbox;
                 if ((evt as any).subAgentMessages) {
                   patch.subAgentMessages = (evt as any).subAgentMessages;
@@ -1595,7 +1577,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
             setMessages((prev) => {
               const idx = prev.findIndex((m) => m.id === id);
               if (idx < 0) return prev;
-              const fc: FileChange = { path: p, name, status: "done", changeType: "write", originalContent: orig, deferred: true };
+              const fc: FileChange = { path: p, name, status: "done", changeType: "write", originalContent: orig };
               let fcContent = "";
               let tkn = 0;
               if (tn === "write_file") {
@@ -1634,24 +1616,6 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
                 : (orig || "").split(String(params.old_string || "")).join(String(params.new_string || ""));
               applyAgentFileChanges([{ name: p.split(/[/\\]/).pop() || p, content, fsPath: resolved, originalContent: orig }]);
               openEditorFile?.(resolved);
-            }
-            // If Diff ready, defer the result — wait for user Accept/Reject
-            if (evt.toolResult === "Diff ready") {
-              // Compute resolved path (same logic as openEditorFile above)
-              const root = (getFsBasePath?.() || "").replace(/[/\\]$/, "");
-              let resolvedPath = p;
-              if (root && !/^[a-zA-Z]:/.test(resolvedPath) && !resolvedPath.startsWith("/")) {
-                resolvedPath = root + "/" + resolvedPath.replace(/\\/g, "/");
-              }
-              deferredToolRef.current = {
-                sessionId,
-                toolCallId: evt.toolCallId || toolCallId,
-                filePath: resolvedPath,
-                name: p.split(/[/\\]/).pop() || p,
-                originalContent: evt.originalContent ?? null,
-              };
-              agentDoneRef.current = true;
-              return false;
             }
           } else {
             // Refresh files for non-permission-gated file tools
@@ -2257,7 +2221,10 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
     for (const m of messages) {
       if (m.fileChanges) {
         for (const fc of m.fileChanges) {
-          if (!fc.accepted && !fc.rejected && fc.deferred) result.push({ path: fc.path, name: fc.name, msgId: m.id });
+          // Any file change not yet accepted/rejected is pending. File tools
+          // auto-apply without blocking the agent; Accept/Reject resolves them
+          // after the turn finishes.
+          if (!fc.accepted && !fc.rejected) result.push({ path: fc.path, name: fc.name, msgId: m.id });
         }
       }
     }
@@ -2275,7 +2242,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
     for (const m of messages) {
       if (m.fileChanges) {
         for (const fc of m.fileChanges) {
-          if (!fc.accepted && !fc.rejected && fc.deferred) {
+          if (!fc.accepted && !fc.rejected) {
             pathsToAccept.push(fc.path);
             if (fc.changeType === "rename" && fc.content) {
               renameOldPath = fc.path;
@@ -2487,6 +2454,22 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
       }
     })();
   }, [rejectEditorChange, getFsBasePath, onRefreshFs, resolvePath, closeEditorFile]);
+
+  const rejectAllChanges = useCallback(() => {
+    const toReject: { fc: FileChange; msgId: string }[] = [];
+    for (const m of messages) {
+      if (m.fileChanges) {
+        for (const fc of m.fileChanges) {
+          if (!fc.accepted && !fc.rejected) toReject.push({ fc, msgId: m.id });
+        }
+      }
+    }
+    // Collect first, then reject outside the setState updater to avoid
+    // stale-closure issues when rejectFile updates messages.
+    for (const { fc, msgId } of toReject) {
+      rejectFile(fc, msgId);
+    }
+  }, [messages, rejectFile]);
 
   // Helper: find the file-change entry (and its parent msg id) for a given file path
   const findFcByPath = useCallback((fp: string): { fc: FileChange; msgId: string } | null => {
@@ -3373,9 +3356,14 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
             </details>
           )}
           {hasPendingFileActions && (
-            <button className="agent-pending-accept-all" onClick={acceptAllChanges}>
-              <i className="codicon codicon-check-all" /> {unconfirmedFileChanges.length === 1 ? "Accept change" : `Accept all (${unconfirmedFileChanges.length} changes)`}
-            </button>
+            <div className="agent-pending-actions">
+              <button className="agent-pending-accept-all" onClick={acceptAllChanges}>
+                <i className="codicon codicon-check-all" /> {unconfirmedFileChanges.length === 1 ? "Accept change" : `Accept all (${unconfirmedFileChanges.length} changes)`}
+              </button>
+              <button className="agent-pending-reject-all" onClick={rejectAllChanges}>
+                <i className="codicon codicon-discard" /> {unconfirmedFileChanges.length === 1 ? "Reject change" : "Reject all"}
+              </button>
+            </div>
           )}
         </div>
       )}

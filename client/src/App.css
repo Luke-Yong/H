@@ -2272,6 +2272,18 @@ details[open] .agent-thought-summary::before { transform: rotate(90deg); }
   flex-shrink: 0;
 }
 .agent-pending-accept-all:hover { filter: brightness(1.15); }
+.agent-pending-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+.agent-pending-reject-all {
+  padding: 3px 12px;
+  background: transparent; color: #f85149;
+  border: 1px solid #f85149; border-radius: 4px;
+  font-size: 11px; font-weight: 600; cursor: pointer;
+  display: flex; align-items: center; gap: 4px;
+  font-family: inherit;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.agent-pending-reject-all:hover { background: rgba(248, 81, 73, 0.12); }
 
 /* ── Input area (textarea + overlaid buttons) ── */
 .agent-input-area {
