@@ -282,6 +282,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
   const [tempApiKey, setTempApiKey] = useState("");
   const [savingApiKey, setSavingApiKey] = useState(false);
   const [editModelInput, setEditModelInput] = useState(selectedModel);
+  const [editIsThinking, setEditIsThinking] = useState(isThinking);
   const modelPickerRef = useRef<HTMLDivElement>(null);
 
   const refreshAgentConfig = useCallback(async () => {
@@ -351,29 +352,29 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
     // Remove any existing preset with the same model id
     const filtered = presets.filter((p) => p.model !== model);
     if (activePreset) {
-      const next = filtered.map((p) => p.id === activePreset.id ? { ...p, model, thinking: isThinking } : p);
-      if (!next.find((p) => p.id === activePreset.id)) next.push({ id: activePreset.id, model, thinking: isThinking });
+      const next = filtered.map((p) => p.id === activePreset.id ? { ...p, model, thinking: editIsThinking } : p);
+      if (!next.find((p) => p.id === activePreset.id)) next.push({ id: activePreset.id, model, thinking: editIsThinking });
       setPresets(next); saveStoredPresets(next);
     } else {
-      const p: ModelPreset = { id: `pr-${Date.now()}`, model, thinking: isThinking };
+      const p: ModelPreset = { id: `pr-${Date.now()}`, model, thinking: editIsThinking };
       const next = [...filtered, p];
       setPresets(next); saveStoredPresets(next);
       setActivePresetId(p.id);
       localStorage.setItem("harness-active-preset", p.id);
     }
     setModelPickerOpen(false);
-  }, [activePreset, isThinking, editModelInput, presets]);
+  }, [activePreset, editIsThinking, editModelInput, presets]);
 
   const savePresetAsNew = useCallback(() => {
     const model = editModelInput.trim();
     const filtered = presets.filter((p) => p.model !== model);
-    const p: ModelPreset = { id: `pr-${Date.now()}`, model, thinking: isThinking };
+    const p: ModelPreset = { id: `pr-${Date.now()}`, model, thinking: editIsThinking };
     const next = [...filtered, p];
     setPresets(next); saveStoredPresets(next);
     setActivePresetId(p.id);
     localStorage.setItem("harness-active-preset", p.id);
     setModelPickerOpen(false);
-  }, [isThinking, editModelInput, presets]);
+  }, [editIsThinking, editModelInput, presets]);
 
   const deletePreset = useCallback((id: string) => {
     const next = presets.filter((p) => p.id !== id);
@@ -391,21 +392,24 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
       localStorage.setItem("harness-active-preset", id);
       setSelectedModel(p.model);
       setIsThinking(p.thinking);
+      setEditIsThinking(p.thinking);
       setEditModelInput(p.model);
     }
     if (!editingModelRef.current) setModelPickerOpen(false);
   }, [presets]);
 
   const toggleThinking = useCallback(() => {
-    setIsThinking((v) => { const n = !v; localStorage.setItem("harness-thinking", String(n)); return n; });
+    setEditIsThinking((v) => !v);
   }, []);
 
   const saveModelAndClose = useCallback(() => {
     const id = editModelInput.trim();
     setSelectedModel(id);
     localStorage.setItem("harness-model", id);
+    setIsThinking(editIsThinking);
+    localStorage.setItem("harness-thinking", String(editIsThinking));
     setModelPickerOpen(false);
-  }, [editModelInput]);
+  }, [editModelInput, editIsThinking]);
 
   useEffect(() => {
     setEditModelInput(selectedModel);
@@ -3505,8 +3509,8 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
                     {/* Thinking / Non-thinking toggle */}
                     <button className="agent-model-item" onClick={toggleThinking}>
                       <span className="agent-model-item-name">Mode</span>
-                      <span className="agent-model-item-desc">{isThinking ? "Thinking (reasoning)" : "Non-thinking (chat)"}</span>
-                      <i className={`codicon codicon-${isThinking ? "check" : "circle-outline"}`} style={{color: isThinking ? "#4ec94e" : undefined}} />
+                      <span className="agent-model-item-desc">{editIsThinking ? "Thinking (reasoning)" : "Non-thinking (chat)"}</span>
+                      <i className={`codicon codicon-${editIsThinking ? "check" : "circle-outline"}`} style={{color: editIsThinking ? "#4ec94e" : undefined}} />
                     </button>
                     {editingApiKey ? (
                       <div className="agent-model-apikey-edit">
