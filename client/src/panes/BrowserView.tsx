@@ -554,6 +554,18 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   });
   const [viewportScale, setViewportScale] = useState(0.5);
   const [loading, setLoading] = useState(false);
+  // Unified loading setter with a safety timeout: page background activity
+  // (subframe/resource loads) can fire load-start events without a matching
+  // main-frame finish, so this guarantees loading can never stay stuck on.
+  const loadingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const setLoadingState = useCallback((value: boolean) => {
+    if (loadingTimerRef.current) { clearTimeout(loadingTimerRef.current); loadingTimerRef.current = null; }
+    setLoading(value);
+    if (value) {
+      loadingTimerRef.current = setTimeout(() => { loadingTimerRef.current = null; setLoading(false); }, 10000);
+    }
+  }, []);
+  useEffect(() => () => { if (loadingTimerRef.current) clearTimeout(loadingTimerRef.current); }, []);
   const consoleSeqRef = useRef(0);
   const onConsoleEntryRef = useRef(onConsoleEntry);
   onConsoleEntryRef.current = onConsoleEntry;
@@ -626,7 +638,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
       setInputUrl(url);
       setSecure(isHttps(url));
       liveUrlRef.current = url;
-      if (url) setLoading(true);
+      if (url) setLoadingState(true);
     } else {
       setNavTabId(tabId);
       setNavUrl(url);
@@ -634,7 +646,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
       setInputUrl(url);
       setSecure(isHttps(url));
       liveUrlRef.current = url;
-      if (url) setLoading(true);
+      if (url) setLoadingState(true);
     }
 
     if (!url) {
@@ -1001,7 +1013,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
 
   // On every iframe load (React synthetic), inject hooks
   const iframeLoadHandler = useCallback((e: React.SyntheticEvent<HTMLIFrameElement>) => {
-    setLoading(false);
+    setLoadingState(false);
     injectIntoIframe(e.currentTarget);
   }, [injectIntoIframe, tabId, currentUrl]);
 
@@ -1293,7 +1305,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     // ── Event listeners ──
     const onDidFinishLoad = () => {
       navigatingRef.current = false;
-      setLoading(false);
+      setLoadingState(false);
       syncDesktopState("did-finish-load");
       if (webviewReadyRef.current) {
         void view.executeJavaScript?.(DESKTOP_INJECT_CODE, false).catch(() => {});
@@ -1321,7 +1333,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
       syncDesktopState("dom-ready");
       void view.executeJavaScript?.(DESKTOP_INJECT_CODE, false).catch(() => {});
     };
-    const handleDidFailLoad = () => { navigatingRef.current = false; setLoading(false); };
+    const handleDidFailLoad = () => { navigatingRef.current = false; setLoadingState(false); };
     const handleConsoleMessage = (event: Event) => {
       const details = event as Event & {
         level?: number;
@@ -1387,10 +1399,20 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
       }
     };
 
-    const handleStartLoading = () => { setLoading(true); };
+    // Only main-frame document navigations should flip the loading state.
+    // `did-start-loading` fires for ANY load — including subframes and background
+    // activity (ads, lazy iframes, polling resources) — which would leave the
+    // UI stuck "loading" long after the page itself has finished.
+    const handleDidStartNavigation = (event: Event) => {
+      const details = event as Event & { isMainFrame?: boolean; isInPlace?: boolean };
+      if (details.isMainFrame === false || details.isInPlace) return;
+      setLoadingState(true);
+    };
+    const handleStopLoading = () => setLoadingState(false);
 
     view.addEventListener("dom-ready", handleDomReady);
-    view.addEventListener("did-start-loading", handleStartLoading);
+    view.addEventListener("did-start-navigation", handleDidStartNavigation);
+    view.addEventListener("did-stop-loading", handleStopLoading);
     view.addEventListener("did-finish-load", onDidFinishLoad);
     view.addEventListener("did-navigate", onDidNavigate);
     view.addEventListener("did-navigate-in-page", onDidNavigateInPage);
@@ -1406,7 +1428,8 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
       webviewReadyRef.current = false;
       clearInterval(poll);
       view.removeEventListener("dom-ready", handleDomReady);
-      view.removeEventListener("did-start-loading", handleStartLoading);
+      view.removeEventListener("did-start-navigation", handleDidStartNavigation);
+      view.removeEventListener("did-stop-loading", handleStopLoading);
       view.removeEventListener("did-finish-load", onDidFinishLoad);
       view.removeEventListener("did-navigate", onDidNavigate);
       view.removeEventListener("did-navigate-in-page", onDidNavigateInPage);
