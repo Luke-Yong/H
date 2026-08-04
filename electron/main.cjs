@@ -652,6 +652,11 @@ async function createMainWindow() {
 
   win.setMenuBarVisibility(false);
 
+  win.on("closed", () => {
+    closeSettingsWindow();
+    closeResourceMonitorWindow();
+  });
+
   attachPopupInterception(win.webContents);
 
   // Fast path: server is already running (subsequent windows)

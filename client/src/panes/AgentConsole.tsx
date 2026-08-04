@@ -291,6 +291,8 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
         if (!activePresetId) setSelectedModel(getStoredModel());
       } else if (e.key === "harness-thinking") {
         if (!activePresetId) setIsThinking(getStoredThinking());
+      } else if (e.key === "harness-api-key-changed") {
+        void refreshAgentConfig();
       }
     };
     window.addEventListener("storage", handleStorage);
@@ -324,6 +326,12 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
   useEffect(() => {
     try { localStorage.removeItem("harness-api-key"); } catch {}
     void refreshAgentConfig();
+  }, [refreshAgentConfig]);
+
+  useEffect(() => {
+    const handler = () => { void refreshAgentConfig(); };
+    window.addEventListener("api-key-changed", handler);
+    return () => window.removeEventListener("api-key-changed", handler);
   }, [refreshAgentConfig]);
 
   const saveApiKey = useCallback(async () => {

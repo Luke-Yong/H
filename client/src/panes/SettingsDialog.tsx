@@ -50,6 +50,7 @@ function ModelApiTab() {
         throw new Error(String(data?.error || `HTTP ${res.status}`));
       }
       setApiKey(""); await refreshConfig();
+      window.dispatchEvent(new CustomEvent("api-key-changed"));
       setStatus("API key saved successfully.");
     } catch (err: any) {
       setStatus(`Error: ${err.message}`);
@@ -65,6 +66,7 @@ function ModelApiTab() {
         throw new Error(String(data?.error || `HTTP ${res.status}`));
       }
       await refreshConfig();
+      window.dispatchEvent(new CustomEvent("api-key-changed"));
       setStatus("API key removed.");
     } catch (err: any) {
       setStatus(`Error: ${err.message}`);
