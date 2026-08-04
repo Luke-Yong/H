@@ -275,6 +275,28 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
     }
   }, [activePreset]);
 
+  // Listen for localStorage changes from other windows (e.g. settings window)
+  useEffect(() => {
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === "harness-presets") {
+        setPresets(getStoredPresets());
+      } else if (e.key === "harness-active-preset") {
+        const newId = localStorage.getItem("harness-active-preset") || "";
+        setActivePresetId(newId);
+        if (!newId) {
+          setSelectedModel(getStoredModel());
+          setIsThinking(getStoredThinking());
+        }
+      } else if (e.key === "harness-model") {
+        if (!activePresetId) setSelectedModel(getStoredModel());
+      } else if (e.key === "harness-thinking") {
+        if (!activePresetId) setIsThinking(getStoredThinking());
+      }
+    };
+    window.addEventListener("storage", handleStorage);
+    return () => window.removeEventListener("storage", handleStorage);
+  }, [activePresetId]);
+
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [editingModel, setEditingModel] = useState(false);
   useEffect(() => { editingModelRef.current = editingModel; }, [editingModel]);
@@ -321,6 +343,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
       setEditingApiKey(false);
       setTempApiKey("");
       await refreshAgentConfig();
+      window.dispatchEvent(new CustomEvent("api-key-changed"));
     } catch (err) {
       setMessages((prev) => [...prev, { id: nextId(), role: "system", content: `Error saving API key: ${String(err)}`, when: Date.now() }]);
     } finally {
@@ -339,6 +362,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
       setEditingApiKey(false);
       setTempApiKey("");
       await refreshAgentConfig();
+      window.dispatchEvent(new CustomEvent("api-key-changed"));
     } catch (err) {
       setMessages((prev) => [...prev, { id: nextId(), role: "system", content: `Error clearing API key: ${String(err)}`, when: Date.now() }]);
     } finally {
@@ -3429,7 +3453,7 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
         {/* ── Model selector ── */}
         <div className="agent-model-bar">
           <div className="agent-model-selector" ref={modelPickerRef}>
-            <button className="agent-model-btn" onClick={() => { if (!apiKeyConfigured) return; setModelPickerOpen((v) => { if (!v) { setEditingModel(false); setEditingApiKey(false); } return !v; }); void refreshAgentConfig(); }} title={apiKeyConfigured ? "Configure model" : "Add an API key to start chatting"}>
+            <button className="agent-model-btn" onClick={() => { setModelPickerOpen((v) => { if (!v) { setEditingModel(false); setEditingApiKey(false); setPresets(getStoredPresets()); const aid = localStorage.getItem("harness-active-preset") || ""; if (aid) setActivePresetId(aid); else { setSelectedModel(getStoredModel()); setIsThinking(getStoredThinking()); } } return !v; }); void refreshAgentConfig(); }} title={apiKeyConfigured ? "Configure model" : "Add an API key to start chatting"}>
               {!configChecked ? (
                 <span style={{color: "#888"}}>Checking...</span>
               ) : !apiKeyConfigured ? (
@@ -3446,7 +3470,7 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
               )}
               <i className={`codicon codicon-chevron-${modelPickerOpen ? "down" : "up"}`} />
             </button>
-            {modelPickerOpen && apiKeyConfigured && (
+            {modelPickerOpen && (
               <div className="agent-model-popup">
                 <div className="agent-model-popup-title">Saved Configurations</div>
                 {/* Preset list */}
@@ -3460,108 +3484,17 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
                         <span className="agent-model-item-name">{p.model}</span>
                         <span className="agent-model-mode-badge">{p.thinking ? "Think" : "Chat"}</span>
                       </button>
-                      <span className="agent-model-preset-icons">
-                        <button className="agent-model-preset-icon-btn" onClick={() => { editingModelRef.current = true; setEditingModel(true); selectPreset(p.id); }} title="Modify">
-                          <i className="codicon codicon-edit" />
-                        </button>
-                        <button className="agent-model-preset-icon-btn agent-model-preset-icon-del" onClick={() => deletePreset(p.id)} title="Delete">
-                          <i className="codicon codicon-trash" />
-                        </button>
-                      </span>
                     </div>
                   ))
                 ) : (
-                  <div className="agent-mention-hint">No saved configs. Fill in below and Save.</div>
+                  <div className="agent-mention-hint">No saved configurations. Open Settings to create one.</div>
                 )}
                 <div className="agent-model-popup-divider" />
-                {editingModel ? (
-                  <>
-                    <div className="agent-model-popup-title" style={{display: "flex", alignItems: "center", justifyContent: "space-between"}}>
-                      <span>Edit</span>
-                      <button className="agent-model-apikey-cancel" onClick={() => { setEditingModel(false); setEditingApiKey(false); setTempApiKey(""); }}>Cancel</button>
-                    </div>
-                    {/* Model name input */}
-                    <div className="agent-model-name-edit">
-                      <label className="agent-model-label">Model</label>
-                      <input
-                        className="agent-model-apikey-input"
-                        type="text"
-                        placeholder="Enter model name..."
-                        value={editModelInput}
-                        onChange={(e) => { setEditModelInput(e.target.value); }}
-                      />
-                      {apiKeyConfigured && !editModelInput.trim() && (
-                        <div className="agent-mention-hint">Enter a model name to save this configuration.</div>
-                      )}
-                    </div>
-                    {/* Thinking / Non-thinking toggle */}
-                    <button className="agent-model-item" onClick={toggleThinking}>
-                      <span className="agent-model-item-name">Mode</span>
-                      <span className="agent-model-item-desc">{editIsThinking ? "Thinking (reasoning)" : "Non-thinking (chat)"}</span>
-                      <i className={`codicon codicon-${editIsThinking ? "check" : "circle-outline"}`} style={{color: editIsThinking ? "#4ec94e" : undefined}} />
-                    </button>
-                    {editingApiKey ? (
-                      <div className="agent-model-apikey-edit">
-                        <input
-                          className="agent-model-apikey-input"
-                          type="password"
-                          placeholder="sk-..."
-                          value={tempApiKey}
-                          onChange={(e) => setTempApiKey(e.target.value)}
-                          onKeyDown={(e) => { if (e.key === "Enter" && !savingApiKey) void saveApiKey(); }}
-                          autoFocus
-                        />
-                        <button className="agent-model-apikey-save" onClick={() => { void saveApiKey(); }} disabled={!tempApiKey.trim() || savingApiKey}>Save</button>
-                        <button className="agent-model-apikey-cancel" onClick={() => { setEditingApiKey(false); setTempApiKey(""); }} disabled={savingApiKey}>Cancel</button>
-                      </div>
-                    ) : (
-                      <>
-                        <div className="agent-model-apikey-display">
-                          <i className={`codicon ${apiKeyConfigured ? "codicon-key" : "codicon-warning"}`} />
-                          <span>
-                            {apiKeySource === "session"
-                              ? "API key stored persistently on this device."
-                              : "No API key configured."}
-                          </span>
-                        </div>
-                        <div className="agent-model-apikey-row">
-                          <button className="agent-model-item" onClick={() => { setTempApiKey(""); setEditingApiKey(true); }}>
-                            <span className="agent-model-item-name">{apiKeyConfigured ? "Replace API Key" : "Add API Key"}</span>
-                            <span className="agent-model-item-desc">Stored on this device and persists across restarts</span>
-                            <i className="codicon codicon-key" />
-                          </button>
-                          {apiKeySource === "session" && (
-                            <button className="agent-model-item agent-model-item-danger" onClick={() => { void clearApiKey(); }} disabled={savingApiKey}>
-                              <span className="agent-model-item-name">Remove API Key</span>
-                              <i className="codicon codicon-trash" />
-                            </button>
-                          )}
-                        </div>
-                        {!apiKeyConfigured && (
-                          <div className="agent-mention-hint">Add a DeepSeek API key to start chatting.</div>
-                        )}
-                      </>
-                    )}
-                    <div className="agent-model-popup-divider" />
-                    {/* Save / Clear buttons */}
-                    <div className="agent-model-preset-save-row">
-                      <button className="agent-model-apikey-save" onClick={saveAsPreset} disabled={!editModelInput.trim()} style={{background: "#4ec94e"}}>
-                        <i className="codicon codicon-save" /> {activePreset ? "Update" : "Save"}
-                      </button>
-                      {activePreset && (
-                        <button className="agent-model-apikey-save" onClick={savePresetAsNew} disabled={!editModelInput.trim()}>
-                          <i className="codicon codicon-diff-added" /> Save as New
-                        </button>
-                      )}
-                    </div>
-                  </>
-                ) : (
-                  <button className="agent-model-item" onClick={() => setEditingModel(true)}>
-                    <span className="agent-model-item-name">Edit Configuration</span>
-                    <span className="agent-model-item-desc">Change model, mode, or API key</span>
-                    <i className="codicon codicon-edit" />
-                  </button>
-                )}
+                <div className="agent-mention-hint">Manage saved configurations and API keys in Settings.</div>
+                <button className="agent-model-item" onClick={() => { setModelPickerOpen(false); window.dispatchEvent(new CustomEvent("open-settings")); }}>
+                  <span className="agent-model-item-name">Open Settings</span>
+                  <i className="codicon codicon-settings-gear" />
+                </button>
               </div>
             )}
           </div>

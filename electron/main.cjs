@@ -454,6 +454,7 @@ let settingsWindow = null;
 
 function openSettingsWindow(parentWin) {
   if (settingsWindow && !settingsWindow.isDestroyed()) {
+    if (settingsWindow.isMinimized()) settingsWindow.restore();
     settingsWindow.focus();
     return;
   }

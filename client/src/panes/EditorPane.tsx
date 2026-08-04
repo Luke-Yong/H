@@ -208,6 +208,8 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   const [sidebarPanel, setSidebarPanel] = useState<string>("");
   const [sidebarVisible, setSidebarVisible] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const settingsOpenRef = useRef(false);
+  useEffect(() => { settingsOpenRef.current = settingsOpen; }, [settingsOpen]);
   const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
   const browserViewRef = useRef<BrowserViewHandle>(null);
   const welcomeClickLockRef = useRef(0);
@@ -248,10 +250,19 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   const handleOpenSettings = useCallback(() => {
     if (window.harnessDesktop?.openSettings) {
       window.harnessDesktop.openSettings();
+    } else if (settingsOpenRef.current) {
+      setSettingsOpen(false);
+      setTimeout(() => setSettingsOpen(true), 0);
     } else {
       setSettingsOpen(true);
     }
   }, []);
+
+  useEffect(() => {
+    const handler = () => handleOpenSettings();
+    window.addEventListener("open-settings", handler);
+    return () => window.removeEventListener("open-settings", handler);
+  }, [handleOpenSettings]);
 
   useEffect(() => {
     const map: Record<string, string> = {};

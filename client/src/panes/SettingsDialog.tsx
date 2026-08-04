@@ -29,6 +29,12 @@ function ModelApiTab() {
 
   useEffect(() => { refreshConfig(); }, [refreshConfig]);
 
+  useEffect(() => {
+    const handleApiKeyChange = () => { void refreshConfig(); };
+    window.addEventListener("api-key-changed", handleApiKeyChange);
+    return () => window.removeEventListener("api-key-changed", handleApiKeyChange);
+  }, [refreshConfig]);
+
   const saveApiKey = useCallback(async () => {
     const key = apiKey.trim();
     if (!key) { setStatus("API key cannot be empty."); return; }
