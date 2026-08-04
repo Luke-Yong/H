@@ -399,6 +399,15 @@ async function getIdeWideLocation(timeoutMs) {
 let resourceMonitorWindow = null;
 let serverPort = 0;
 
+function getStandaloneUrl(pagePath) {
+  const isDev = process.env.ELECTRON_DEV === "1";
+  if (isDev) {
+    const vitePort = readPortFile(VITE_PORT_FILE);
+    if (vitePort) return `http://localhost:${vitePort}${pagePath}`;
+  }
+  return `http://127.0.0.1:${serverPort}${pagePath}`;
+}
+
 function openResourceMonitorWindow(parentWin) {
   if (resourceMonitorWindow && !resourceMonitorWindow.isDestroyed()) {
     resourceMonitorWindow.focus();
@@ -424,7 +433,7 @@ function openResourceMonitorWindow(parentWin) {
   win.webContents.on("did-fail-load", (_event, errorCode, errorDesc, validatedURL) => {
     console.log("[resource-monitor] Load failed:", errorCode, errorDesc, validatedURL);
   });
-  win.loadURL(`http://127.0.0.1:${serverPort}/resources`);
+  win.loadURL(getStandaloneUrl("/resources"));
 
   win.on("closed", () => {
     resourceMonitorWindow = null;
@@ -437,6 +446,47 @@ function closeResourceMonitorWindow() {
   if (resourceMonitorWindow && !resourceMonitorWindow.isDestroyed()) {
     resourceMonitorWindow.close();
     resourceMonitorWindow = null;
+  }
+}
+
+// ── Settings Window ──
+let settingsWindow = null;
+
+function openSettingsWindow(parentWin) {
+  if (settingsWindow && !settingsWindow.isDestroyed()) {
+    settingsWindow.focus();
+    return;
+  }
+
+  const win = new BrowserWindow({
+    width: 700,
+    height: 600,
+    backgroundColor: "#1e1e1e",
+    title: "Settings",
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      webSecurity: false,
+    },
+  });
+
+  win.setMenuBarVisibility(false);
+  win.webContents.on("did-fail-load", (_event, errorCode, errorDesc, validatedURL) => {
+    console.log("[settings] Load failed:", errorCode, errorDesc, validatedURL);
+  });
+  win.loadURL(getStandaloneUrl("/settings"));
+
+  win.on("closed", () => {
+    settingsWindow = null;
+  });
+
+  settingsWindow = win;
+}
+
+function closeSettingsWindow() {
+  if (settingsWindow && !settingsWindow.isDestroyed()) {
+    settingsWindow.close();
+    settingsWindow = null;
   }
 }
 
@@ -527,6 +577,15 @@ function registerIpc() {
 
   ipcMain.on("harness:closeResourceMonitor", () => {
     closeResourceMonitorWindow();
+  });
+
+  ipcMain.on("harness:openSettings", (event) => {
+    const parentWin = BrowserWindow.fromWebContents(event.sender);
+    openSettingsWindow(parentWin);
+  });
+
+  ipcMain.on("harness:closeSettings", () => {
+    closeSettingsWindow();
   });
 
   // Window controls for frameless window

@@ -61,6 +61,23 @@ All client-side state (selected model, chat history, recent folder paths, open e
 
 Get a key at [platform.deepseek.com](https://platform.deepseek.com).
 
+### Storage Locations
+
+| Data | Location | Format |
+|------|----------|--------|
+| **API Key** | `~/.harness/store/api-keys.enc` | AES-256-GCM encrypted |
+| **Encryption key** | `~/.harness/.key` | Auto-generated, machine-specific |
+| **Model & Thinking Mode** | `localStorage` keys `harness-model`, `harness-thinking` | Plain text |
+| **Model Presets** | `localStorage` keys `harness-presets`, `harness-active-preset` | JSON array |
+| **Chat History & Preferences** | `localStorage` → mirrored to `~/.harness/store/client-state.json` | JSON on disk |
+| **Agent Memory** | `~/.harness/store/memory.db` | SQLite (WAL mode) |
+| **File Tracking Metadata** | `~/.harness/store/file-tracking.json` | JSON (paths, sizes, checksums; no file contents) |
+| **Knowledge Graph Snapshots** | `~/.harness/snapshots/file-tree-snapshot-<hash>.kg` | Edge-list format |
+| **Port Discovery** | `%TEMP%/harness-ports/express-port`, `vite-port` | Runtime only, not persisted |
+| **Single-instance Lock** | `%TEMP%/harness-pid` | PID file |
+
+Deleting `~/.harness/` removes all Harness persistent data. Temp files are cleaned on clean shutdown.
+
 ## Start
 
 ```powershell

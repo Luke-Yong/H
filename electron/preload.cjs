@@ -17,6 +17,8 @@ contextBridge.exposeInMainWorld("harnessDesktop", {
     ipcRenderer.invoke("harness:setSitePermissions", { origin, permissions }),
   openResourceMonitor: () => ipcRenderer.send("harness:openResourceMonitor"),
   closeResourceMonitor: () => ipcRenderer.send("harness:closeResourceMonitor"),
+  openSettings: () => ipcRenderer.send("harness:openSettings"),
+  closeSettings: () => ipcRenderer.send("harness:closeSettings"),
   minimize: () => ipcRenderer.send("harness:minimize"),
   maximize: () => ipcRenderer.send("harness:maximize"),
   close: () => ipcRenderer.send("harness:close"),

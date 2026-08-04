@@ -88,7 +88,7 @@ function harnessProxyPlugin() {
       // HTTP proxy for /api and /_browser — use req.url directly
       // (Connect's use("/api", ...) strips the prefix, breaking forwarding)
       server.middlewares.use((req, res, next) => {
-        if (req.url?.startsWith("/api") || req.url?.startsWith("/_browser")) {
+        if (req.url?.startsWith("/api") || req.url?.startsWith("/_browser") || req.url === "/settings" || req.url === "/resources") {
           proxyRequest(req, res);
         } else {
           next();

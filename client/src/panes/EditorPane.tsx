@@ -11,6 +11,7 @@ import { useResizable, ResizeHandle } from "../hooks/useResizable";
 import NameDialog from "./NameDialog";
 import ScmPanel from "./ScmPanel";
 import SearchPanel from "./SearchPanel";
+import SettingsDialog from "./SettingsDialog";
 import type { FsEntry } from "./FilesPanel";
 
 interface BrowserTab {
@@ -206,6 +207,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   const { size: termH, onMouseDown: onTermDrag } = useResizable(220, 80, 600, true);
   const [sidebarPanel, setSidebarPanel] = useState<string>("");
   const [sidebarVisible, setSidebarVisible] = useState(true);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
   const browserViewRef = useRef<BrowserViewHandle>(null);
   const welcomeClickLockRef = useRef(0);
@@ -241,6 +243,14 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     if (now - welcomeClickLockRef.current < 800) return;
     welcomeClickLockRef.current = now;
     fn();
+  }, []);
+
+  const handleOpenSettings = useCallback(() => {
+    if (window.harnessDesktop?.openSettings) {
+      window.harnessDesktop.openSettings();
+    } else {
+      setSettingsOpen(true);
+    }
   }, []);
 
   useEffect(() => {
@@ -2085,7 +2095,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
             </button>
           ))}
           <div className="activity-bar-spacer" />
-          <button className="activity-bar-btn" title="Manage"><i className="codicon codicon-settings-gear" /></button>
+          <button className="activity-bar-btn" title="Manage" onClick={handleOpenSettings}><i className="codicon codicon-settings-gear" /></button>
         </div>
         {sidebarVisible && sidebarPanel && sidebarPanel !== "browser" && sidebarPanel !== "files" && sidebarPanel !== "scm" && sidebarPanel !== "search" && (
           <div className="sidebar-placeholder">
@@ -2180,7 +2190,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
           </button>
         ))}
         <div className="activity-bar-spacer" />
-        <button className="activity-bar-btn" title="Manage"><i className="codicon codicon-settings-gear" /></button>
+        <button className="activity-bar-btn" title="Manage" onClick={handleOpenSettings}><i className="codicon codicon-settings-gear" /></button>
       </div>
       {sidebarVisible && sidebarPanel === "files" && (
         <>
@@ -2525,6 +2535,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
         onOk={(value, extra) => { nameDialog?.onOk(value, extra); }}
         onCancel={() => setNameDialog(null)}
       />
+      <SettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </div>
     </>
   );
