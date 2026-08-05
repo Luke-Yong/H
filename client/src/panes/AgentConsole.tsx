@@ -40,6 +40,7 @@ interface TodoItem {
   id: string;
   text: string;
   status: "pending" | "in_progress" | "completed" | "cancelled";
+  agentMarker?: string;
 }
 
 interface FileChange {
@@ -932,6 +933,17 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
   const pendingFileChangesRef = useRef<FileChange[]>([]); // survives tool_start clear → used in tool_end
   const todosRef = useRef<TodoItem[]>([]);
 
+  const formatToolContent = (text: string): string => {
+    const t = text.trim();
+    if (!t) return text;
+    if (t.startsWith("{") || t.startsWith("[")) {
+      try {
+        return JSON.stringify(JSON.parse(t), null, 2);
+      } catch {}
+    }
+    return text;
+  };
+
   const applyEditorFiles = useCallback((changes: FileChange[]) => {
     if (!refreshEditor && !applyAgentFileChanges) return;
     const root = (getFsBasePath?.() || "").replace(/[/\\]$/, "");
@@ -1113,10 +1125,12 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
               originalContent: oldP, // stash old path in originalContent for reject
             });
           } else if (tn === "write_todos" && Array.isArray(evt.toolParams?.todos)) {
+            const marker = (evt as any).agentMarker || ((evt as any).isSubAgent ? "code-writer" : "main");
             todosRef.current = (evt.toolParams.todos as any[]).map((t: any): TodoItem => ({
               id: String(t.id || ""),
               text: String(t.text || ""),
               status: (["pending", "in_progress", "completed", "cancelled"].includes(String(t.status)) ? String(t.status) : "pending") as TodoItem["status"],
+              agentMarker: marker,
             }));
           }
           // Capture the last file-change token count before the assistant flush clears the ref
@@ -1544,10 +1558,12 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
               originalContent: oldP,
             });
           } else if (tn === "write_todos" && Array.isArray(evt.toolParams?.todos)) {
+            const marker = (evt as any).agentMarker || ((evt as any).isSubAgent ? "code-writer" : "main");
             todosRef.current = (evt.toolParams.todos as any[]).map((t: any): TodoItem => ({
               id: String(t.id || ""),
               text: String(t.text || ""),
               status: (["pending", "in_progress", "completed", "cancelled"].includes(String(t.status)) ? String(t.status) : "pending") as TodoItem["status"],
+              agentMarker: marker,
             }));
           }
           // End assistant streaming, flush file changes to the assistant message
@@ -2700,14 +2716,15 @@ function truncPath(p: string) {
 
 // ── Standalone components ──
 
-function TodoCard({ todos }: { todos: TodoItem[] }) {
+function TodoCard({ todos, locked }: { todos: TodoItem[]; locked?: boolean }) {
     if (!todos || todos.length === 0) return null;
     const doneCount = todos.filter((t) => t.status === "completed" || t.status === "cancelled").length;
     return (
-      <div className="agent-todo-card">
+      <div className={`agent-todo-card${locked ? " agent-todo-locked" : ""}`}>
         <div className="agent-todo-header">
           <i className="codicon codicon-checklist" />
           <span>{doneCount}/{todos.length} done</span>
+          {locked && <span className="agent-todo-lock-badge"><i className="codicon codicon-lock" /> Sub-agent</span>}
         </div>
         {todos.map((t) => {
           let icon = "circle-outline";
@@ -2718,6 +2735,7 @@ function TodoCard({ todos }: { todos: TodoItem[] }) {
             <div key={t.id} className={`agent-todo-item ${t.status}`}>
               <i className={`codicon codicon-${icon}`} />
               <span className="agent-todo-text">{t.text}</span>
+              {!locked && t.agentMarker && t.agentMarker !== "main" && <span className="agent-todo-agent-badge">{t.agentMarker}</span>}
             </div>
           );
         })}
@@ -3180,6 +3198,32 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
                           const hasReasoning = !!m.reasoning_content;
                           const hasToolName = !!m.name;
                           const isToolCall = hasToolName;
+                          // Check if this is a write_todos tool call from the sub-agent
+                          const isWriteTodos = m.name === "write_todos";
+                          // Check if previous message was write_todos (this is the tool result)
+                          const prevIsWriteTodos = i > 0 && msg.subAgentMessages?.[i - 1]?.name === "write_todos";
+                          // Extract todos from write_todos tool call content
+                          let writeTodosParsed: TodoItem[] | null = null;
+                          if (isWriteTodos && m.content) {
+                            try {
+                              const arr = JSON.parse(m.content);
+                              if (Array.isArray(arr) && arr.length > 0) {
+                                const fc = arr[0];
+                                if (fc?.function?.name === "write_todos" && fc.function.arguments) {
+                                  const args = typeof fc.function.arguments === "string" ? JSON.parse(fc.function.arguments) : fc.function.arguments;
+                                  if (Array.isArray(args.todos)) {
+                                    writeTodosParsed = args.todos.map((t: any): TodoItem => ({
+                                      id: String(t.id || ""),
+                                      text: String(t.text || ""),
+                                      status: (["pending", "in_progress", "completed", "cancelled"].includes(String(t.status)) ? String(t.status) : "pending") as TodoItem["status"],
+                                    }));
+                                  }
+                                }
+                              }
+                            } catch {}
+                          }
+                          // Skip the tool result message that follows write_todos
+                          if (prevIsWriteTodos && m.role === "tool") return null;
                           const roleClass = isToolCall ? "agent-msg-tool"
                             : m.role === "tool" ? "agent-msg-tool"
                             : m.role === "user" ? "agent-msg-user"
@@ -3189,38 +3233,44 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
                               {m.reasoning_content && (
                                 <div className="agent-sub-agent-thought">{m.reasoning_content}</div>
                               )}
-                              {m.name && (
-                                <div className="agent-sub-agent-tool">
-                                  <i className="codicon codicon-tools" /> {m.name.replace(/_/g, " ")}
-                                </div>
-                              )}
-                              {m.content && !m.name && m.role === "assistant" && (
-                                <div className="agent-sub-agent-text">{m.content}</div>
-                              )}
-                              {m.role === "user" && (
-                                <div className="agent-sub-agent-text agent-sub-agent-user">User: {m.content}</div>
-                              )}
-                              {m.role === "tool" && (
+                              {isWriteTodos && writeTodosParsed ? (
+                                <TodoCard todos={writeTodosParsed} locked />
+                              ) : (
                                 <>
-                                  {!collapsedOutputs.has(`${msg.id}-sa-${i}`) ? (
-                                    <div className="agent-output-expanded">
-                                      <div
-                                        className="agent-output-collapse-bar"
-                                        onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.add(`${msg.id}-sa-${i}`); return next; })}
-                                      >
-                                        <span>Result ({String(m.content || "").split("\n").length} lines)</span>
-                                        <i className="codicon codicon-chevron-up" />
-                                      </div>
-                                      <div className="agent-sub-agent-result">{m.content}</div>
+                                  {m.name && (
+                                    <div className="agent-sub-agent-tool">
+                                      <i className="codicon codicon-tools" /> {m.name.replace(/_/g, " ")}
                                     </div>
-                                  ) : (
-                                    <div
-                                      className="agent-terminal-out-collapsed"
-                                      onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.delete(`${msg.id}-sa-${i}`); return next; })}
-                                    >
-                                      <i className="codicon codicon-chevron-right" />
-                                      <span>Result ({String(m.content || "").split("\n").length} lines)</span>
-                                    </div>
+                                  )}
+                                  {m.content && !m.name && m.role === "assistant" && (
+                                    <div className="agent-sub-agent-text">{m.content}</div>
+                                  )}
+                                  {m.role === "user" && (
+                                    <div className="agent-sub-agent-text agent-sub-agent-user">User: {m.content}</div>
+                                  )}
+                                  {m.role === "tool" && (
+                                    <>
+                                      {!collapsedOutputs.has(`${msg.id}-sa-${i}`) ? (
+                                        <div className="agent-output-expanded">
+                                          <div
+                                            className="agent-output-collapse-bar"
+                                            onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.add(`${msg.id}-sa-${i}`); return next; })}
+                                          >
+                                            <span>Result ({String(m.content || "").split("\n").length} lines)</span>
+                                            <i className="codicon codicon-chevron-up" />
+                                          </div>
+                                          <div className="agent-sub-agent-result">{formatToolContent(m.content)}</div>
+                                        </div>
+                                      ) : (
+                                        <div
+                                          className="agent-terminal-out-collapsed"
+                                          onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.delete(`${msg.id}-sa-${i}`); return next; })}
+                                        >
+                                          <i className="codicon codicon-chevron-right" />
+                                          <span>Result ({String(m.content || "").split("\n").length} lines)</span>
+                                        </div>
+                                      )}
+                                    </>
                                   )}
                                 </>
                               )}
@@ -3376,7 +3426,7 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
                           <span>Code ({String(msg.content || "").split("\n").length} lines)</span>
                           <i className="codicon codicon-chevron-up" />
                         </div>
-                        <pre className="agent-code">{msg.content}</pre>
+                        <pre className="agent-code">{formatToolContent(msg.content)}</pre>
                       </div>
                     ) : (
                       <div
@@ -3393,7 +3443,7 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
             )}
             {/* Fallback for tool msgs without tool-card */}
             {msg.role === "tool" && !msg.toolName && msg.content && (
-              <pre key={`${msg.id}-tool-fb`} className="agent-code">{msg.content}</pre>
+              <pre key={`${msg.id}-tool-fb`} className="agent-code">{formatToolContent(msg.content)}</pre>
             )}
             {msg.role !== "tool" && msg.content && (
               <div key={`${msg.id}-body`} className="agent-body">
@@ -3599,6 +3649,7 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
                   <div key={t.id} className={`agent-todo-item ${t.status}`}>
                     <i className={`codicon codicon-${t.status === "in_progress" ? "loading" : "circle-outline"}`} />
                     <span className="agent-todo-text">{t.text}</span>
+                    {t.agentMarker && t.agentMarker !== "main" && <span className="agent-todo-agent-badge">{t.agentMarker}</span>}
                   </div>
                 ))}
               </div>

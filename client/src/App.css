@@ -1800,6 +1800,18 @@ body.resizing iframe { pointer-events: none; }
 .agent-todo-item.cancelled { color: rgba(255,255,255,0.3); text-decoration: line-through; }
 .agent-todo-item.cancelled .codicon { color: rgba(255,255,255,0.2); }
 .agent-todo-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-todo-locked { opacity: 0.7; }
+.agent-todo-lock-badge {
+  margin-left: auto; font-size: 10px; font-weight: 400; color: var(--text-dim);
+  display: flex; align-items: center; gap: 4px;
+}
+.agent-todo-lock-badge .codicon { font-size: 10px; color: var(--text-dim) !important; }
+.agent-todo-agent-badge {
+  margin-left: auto; font-size: 9px; font-weight: 500;
+  padding: 1px 5px; border-radius: 3px;
+  background: rgba(255, 255, 255, 0.06); color: var(--text-dim);
+  flex-shrink: 0;
+}
 
 /* ── Completion footer ── */
 .agent-footer {

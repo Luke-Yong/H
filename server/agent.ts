@@ -71,7 +71,7 @@ export interface AgentState {
   /** Terminal sessions spawned by this agent via run_in_terminal. */
   agentTerminalSessions?: { sessionId: string; groupKey: string; command: string }[];
   /** Latest todo list from write_todos — used to detect incomplete tasks at task_complete. */
-  latestTodos?: { id: string; text: string; status: string }[];
+  latestTodos?: { id: string; text: string; status: string; agentMarker?: string }[];
   /** Latest validated summary submitted via write_summary. Required before task_complete. */
   latestSummary?: string;
   /** Cumulative DeepSeek API usage across the current run. */
@@ -2633,6 +2633,15 @@ async function* runSubAgentStream(
 
     if (!toolCalls || toolCalls.length === 0) {
       const reply = text || "Done.";
+      // Reject sub-agent completion if pending todos exist
+      const pending = getPendingTodos(subState);
+      if (pending) {
+        const pendingList = pending.map((t) => `  [${t.status}] ${t.text}`).join("\n");
+        const rejectMsg = `You still have ${pending.length} incomplete task${pending.length > 1 ? "s" : ""}:\n${pendingList}\n\nComplete all tasks before finishing. Use write_todos to update their status (mark each as completed or cancelled), then return your final report.`;
+        subState.messages.push({ role: "assistant", content: reply, ...rc(reasoningContent) });
+        subState.messages.push({ role: "user", content: rejectMsg });
+        continue;
+      }
       subState.messages.push({ role: "assistant", content: reply, ...rc(reasoningContent) });
       yield { type: "text", text: reply } as SubAgentStreamEvent;
       const summary = summarizeSubAgentResult(reply, config.name);
@@ -2673,6 +2682,12 @@ async function* runSubAgentStream(
       if (fsResult !== null) {
         const stored = fnName === "run_command" ? summarizeCommandResult(fsResult, "Sub-agent command") : fsResult;
         subState.messages.push({ role: "tool", content: stored, tool_call_id: tc.id });
+        // Track latest todos for pending-task detection at sub-agent completion
+        if (fnName === "write_todos" && Array.isArray(params.todos)) {
+          subState.latestTodos = (params.todos as any[]).map((t: any) => ({
+            id: String(t.id || ""), text: String(t.text || ""), status: String(t.status || "pending"), agentMarker,
+          }));
+        }
         yield { type: "tool_end", toolName: fnName, toolCallId: tc.id, toolResult: stored.slice(0, 2000), agentMarker, toolSandbox: fnName === "run_command" ? stored : undefined } as SubAgentStreamEvent;
       } else if (fnName === "read_problems") {
         const diag = await runReadProblems(subState.projectRoot);
@@ -2729,6 +2744,15 @@ async function runSubAgent(
 
     if (!toolCalls || toolCalls.length === 0) {
       const reply = text || "Done.";
+      // Reject sub-agent completion if pending todos exist
+      const pending = getPendingTodos(subState);
+      if (pending) {
+        const pendingList = pending.map((t) => `  [${t.status}] ${t.text}`).join("\n");
+        const rejectMsg = `You still have ${pending.length} incomplete task${pending.length > 1 ? "s" : ""}:\n${pendingList}\n\nComplete all tasks before finishing. Use write_todos to update their status (mark each as completed or cancelled), then return your final report.`;
+        subState.messages.push({ role: "assistant", content: reply, ...rc(reasoningContent) });
+        subState.messages.push({ role: "user", content: rejectMsg });
+        continue;
+      }
       subState.messages.push({ role: "assistant", content: reply, ...rc(reasoningContent) });
       const summary = summarizeSubAgentResult(reply, config.name);
       return { phase: "done", success: true, summary, iterations: iter + 1, subState };
@@ -2777,6 +2801,12 @@ async function runSubAgent(
       if (fsResult !== null) {
         const stored = fnName === "run_command" ? summarizeCommandResult(fsResult, "Sub-agent command") : fsResult;
         subState.messages.push({ role: "tool", content: stored, tool_call_id: tc.id });
+        // Track latest todos for pending-task detection at sub-agent completion
+        if (fnName === "write_todos" && Array.isArray(params.todos)) {
+          subState.latestTodos = (params.todos as any[]).map((t: any) => ({
+            id: String(t.id || ""), text: String(t.text || ""), status: String(t.status || "pending"), agentMarker: agentType || config.name,
+          }));
+        }
       } else if (fnName === "read_problems") {
         const diag = await runReadProblems(subState.projectRoot);
         subState.messages.push({ role: "tool", content: diag.summary, tool_call_id: tc.id });
@@ -2826,6 +2856,15 @@ export async function resumeSubAgent(
 
     if (!toolCalls || toolCalls.length === 0) {
       const reply = text || "Done.";
+      // Reject sub-agent completion if pending todos exist
+      const pending = getPendingTodos(subState);
+      if (pending) {
+        const pendingList = pending.map((t) => `  [${t.status}] ${t.text}`).join("\n");
+        const rejectMsg = `You still have ${pending.length} incomplete task${pending.length > 1 ? "s" : ""}:\n${pendingList}\n\nComplete all tasks before finishing. Use write_todos to update their status (mark each as completed or cancelled), then return your final report.`;
+        subState.messages.push({ role: "assistant", content: reply, ...rc(reasoningContent) });
+        subState.messages.push({ role: "user", content: rejectMsg });
+        continue;
+      }
       subState.messages.push({ role: "assistant", content: reply, ...rc(reasoningContent) });
       const summary = summarizeSubAgentResult(reply, config.name);
       return { phase: "done", success: true, summary, iterations: iter + 1, subState };
@@ -2868,6 +2907,12 @@ export async function resumeSubAgent(
       if (fsResult !== null) {
         const stored = fnName === "run_command" ? summarizeCommandResult(fsResult, "Sub-agent command") : fsResult;
         subState.messages.push({ role: "tool", content: stored, tool_call_id: tc.id });
+        // Track latest todos for pending-task detection at sub-agent completion
+        if (fnName === "write_todos" && Array.isArray(params.todos)) {
+          subState.latestTodos = (params.todos as any[]).map((t: any) => ({
+            id: String(t.id || ""), text: String(t.text || ""), status: String(t.status || "pending"), agentMarker: config.name,
+          }));
+        }
       } else if (fnName === "read_problems") {
         const diag = await runReadProblems(subState.projectRoot);
         subState.messages.push({ role: "tool", content: diag.summary, tool_call_id: tc.id });
@@ -3384,7 +3429,7 @@ export async function agentLoop(
         // Track latest todos for pending-task detection at task_complete
         if (fnName === "write_todos" && Array.isArray(params.todos)) {
           state.latestTodos = (params.todos as any[]).map((t: any) => ({
-            id: String(t.id || ""), text: String(t.text || ""), status: String(t.status || "pending"),
+            id: String(t.id || ""), text: String(t.text || ""), status: String(t.status || "pending"), agentMarker: "main",
           }));
         }
         continue;
@@ -3873,7 +3918,7 @@ export async function* agentLoopStream(
              turnsSinceTodoUpdate = 0;
              if (Array.isArray(params.todos)) {
                state.latestTodos = (params.todos as any[]).map((t: any) => ({
-                 id: String(t.id || ""), text: String(t.text || ""), status: String(t.status || "pending"),
+                 id: String(t.id || ""), text: String(t.text || ""), status: String(t.status || "pending"), agentMarker: "main",
                }));
              }
            }
