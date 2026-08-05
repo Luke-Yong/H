@@ -839,7 +839,7 @@ Agent 调用 run_in_terminal
 
 | 工具 | 描述 |
 |------|------|
-| `read_problems` | 读取当前 IDE 诊断 — linter 错误、TypeScript 错误、警告、提示、调试控制台、输出、浏览器控制台。在进行更改后调用以验证没有新错误。 |
+| `read_problems` | 从基于 LSP 的问题面板读取当前 IDE 诊断 — linter 错误、TypeScript 错误、警告。如果未缓存 LSP 诊断，则回退到自动检测的构建/lint 命令。在进行更改后调用以验证没有新错误。 |
 | `read_graph` | 查询代码库知识图谱以获取结构/依赖信息 — 文件导出了什么、谁从文件导入、哪些文件导出给定符号、完整目录树。对于依赖问题，比 grep 快得多。 |
 
 #### `read_graph` — 知识图谱查询
@@ -1278,7 +1278,11 @@ Agent 可以通过 `run_command` 或 `run_in_terminal` 发出的每个 shell 命
 
 ### 项目自动检测（`read_problems`）
 
-当 agent 调用 `read_problems` 时，服务器自动检测项目类型并运行：
+`read_problems` 采用**双层策略**：
+
+1. **LSP 优先**：从语言服务器读取实时诊断（已在终端的问题面板中显示）。即时返回零延迟结果，与用户所见完全一致 — 无需执行 shell 命令。
+
+2. **回退命令**：如果没有缓存的 LSP 诊断（例如 LSP 尚未启动），则自动检测项目类型并运行构建/lint 命令：
 
 | 检测信号 | 自动命令 |
 |----------|----------|
@@ -1427,7 +1431,7 @@ Agent 使用固定的工具注册表。为防止其虚构不存在的工具：
 - **编辑文件** → 使用 `edit_file`（永远不要 `sed`、`awk`）
 - **写入文件** → 使用 `write_file`（永远不要 `echo >`、`cp`）
 - **运行命令** → 短任务使用 `run_command`，服务器使用 `run_in_terminal`（永远不要使用 `&` 或 `nohup` 后台运行）
-- **检查诊断** → 使用 `read_problems`（不要直接使用 `tsc`、`eslint` 或 `pylint` — 这些通过 `run_command` 执行）
+- **检查诊断** → 使用 `read_problems`（从问题面板读取 LSP 诊断 — 即时，无需执行构建命令）
 - **依赖/结构查询** → 使用 `read_graph`（什么导出 X？谁从 Y 导入？）— 对于这类查询比 grep 快得多
 - **启动服务器** → 仅使用 `run_in_terminal`（永远不要用 `run_command` 执行 `python app.py`、`npm start` 等）
 
@@ -1895,7 +1899,7 @@ Harness 现在在将庞大的命令/构建输出存储回 agent 转录之前对�
 
 - `run_command` 存储紧凑摘要，而不是完整原始输出
 - `run_in_terminal` 存储紧凑摘要（关键错误/成功行），而不是完整终端日志 — 完整输出被缓存供 `read_command_output` 使用
-- `read_problems` 存储紧凑的构建检查摘要，而不是完整的编译器/linter 转储
+- `read_problems` 从问题面板读取 LSP 诊断（实时，零延迟）；如果无 LSP 缓存则回退到紧凑的构建检查摘要
 - 摘要保留最重要的行（错误、警告、失败、URL、成功标记）
 - **完整原始命令输出仍然被缓存**在命令输出存储中，并且可以通过 `read_command_output` 稍后重新阅读
 

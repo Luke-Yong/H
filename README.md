@@ -858,7 +858,7 @@ Agent calls run_in_terminal
 
 | Tool | Description |
 |------|-------------|
-| `read_problems` | Read current IDE diagnostics — linter errors, TypeScript errors, warnings, hints, debug console, output, browser console. Call after making changes to verify no new errors. |
+| `read_problems` | Read current IDE diagnostics from the LSP-based Problems tab — linter errors, TypeScript errors, warnings. Falls back to auto-detected build/lint command if no LSP diagnostics are cached. Call after making changes to verify no new errors. |
 | `read_graph` | Query the codebase knowledge graph for structural/dependency information — what a file exports, who imports from a file, which files export a given symbol, the full directory tree. Much faster than grep for dependency questions. |
 
 #### `read_graph` — Knowledge Graph Queries
@@ -1297,7 +1297,11 @@ Every shell command the agent can potentially issue via `run_command` or `run_in
 
 ### Project auto-detection (`read_problems`)
 
-When the agent calls `read_problems`, the server auto-detects the project type and runs:
+`read_problems` uses a **two-tier approach**:
+
+1. **LSP-first**: Reads real-time diagnostics from the language server (already visible in the terminal's Problems tab). This returns instant, zero-latency results exactly matching what the user sees — no shell command needed.
+
+2. **Fallback command**: If no LSP diagnostics are cached (e.g., the LSP hasn't started yet), it auto-detects the project type and runs a build/lint command:
 
 | Detection signal | Auto-command |
 |------------------|-------------|
@@ -1446,7 +1450,7 @@ The agent works with a fixed tool registry. To prevent it from inventing tools t
 - **Editing files** → use `edit_file` (never `sed`, `awk`)
 - **Writing files** → use `write_file` (never `echo >`, `cp`)
 - **Running commands** → use `run_command` for short tasks, `run_in_terminal` for servers (never background with `&` or `nohup`)
-- **Checking diagnostics** → use `read_problems` (not `tsc`, `eslint`, or `pylint` directly — those go through `run_command`)
+- **Checking diagnostics** → use `read_problems` (reads LSP diagnostics from the Problems tab — instant, no build command needed)
 - **Dependency/structural queries** → use `read_graph` (what exports X? who imports from Y?) — much faster than grep for these
 - **Starting servers** → use `run_in_terminal` only (never `run_command` for `python app.py`, `npm start`, etc.)
 
@@ -1914,7 +1918,7 @@ Harness now distills bulky command/build output before storing it back into the 
 
 - `run_command` stores a compact summary instead of the full raw output
 - `run_in_terminal` stores a compact summary (key error/success lines) instead of the full terminal log — the full output is cached for `read_command_output`
-- `read_problems` stores a compact build-check summary instead of the full compiler/linter dump
+- `read_problems` reads LSP diagnostics from the Problems tab (live, zero-latency); falls back to a compact build-check summary if no LSP cache is available
 - The summary keeps the most important lines (errors, warnings, failures, URLs, success markers)
 - The **full raw command output is still cached** in the command-output store and can be re-read later with `read_command_output`
 
