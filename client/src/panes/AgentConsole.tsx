@@ -1291,6 +1291,10 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
               }
               return next;
             });
+            // Auto-collapse tool output and code blocks after the tool completes
+            if (!isTerminal) {
+              setCollapsedOutputs((prev) => { const next = new Set(prev); next.add(id); next.add(`${id}-code`); return next; });
+            }
           }
           if (evt.toolName === "delegate_task") {
             activeDelegationDepthRef.current = Math.max(0, activeDelegationDepthRef.current - 1);
@@ -1691,6 +1695,10 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
               }
               return next;
             });
+            // Auto-collapse tool output and code blocks after the tool completes
+            if (evt.toolName !== "run_in_terminal") {
+              setCollapsedOutputs((prev) => { const next = new Set(prev); next.add(id); next.add(`${id}-code`); return next; });
+            }
           }
           if (evt.toolName === "delegate_task") {
             activeDelegationDepthRef.current = Math.max(0, activeDelegationDepthRef.current - 1);
@@ -3279,11 +3287,39 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
                         <span className="agent-terminal-cmd">{String(msg.toolParams.command ?? "")}</span>
                       </div>
                     )}
-                    <pre className="agent-terminal-out">{msg.sandboxOutput}</pre>
+                    {!collapsedOutputs.has(msg.id) ? (
+                      <pre
+                        className="agent-terminal-out"
+                        onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.add(msg.id); return next; })}
+                      >{msg.sandboxOutput}</pre>
+                    ) : (
+                      <div
+                        className="agent-terminal-out-collapsed"
+                        onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.delete(msg.id); return next; })}
+                      >
+                        <i className="codicon codicon-chevron-right" />
+                        <span>Output ({msg.sandboxOutput.split("\n").length} lines)</span>
+                      </div>
+                    )}
                   </div>
                 )}
                 {msg.content && !msg.sandboxOutput && msg.toolName !== "run_in_terminal" && (
-                  <pre className="agent-code">{msg.content}</pre>
+                  <>
+                    {!collapsedOutputs.has(`${msg.id}-code`) ? (
+                      <pre
+                        className="agent-code"
+                        onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.add(`${msg.id}-code`); return next; })}
+                      >{msg.content}</pre>
+                    ) : (
+                      <div
+                        className="agent-terminal-out-collapsed"
+                        onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.delete(`${msg.id}-code`); return next; })}
+                      >
+                        <i className="codicon codicon-chevron-right" />
+                        <span>Result ({msg.content.split("\n").length} lines)</span>
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             )}

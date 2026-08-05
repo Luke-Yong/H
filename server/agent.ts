@@ -876,7 +876,7 @@ export type ToolExecutor = (
 
 // Filesystem tools that the server can execute directly.
 
-async function runCommand(command: string, cwd: string): Promise<string> {
+async function runCommand(command: string, cwd: string, onOutput?: (chunk: string) => void): Promise<string> {
   return new Promise((resolve) => {
     const MAX_KEEP = 4000;
     const MAX_CACHE = 50000; // full output cache limit
@@ -1038,6 +1038,8 @@ async function runCommand(command: string, cwd: string): Promise<string> {
       totalChars += text.length;
       buf = (buf + text).slice(-MAX_KEEP);
       fullBuf = (fullBuf + text).slice(-MAX_CACHE); // untruncated cache
+      // Forward live output to the caller (for streaming progress in the UI)
+      if (onOutput) onOutput(text);
       // Reset idle timer — if output stops for IDLE_TIMEOUT_MS, resolve early
       if (idleTimer) clearTimeout(idleTimer);
       idleTimer = setTimeout(() => {
@@ -1227,7 +1229,7 @@ function grepWithRg(
   });
 }
 
-export async function runFsTool(name: string, params: Record<string, unknown>, root: string): Promise<string | null> {
+export async function runFsTool(name: string, params: Record<string, unknown>, root: string, onOutput?: (chunk: string) => void): Promise<string | null> {
   const resolve = (p: string) => path.resolve(root, p);
 
   // ── Secret-file guard ──
@@ -1403,7 +1405,7 @@ export async function runFsTool(name: string, params: Record<string, unknown>, r
     return results.join("\n") + (results.length >= MAX_MATCHES ? `\n... (truncated at ${MAX_MATCHES} results)` : "");
   }
   if (name === "run_command") {
-    return await runCommand(String(params.command || ""), root);
+    return await runCommand(String(params.command || ""), root, onOutput);
   }
   if (name === "read_command_output") {
     return readCommandOutput(params);
@@ -3581,16 +3583,13 @@ export async function* agentLoopStream(
     yield { type: "error", error: "No server API key configured. Set DEEPSEEK_API_KEY on the server." };
     return;
   }
-  const MAX_ITERS = 50;
+  const MAX_ITERS = 200;
 
   // Dynamic instruction retrieval — rebuilt each iteration as conversation evolves
   const buildMessages = () => {
     return buildOpenAiMessages(state, context);
   };
 
-  // Track whether we've already warned about history length
-  // (only warn once per session to avoid spam).
-  let turnsWarned = false;
   let finalEstTokens = 0;
   // Track how many iterations since last write_todos call — used to inject reminders
   let turnsSinceTodoUpdate = 0;
@@ -3634,15 +3633,6 @@ export async function* agentLoopStream(
     const sysLen = openaiMessages[0]?.content?.length || 0;
     const estTokens = estimateStateTokens(state, sysLen);
     finalEstTokens = estTokens;
-
-    // Warn when approaching the iteration limit.
-    if (!turnsWarned && iter >= 20) {
-      turnsWarned = true;
-      yield {
-        type: "warning",
-        warning: `${iter + 1}/${MAX_ITERS} turns used. If the task hasn't completed soon, try breaking it into smaller steps.`,
-      };
-    }
 
     // Stream response from DeepSeek
     const stream = chatDeepSeekToolStream(openaiMessages, MAIN_AGENT_TOOLS, { model: modelOpts?.model, apiKey });
@@ -3700,10 +3690,28 @@ export async function* agentLoopStream(
       // run_command: sandboxed — execute directly, no permission needed
       if (fnName === "run_command") {
         const cmd = String(params.command || "");
-        // Yield tool_start immediately so the client shows the spinner
         yield { type: "tool_start", toolName: fnName, toolParams: params };
-        // Then run the command (client sees "Wait a moment..." while this runs)
-        const fsResult = await runFsTool(fnName, params, projectRoot);
+
+        // ── Stream command output as live progress events ──
+        const progressChunks: string[] = [];
+        const pushProgress = (chunk: string) => { progressChunks.push(chunk); };
+        const fsResult = await runFsTool(fnName, params, projectRoot, pushProgress);
+
+        // Yield any accumulated progress as text events so the client sees live output
+        if (progressChunks.length > 0) {
+          // Group small chunks to avoid spamming tiny events
+          const merged: string[] = [];
+          let buf = "";
+          for (const c of progressChunks) {
+            buf += c;
+            if (buf.length >= 200 || c.endsWith("\n")) { merged.push(buf); buf = ""; }
+          }
+          if (buf) merged.push(buf);
+          for (const chunk of merged.slice(0, 20)) { // cap at 20 events to avoid flooding
+            yield { type: "text", text: chunk };
+          }
+        }
+
         const storedResult = getStoredToolResult(fnName, fsResult || "");
         state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
         state.messages.push({ role: "tool", content: storedResult, tool_call_id: tc.id });
