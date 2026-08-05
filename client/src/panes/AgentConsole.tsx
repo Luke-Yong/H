@@ -186,6 +186,8 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
   const [agentUsage, setAgentUsage] = useState<UsageStats | null>(null);
   // Track which terminal outputs are collapsed (keyed by message id)
   const [collapsedOutputs, setCollapsedOutputs] = useState<Set<string>>(new Set());
+  // Track which IDs have been auto-collapsed (so we don't re-collapse user-expanded ones)
+  const autoCollapsedIdsRef = useRef<Set<string>>(new Set());
   // Track agent terminal output streaming from the bridge
   const agentTermMsgIdRef = useRef<string | null>(null);
   const agentTermOutputRef = useRef<string>("");
@@ -1291,9 +1293,25 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
               }
               return next;
             });
-            // Auto-collapse tool output and code blocks after the tool completes
-            if (!isTerminal) {
+            // Auto-collapse tool output and code blocks after the tool completes (once)
+            if (!isTerminal && !autoCollapsedIdsRef.current.has(id)) {
+              autoCollapsedIdsRef.current.add(id);
               setCollapsedOutputs((prev) => { const next = new Set(prev); next.add(id); next.add(`${id}-code`); return next; });
+            }
+            // Auto-collapse sub-agent outputs when delegate_task finishes
+            const saMessages = (evt as any).subAgentMessages;
+            if (evt.toolName === "delegate_task" && saMessages && saMessages.length > 0) {
+              setCollapsedOutputs((prev) => {
+                const next = new Set(prev);
+                for (let i = 0; i < saMessages.length; i++) {
+                  if (saMessages[i].role === "tool" || saMessages[i].name) {
+                    next.add(`${id}-sa-${i}`);
+                  }
+                }
+                return next;
+              });
+              // Also collapse the expanded sub-agent card
+              setExpandedSubAgents((prev) => { const next = new Set(prev); next.delete(id); return next; });
             }
           }
           if (evt.toolName === "delegate_task") {
@@ -1695,9 +1713,24 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
               }
               return next;
             });
-            // Auto-collapse tool output and code blocks after the tool completes
-            if (evt.toolName !== "run_in_terminal") {
+            // Auto-collapse tool output and code blocks after the tool completes (once)
+            if (evt.toolName !== "run_in_terminal" && !autoCollapsedIdsRef.current.has(id)) {
+              autoCollapsedIdsRef.current.add(id);
               setCollapsedOutputs((prev) => { const next = new Set(prev); next.add(id); next.add(`${id}-code`); return next; });
+            }
+            // Auto-collapse sub-agent outputs when delegate_task finishes
+            const saMessages2 = (evt as any).subAgentMessages;
+            if (evt.toolName === "delegate_task" && saMessages2 && saMessages2.length > 0) {
+              setCollapsedOutputs((prev) => {
+                const next = new Set(prev);
+                for (let i = 0; i < saMessages2.length; i++) {
+                  if (saMessages2[i].role === "tool" || saMessages2[i].name) {
+                    next.add(`${id}-sa-${i}`);
+                  }
+                }
+                return next;
+              });
+              setExpandedSubAgents((prev) => { const next = new Set(prev); next.delete(id); return next; });
             }
           }
           if (evt.toolName === "delegate_task") {
@@ -3168,11 +3201,28 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
                                 <div className="agent-sub-agent-text agent-sub-agent-user">User: {m.content}</div>
                               )}
                               {m.role === "tool" && (
-                                <div className="agent-sub-agent-result">
-                                  {m.content.length > 500
-                                    ? m.content  // browser_screenshot / browser_get_dom: show full output
-                                    : m.content}
-                                </div>
+                                <>
+                                  {!collapsedOutputs.has(`${msg.id}-sa-${i}`) ? (
+                                    <div className="agent-output-expanded">
+                                      <div
+                                        className="agent-output-collapse-bar"
+                                        onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.add(`${msg.id}-sa-${i}`); return next; })}
+                                      >
+                                        <span>Result ({String(m.content || "").split("\n").length} lines)</span>
+                                        <i className="codicon codicon-chevron-up" />
+                                      </div>
+                                      <div className="agent-sub-agent-result">{m.content}</div>
+                                    </div>
+                                  ) : (
+                                    <div
+                                      className="agent-terminal-out-collapsed"
+                                      onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.delete(`${msg.id}-sa-${i}`); return next; })}
+                                    >
+                                      <i className="codicon codicon-chevron-right" />
+                                      <span>Result ({String(m.content || "").split("\n").length} lines)</span>
+                                    </div>
+                                  )}
+                                </>
                               )}
                             </div>
                           );
@@ -3241,14 +3291,20 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
                     {msg.sandboxOutput != null && (
                       <>
                         {!collapsedOutputs.has(msg.id) ? (
-                          <pre
-                            className="agent-terminal-out"
-                            onClick={() => {
-                              if (msg.state !== "waiting") {
-                                setCollapsedOutputs((prev) => { const next = new Set(prev); next.add(msg.id); return next; });
-                              }
-                            }}
-                          >{msg.sandboxOutput}</pre>
+                          <div className="agent-output-expanded">
+                            <div
+                              className="agent-output-collapse-bar"
+                              onClick={() => {
+                                if (msg.state !== "waiting") {
+                                  setCollapsedOutputs((prev) => { const next = new Set(prev); next.add(msg.id); return next; });
+                                }
+                              }}
+                            >
+                              <span>Output ({msg.sandboxOutput.split("\n").length} lines)</span>
+                              <i className="codicon codicon-chevron-up" />
+                            </div>
+                            <pre className="agent-terminal-out">{msg.sandboxOutput}</pre>
+                          </div>
                         ) : (
                           <div
                             className="agent-terminal-out-collapsed"
@@ -3288,10 +3344,16 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
                       </div>
                     )}
                     {!collapsedOutputs.has(msg.id) ? (
-                      <pre
-                        className="agent-terminal-out"
-                        onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.add(msg.id); return next; })}
-                      >{msg.sandboxOutput}</pre>
+                      <div className="agent-output-expanded">
+                        <div
+                          className="agent-output-collapse-bar"
+                          onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.add(msg.id); return next; })}
+                        >
+                          <span>Output ({msg.sandboxOutput.split("\n").length} lines)</span>
+                          <i className="codicon codicon-chevron-up" />
+                        </div>
+                        <pre className="agent-terminal-out">{msg.sandboxOutput}</pre>
+                      </div>
                     ) : (
                       <div
                         className="agent-terminal-out-collapsed"
@@ -3306,10 +3368,16 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
                 {msg.content && !msg.sandboxOutput && msg.toolName !== "run_in_terminal" && (
                   <>
                     {!collapsedOutputs.has(`${msg.id}-code`) ? (
-                      <pre
-                        className="agent-code"
-                        onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.add(`${msg.id}-code`); return next; })}
-                      >{msg.content}</pre>
+                      <div className="agent-output-expanded">
+                        <div
+                          className="agent-output-collapse-bar"
+                          onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.add(`${msg.id}-code`); return next; })}
+                        >
+                          <span>Code ({String(msg.content || "").split("\n").length} lines)</span>
+                          <i className="codicon codicon-chevron-up" />
+                        </div>
+                        <pre className="agent-code">{msg.content}</pre>
+                      </div>
                     ) : (
                       <div
                         className="agent-terminal-out-collapsed"

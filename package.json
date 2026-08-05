@@ -16,8 +16,8 @@
     "desktop:pack": "npm run icon:generate && npm run desktop:build && electron-builder --win --dir && node scripts/embed-icon.js && electron-builder --win --prepackaged dist/win-unpacked",
     "icon:generate": "node scripts/generate-icon.js",
     "install:all": "npm install && cd client && npm install",
-    "rebuild:pty": "electron-rebuild -f -w node-pty",
-    "postinstall": "node -e \"try { const { spawnSync } = require('child_process'); const r = spawnSync('npx', ['electron-rebuild','-f','-w','node-pty'], { stdio: 'inherit', shell: true }); if (r.status !== 0) { console.warn('node-pty rebuild failed; terminal will fall back to pipe mode.'); } } catch(e) { console.warn('node-pty rebuild skipped; terminal will fall back to pipe mode.'); }\"",
+    "rebuild:electron": "electron-rebuild --only better-sqlite3 && electron-rebuild --only node-pty",
+    "postinstall": "node -e \"try { const { spawnSync } = require('child_process'); const r1 = spawnSync('npx', ['electron-rebuild','--only','better-sqlite3'], { stdio: 'inherit', shell: true }); const r2 = spawnSync('npx', ['electron-rebuild','--only','node-pty'], { stdio: 'inherit', shell: true }); if (r2.status !== 0) { console.warn('node-pty rebuild failed; terminal will fall back to pipe mode.'); } } catch(e) { console.warn('electron-rebuild skipped; terminal will fall back to pipe mode.'); }\"",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage"

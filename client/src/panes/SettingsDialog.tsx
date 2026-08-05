@@ -231,6 +231,7 @@ function AboutTab() {
               <li><strong>Vitest</strong> (MIT)</li>
               <li><strong>Supertest</strong> (MIT)</li>
               <li><strong>sharp</strong> (Apache-2.0)</li>
+              <li><strong>@vitejs/plugin-react-swc</strong> (MIT)</li>
               <li><strong>concurrently</strong> (MIT)</li>
               <li><strong>png-to-ico</strong> (MIT)</li>
               <li><strong>to-ico</strong> (MIT)</li>

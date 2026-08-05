@@ -2051,6 +2051,16 @@ body.resizing iframe { pointer-events: none; }
 }
 .agent-terminal-out-collapsed:hover { color: var(--text); }
 .agent-terminal-out-collapsed .codicon { font-size: 10px; }
+.agent-output-expanded { position: relative; }
+.agent-output-collapse-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 6px;
+  padding: 4px 10px; font-size: 11px; color: var(--text-dim);
+  background: #1a1a1a; cursor: pointer;
+  user-select: none;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+}
+.agent-output-collapse-bar:hover { color: var(--text); }
+.agent-output-collapse-bar .codicon { font-size: 12px; }
 .agent-terminal-warn { font-size: 10px; color: #d29922; flex-shrink: 0; }
 .agent-terminal-perms {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
