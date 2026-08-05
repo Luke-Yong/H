@@ -58,6 +58,8 @@ interface MonacoMarker {
   code?: string;
 }
 
+export type { MonacoMarker };
+
 // LSP severity (1=Error,2=Warning,3=Info,4=Hint) → Monaco severity.
 // Per LSP spec: "If omitted, diagnostics should be treated as errors."
 function mapSeverity(sev: number | undefined): number {
@@ -654,4 +656,21 @@ export async function notifyFileChange(
     return { ok: true };
   }
   return { ok: false, error: "No LSP available" };
+}
+
+/**
+ * Return all cached LSP diagnostics for files under the given root path.
+ * Filters `diagnosticsByUri` by prefix-matching the normalized root path
+ * against each cached URI. Returns an empty array if no LSP sessions exist.
+ */
+export function getDiagnosticsForRoot(rootPath: string): Array<{ uri: string; markers: MonacoMarker[] }> {
+  const normalizedRoot = normalizeUri(toFileUri(rootPath, true));
+  const results: Array<{ uri: string; markers: MonacoMarker[] }> = [];
+  for (const [uri, markers] of diagnosticsByUri) {
+    if (markers.length === 0) continue;
+    if (normalizeUri(uri).startsWith(normalizedRoot)) {
+      results.push({ uri, markers });
+    }
+  }
+  return results;
 }

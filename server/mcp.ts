@@ -70,6 +70,24 @@ interface ServerInfo {
   version: string;
 }
 
+// ── Line-ending detection ──
+// On Windows with core.autocrlf=true, Git expects CRLF in the working tree.
+// Node's fs.writeFileSync always writes LF. Without normalization, Git sees
+// every line as modified even when content is otherwise identical.
+function getLineEnding(cwd: string): "\r\n" | "\n" {
+  try {
+    const autocrlf = execSync("git config core.autocrlf", {
+      cwd,
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    if (autocrlf === "true" && process.platform === "win32") {
+      return "\r\n";
+    }
+  } catch { /* not a git repo or config missing */ }
+  return "\n";
+}
+
 export class HarnessMcpServer extends EventEmitter {
   private initialized = false;
   private clientCapabilities: Record<string, unknown> = {};
@@ -305,7 +323,12 @@ export class HarnessMcpServer extends EventEmitter {
         if (isSecretPath(filePath)) return `Blocked: ${args.path} may contain secrets.`;
         const dir = path.dirname(filePath);
         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-        const content = String(args.content || "");
+        let content = String(args.content || "");
+        // Normalize line endings to match the project's Git convention.
+        const lineEnding = getLineEnding(dir);
+        if (lineEnding === "\r\n") {
+          content = content.replace(/\r\n/g, "\n").split("\n").join("\r\n");
+        }
         fs.writeFileSync(filePath, content, "utf-8");
         return `Wrote ${Math.round(content.length / 4)} tokens to ${args.path}.`;
       }
@@ -318,13 +341,20 @@ export class HarnessMcpServer extends EventEmitter {
         const newStr = String(args.new_string || "");
         const replaceAll = Boolean(args.replace_all);
         if (!oldStr) return "old_string is required.";
-        const original = fs.readFileSync(filePath, "utf-8");
+        // Normalize CRLF → LF for matching
+        const raw = fs.readFileSync(filePath, "utf-8");
+        const hadCRLF = raw.includes("\r\n");
+        const original = raw.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
         const count = (original.match(new RegExp(oldStr.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g")) || []).length;
         if (count === 0) return `old_string not found in ${args.path}.`;
         if (count > 1 && !replaceAll) {
           return `old_string matches ${count} locations in ${args.path}. Use replace_all: true to replace all.`;
         }
-        const result = replaceAll ? original.split(oldStr).join(newStr) : original.replace(oldStr, newStr);
+        let result = replaceAll ? original.split(oldStr).join(newStr) : original.replace(oldStr, newStr);
+        // Preserve the original line ending style
+        if (hadCRLF) {
+          result = result.split("\n").join("\r\n");
+        }
         fs.writeFileSync(filePath, result, "utf-8");
         return replaceAll
           ? `Replaced ${count} occurrences in ${args.path}.`

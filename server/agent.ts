@@ -12,6 +12,7 @@ import { chatDeepSeekTool, chatDeepSeekToolStream, generateEmbedding, type DeepS
 import { getSnapshotPath } from "./harnessPaths";
 import { getMemoryStore } from "./memory";
 import { killSession, getLastCreatedSessionId } from "./terminalManager";
+import { getDiagnosticsForRoot } from "./lsp";
 import fs from "fs";
 import path from "path";
 import os from "os";
@@ -105,11 +106,12 @@ export const SUB_AGENT_PROFILES: Record<string, SubAgentConfig> = {
       "browser_navigate", "browser_info", "browser_screenshot", "browser_get_dom",
       "browser_click", "browser_type", "browser_clear", "browser_select",
       "browser_console", "browser_request_errors", "browser_scroll", "browser_wait",
-      "browser_press_key",
+      "browser_press_key", "write_todos",
     ],
     headless: false,
     maxIterations: 100,
     systemPrompt: `You are a browser automation specialist running as a sub-agent. Your job is to interact with a web page and report your findings to the parent agent.
+- BEFORE starting, call write_todos to break the task into steps: navigate, inspect, interact, verify.
 - Use browser_navigate to go to a URL.
 - Use browser_info to check the current URL and page title.
 - Use browser_screenshot to get a text snapshot of visible content.
@@ -122,30 +124,36 @@ export const SUB_AGENT_PROFILES: Record<string, SubAgentConfig> = {
 - Use browser_scroll to reveal content below the fold.
 - Use browser_wait to wait for specific elements to appear on dynamic pages.
 - Use browser_console / browser_request_errors to check for errors.
+- Update write_todos as you complete each step.
 - After analyzing, return a structured report in plain text: URL, title, key content, what you clicked/typed, results observed, any errors. Do NOT call task_complete or write_summary.`,
   },
   "code-search": {
     name: "Code Search Agent",
-    tools: ["read_file", "list_files", "search_files", "grep", "read_graph"],
+    tools: ["read_file", "list_files", "search_files", "grep", "read_graph", "write_todos"],
     headless: true,
     maxIterations: 20,
     systemPrompt: `You are a code-search specialist running as a sub-agent. Your ONLY job is to find and read relevant code in the project.
+- BEFORE starting, call write_todos to break the search task into concrete steps: what to find, where to look, what to read.
 - Never create, edit, or delete files.
 - Use read_file to inspect files, list_files to browse directories, search_files to find files by name, and grep to search file contents.
+- Update write_todos as you complete each search step.
 - Return a concise report of what you found with exact file paths and line numbers.
 - Finish by returning your findings in plain text. Do NOT call task_complete or write_summary.`,
   },
   "code-writer": {
     name: "Code Writer Agent",
     tools: ["read_file", "write_file", "edit_file", "list_files", "search_files", "grep",
-            "run_command", "read_problems", "read_command_output", "read_graph", "create_directory", "delete_file", "rename_file"],
+            "run_command", "read_problems", "read_command_output", "read_graph",
+            "create_directory", "delete_file", "rename_file", "write_todos"],
     headless: true,
     maxIterations: 50,
     systemPrompt: `You are a code-writing specialist running as a sub-agent. Your job is to implement a specific feature or fix a specific bug.
+- BEFORE starting, call write_todos to break the task into concrete steps: research, implement, verify.
 - Read relevant files first to understand the existing code before making changes.
 - Prefer edit_file for targeted changes; use write_file only for new files.
 - After making changes, run the build/tests with run_command to verify.
 - Fix any errors before completing.
+- Update write_todos as you complete each step.
 - When done, return a structured summary in plain text using this exact template:
 ### Changes Made
 - [file path]: [what was changed]
@@ -157,14 +165,16 @@ Do NOT call task_complete or write_summary.`,
   },
   "researcher": {
     name: "Research Agent",
-    tools: ["read_file", "list_files", "search_files", "grep", "run_command", "read_graph"],
+    tools: ["read_file", "list_files", "search_files", "grep", "run_command", "read_graph", "write_todos"],
     headless: true,
     maxIterations: 25,
     systemPrompt: `You are a codebase researcher running as a sub-agent. Explore the project to answer the user's question.
+- BEFORE starting, call write_todos to break the research into concrete steps: what to explore, what to find, what to report.
 - Use list_files and search_files to understand the project structure.
 - Use read_file to read relevant source files.
 - Use grep to find where functions, classes, or patterns are used.
 - Use run_command for short queries (git log, npm list, etc.) — but NEVER start servers.
+- Update write_todos as you complete each research step.
 - Report findings with exact file paths, line numbers, and relevant code snippets.
 - Finish by returning your research findings in plain text. Do NOT call task_complete or write_summary.`,
   },
@@ -174,6 +184,7 @@ Do NOT call task_complete or write_summary.`,
     headless: true,
     maxIterations: 25,
     systemPrompt: `You are a strategic planner running as a sub-agent. Your job is to analyze the project and create a structured step-by-step plan.
+- BEFORE starting, call write_todos to outline your planning steps: explore structure, analyze dependencies, create plan.
 - Use list_files and read_graph to understand the project architecture and structure.
 - Use read_file to inspect key files (configs, package.json, entry points, build scripts).
 - Use grep to find relevant patterns or dependencies.
@@ -181,6 +192,7 @@ Do NOT call task_complete or write_summary.`,
 - Think about dependencies between steps. Order the steps so each builds on the previous.
 - Estimate complexity for each step. Group related changes into single steps.
 - Consider: what files to create/edit, what APIs to add, what tests to write, what configs to update.
+- Update write_todos as you refine each planning step.
 - Finish by returning your plan as a structured todo list. Do NOT call task_complete or write_summary.`,
   },
   "frontend-specialist": {
@@ -188,16 +200,19 @@ Do NOT call task_complete or write_summary.`,
     tools: ["read_file", "write_file", "edit_file", "list_files", "search_files", "grep",
             "run_command", "read_problems", "read_command_output", "read_graph",
             "create_directory", "delete_file", "rename_file",
-            "browser_screenshot", "browser_get_dom", "browser_console", "browser_request_errors"],
+            "browser_screenshot", "browser_get_dom", "browser_console", "browser_request_errors",
+            "write_todos"],
     headless: false,
     maxIterations: 50,
     systemPrompt: `You are a frontend development specialist running as a sub-agent. You implement UI features, components, and client-side logic.
+- BEFORE starting, call write_todos to break the task into concrete steps: research, implement, verify visually.
 - Read relevant files first to understand the existing UI code, component hierarchy, and styling conventions.
 - Prefer edit_file for targeted changes; use write_file only for new files.
 - Follow the project's existing component patterns, styling approach (CSS modules, Tailwind, etc.), and state management conventions.
 - After making changes, run the build/lint with run_command to verify.
 - Use browser_screenshot and browser_get_dom to visually verify UI changes after starting the dev server.
 - Use browser_console and browser_request_errors to check for JS errors and failed API calls.
+- Update write_todos as you complete each step.
 - When done, return a structured summary in plain text using this exact template:
 ### Changes Made
 - [file path]: [what was changed]
@@ -211,15 +226,17 @@ Do NOT call task_complete or write_summary.`,
     name: "Backend Specialist Agent",
     tools: ["read_file", "write_file", "edit_file", "list_files", "search_files", "grep",
             "run_command", "read_problems", "read_command_output", "read_graph",
-            "create_directory", "delete_file", "rename_file"],
+            "create_directory", "delete_file", "rename_file", "write_todos"],
     headless: true,
     maxIterations: 50,
     systemPrompt: `You are a backend development specialist running as a sub-agent. You implement API routes, services, database logic, and server-side features.
+- BEFORE starting, call write_todos to break the task into concrete steps: research, implement, verify.
 - Read relevant files first to understand the existing backend architecture, middleware patterns, and data models.
 - Prefer edit_file for targeted changes; use write_file only for new files.
 - Follow the project's existing patterns for error handling, validation, logging, and testing.
 - After making changes, run the build/tests/lint with run_command to verify.
 - Pay attention to: API contracts (request/response shapes), database schema consistency, authentication/authorization, and performance implications.
+- Update write_todos as you complete each step.
 - When done, return a structured summary in plain text using this exact template:
 ### Changes Made
 - [file path]: [what was changed]
@@ -231,54 +248,61 @@ Do NOT call task_complete or write_summary.`,
   },
   "security-auditor": {
     name: "Security Auditor Agent",
-    tools: ["read_file", "list_files", "search_files", "grep", "run_command", "read_graph", "read_problems"],
+    tools: ["read_file", "list_files", "search_files", "grep", "run_command", "read_graph", "read_problems", "write_todos"],
     headless: true,
     maxIterations: 30,
     systemPrompt: `You are a security auditor running as a sub-agent. Your job is to review code for security vulnerabilities and compliance issues.
+- BEFORE starting, call write_todos to break the audit into concrete steps: scan dependencies, search for vulnerability patterns, check auth, report.
 - Read relevant files to understand the codebase's security posture.
 - Use grep to find patterns: hardcoded secrets/keys/tokens, SQL injection risks (string concatenation in queries), XSS vectors (innerHTML, dangerouslySetInnerHTML), missing input validation, insecure dependencies.
 - Use run_command for security scans: npm audit, pip audit, cargo audit, dependency-check, git secrets scan.
 - Check for: proper authentication/authorization, CSRF protection, rate limiting, input sanitization, secure cookie flags, HTTPS enforcement.
+- Update write_todos as you complete each audit step.
 - Report findings with severity (Critical/High/Medium/Low), exact file paths, line numbers, and remediation suggestions.
 - Do NOT make code changes — only audit and report.
 - Finish by returning your findings in plain text. Do NOT call task_complete or write_summary.`,
   },
   "architect-analyst": {
     name: "Architect Analyst Agent",
-    tools: ["read_file", "list_files", "search_files", "grep", "read_graph"],
+    tools: ["read_file", "list_files", "search_files", "grep", "read_graph", "write_todos"],
     headless: true,
     maxIterations: 25,
     systemPrompt: `You are a software architecture analyst running as a sub-agent. Your job is to analyze the project's architecture and provide insights.
+- BEFORE starting, call write_todos to break the analysis into concrete steps: explore structure, trace dependencies, identify concerns, report.
 - Use list_files and read_graph to understand the overall project structure and module relationships.
 - Use read_graph with export/import queries to trace dependency chains between modules.
 - Use read_file to inspect key architectural files: entry points, configs, middleware, routing, DI containers.
 - Use grep to find architecture patterns: dependency injection, factory patterns, module boundaries, plugin systems.
 - Analyze: coupling between modules, separation of concerns, layer violations, circular dependencies, architectural consistency.
+- Update write_todos as you complete each analysis step.
 - Report findings with: architecture overview (layers/modules), dependency graph summary, architectural concerns, and recommendations.
 - Do NOT make code changes — only analyze and report.
 - Finish by returning your analysis in plain text. Do NOT call task_complete or write_summary.`,
   },
   "docs-analyst": {
     name: "Docs Analyst Agent",
-    tools: ["read_file", "list_files", "search_files", "grep", "read_graph"],
+    tools: ["read_file", "list_files", "search_files", "grep", "read_graph", "write_todos"],
     headless: true,
     maxIterations: 20,
     systemPrompt: `You are a documentation analyst running as a sub-agent. Your job is to find and assess existing documentation and identify gaps.
+- BEFORE starting, call write_todos to break the audit into concrete steps: inventory docs, assess quality, find gaps, report.
 - Search for existing documentation files (README, docs/, wiki/, CONTRIBUTING, CHANGELOG, API docs).
 - Read documentation files and assess their quality: completeness, accuracy, freshness, readability.
 - Use read_graph to find exported symbols (functions, classes, types) that lack documentation.
 - Use read_file and grep to find code that is undocumented or has incomplete JSDoc/docstrings.
 - Identify: missing API docs, outdated README sections, undocumented configuration options, missing setup guides.
+- Update write_todos as you complete each audit step.
 - Report findings with: documentation inventory, quality assessment, gaps identified (with file paths and line numbers), and priority-ordered recommendations.
 - Do NOT make code or documentation changes — only analyze and report.
 - Finish by returning your findings in plain text. Do NOT call task_complete or write_summary.`,
   },
   "documentation-writer": {
     name: "Documentation Writer Agent",
-    tools: ["read_file", "write_file", "edit_file", "list_files", "search_files", "grep", "read_graph", "create_directory"],
+    tools: ["read_file", "write_file", "edit_file", "list_files", "search_files", "grep", "read_graph", "create_directory", "write_todos"],
     headless: true,
     maxIterations: 30,
     systemPrompt: `You are a technical documentation writer running as a sub-agent. Your job is to create or improve project documentation.
+- BEFORE starting, call write_todos to break the task into concrete steps: research, draft, write, verify.
 - Read existing documentation and source code to understand what needs to be documented.
 - Use read_file to read source files for API docs, JSDoc generation, or usage guides.
 - Use read_graph with export queries to find all exported symbols that need documentation.
@@ -286,6 +310,7 @@ Do NOT call task_complete or write_summary.`,
 - Use edit_file to update existing documentation with corrections or additions.
 - Write clear, concise, well-structured documentation with: overview, installation, usage examples, API reference, configuration options.
 - Follow existing documentation conventions and formatting.
+- Update write_todos as you complete each doc step.
 - When done, return a structured summary in plain text using this exact template:
 ### Changes Made
 - [file path]: [what was documented/updated]
@@ -1111,12 +1136,30 @@ function detectProjectBuild(root: string): string | null {
     return "npx tsc --noEmit 2>&1"; // best guess
   }
   if (hasFile("requirements.txt") || hasFile("pyproject.toml") || hasFile("setup.py") || hasExt(".py"))
-    return "python -m compileall . 2>&1";
+    return 'python -m compileall -x "venv|\\.venv|__pycache__|\\.egg-info|node_modules" . 2>&1';
   if (hasFile("Gemfile")) return "ruby -c *.rb 2>&1";
   if (hasFile("composer.json")) return "php -l *.php 2>&1";
   if (hasFile("Makefile")) return "make 2>&1";
   if (hasFile("CMakeLists.txt")) return "cmake --build build 2>&1";
   return null;
+}
+
+// ── Line-ending detection ──
+// On Windows with core.autocrlf=true, Git expects CRLF in the working tree.
+// Node's fs.writeFileSync always writes LF. Without normalization, Git sees
+// every line as modified even when content is otherwise identical.
+function getLineEnding(cwd: string): "\r\n" | "\n" {
+  try {
+    const autocrlf = execSync("git config core.autocrlf", {
+      cwd,
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    if (autocrlf === "true" && process.platform === "win32") {
+      return "\r\n";
+    }
+  } catch { /* not a git repo or config missing */ }
+  return "\n";
 }
 
 export async function runFsTool(name: string, params: Record<string, unknown>, root: string): Promise<string | null> {
@@ -1167,7 +1210,14 @@ export async function runFsTool(name: string, params: Record<string, unknown>, r
     if (isSecretPath(filePath)) return `Blocked: ${params.path} may contain secrets.`;
     const dir = path.dirname(filePath);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    const content = String(params.content || "");
+    let content = String(params.content || "");
+    // Normalize line endings to match the project's Git convention.
+    // Without this, writing LF on a Windows repo with core.autocrlf=true
+    // causes Git to flag every line as modified.
+    const lineEnding = getLineEnding(dir);
+    if (lineEnding === "\r\n") {
+      content = content.replace(/\r\n/g, "\n").split("\n").join("\r\n");
+    }
     fs.writeFileSync(filePath, content, "utf-8");
     const tokens = Math.round(content.length / 4);
     return `Wrote ~${tokens} tokens to ${params.path}.`;
@@ -1183,13 +1233,20 @@ export async function runFsTool(name: string, params: Record<string, unknown>, r
     // Normalize CRLF → LF so matching works regardless of the file's line ending
     // style. read_file already normalizes its output, so the agent's old_string
     // uses LF; the on-disk file may use CRLF.
-    const original = fs.readFileSync(filePath, "utf-8").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    const raw = fs.readFileSync(filePath, "utf-8");
+    const hadCRLF = raw.includes("\r\n");
+    const original = raw.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
     const count = (original.match(new RegExp(oldStr.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g")) || []).length;
     if (count === 0) return `old_string not found in ${params.path}.`;
     if (count > 1 && !replaceAll) {
       return `old_string matches ${count} locations in ${params.path}. Use replace_all: true to replace all, or use a more specific old_string to target exactly one match.`;
     }
-    const result = replaceAll ? original.split(oldStr).join(newStr) : original.replace(oldStr, newStr);
+    let result = replaceAll ? original.split(oldStr).join(newStr) : original.replace(oldStr, newStr);
+    // Preserve the original line ending style so Git doesn't flag every line
+    // as modified on Windows repos with core.autocrlf=true.
+    if (hadCRLF) {
+      result = result.split("\n").join("\r\n");
+    }
     fs.writeFileSync(filePath, result, "utf-8");
     const tokens = Math.round(newStr.length / 4);
     return replaceAll
@@ -1756,9 +1813,34 @@ export function summarizeCommandResult(raw: string, label: string): string {
 }
 
 async function runReadProblems(root: string): Promise<{ raw: string; summary: string }> {
+  // ── Prefer LSP diagnostics (real-time, per-file, already shown in terminal Problems tab) ──
+  try {
+    const lspDiags = getDiagnosticsForRoot(root);
+    if (lspDiags.length > 0) {
+      const lines: string[] = [];
+      let totalErrors = 0;
+      let totalWarnings = 0;
+      for (const { uri, markers } of lspDiags) {
+        const relPath = uri.replace(/^file:\/\/\//, "").replace(new RegExp(`^${root.replace(/\\/g, "/")}/?`, "i"), "");
+        const errors = markers.filter((m) => m.severity === 8);
+        const warnings = markers.filter((m) => m.severity === 4);
+        totalErrors += errors.length;
+        totalWarnings += warnings.length;
+        for (const m of markers) {
+          const prefix = m.severity === 8 ? "ERROR" : m.severity === 4 ? "WARN" : "INFO";
+          lines.push(`${prefix}: ${relPath}:${m.startLineNumber}:${m.startColumn} — ${m.message}`);
+        }
+      }
+      const summary = `LSP diagnostics: ${totalErrors} error${totalErrors !== 1 ? "s" : ""}, ${totalWarnings} warning${totalWarnings !== 1 ? "s" : ""} across ${lspDiags.length} file${lspDiags.length !== 1 ? "s" : ""}.\n${lines.join("\n")}`;
+      const raw = lines.join("\n");
+      return { raw, summary };
+    }
+  } catch { /* LSP not available — fall through to build command */ }
+
+  // ── Fallback: run a build/lint command ──
   const cmd = detectProjectBuild(root);
   if (!cmd) {
-    const summary = "No build system detected. Try a specific command with run_command (e.g. npx tsc --noEmit, python -m compileall ., go vet ./...).";
+    const summary = 'No build system detected and no LSP diagnostics available. Try a specific command with run_command (e.g. npx tsc --noEmit, python -m compileall -x "venv|\\.venv|__pycache__|\\.egg-info|node_modules" ., go vet ./...).';
     return { raw: summary, summary };
   }
   const raw = await runCommand(cmd, root);
@@ -1930,7 +2012,7 @@ Runtime debugging:
 const LANG_PYTHON = `### Python troubleshooting
 Build commands:
   - \`python -m py_compile file.py\` — check single file syntax
-  - \`python -m compileall .\` — compile all .py files, catches syntax errors
+  - \`python -m compileall -x "venv|\\.venv|__pycache__|\\.egg-info|node_modules" .\` — compile all .py files, catches syntax errors (excludes virtual envs and caches)
   - \`python -m pytest\` — run tests (if pytest is configured)
   - \`pip install -r requirements.txt\` — install dependencies before running
 Error patterns — Python tracebacks are read BOTTOM-UP (last line is the actual error):
@@ -2066,7 +2148,7 @@ CRITICAL: After starting a server with \`run_in_terminal\`, READ THE TERMINAL OU
 6. If no server output at all: the server may have hung; check the code for blocking operations or missing startup messages`;
 
 const DIAGNOSTICS = `### Diagnostics
-- Use \`read_problems\` to check for compile/lint errors — it auto-detects your project's build system and runs the right command (tsc --noEmit, python -m compileall, go vet, cargo check, etc.). This is the easiest way to check for errors after making changes.
+- Use \`read_problems\` to check for compile/lint errors — it auto-detects your project's build system and runs the right command (tsc --noEmit, python -m compileall . -x "venv|.venv|__pycache__|.egg-info|node_modules", go vet, cargo check, etc.). This is the easiest way to check for errors after making changes.
 - Use \`run_command\` for specific build/test/lint commands when you know the exact command you want.
 - For browser console output and network request errors, delegate to the browser sub-agent — it can check browser_console and browser_request_errors.
 - **When \`run_command\` output is truncated**: every \`run_command\` result starts with \`[cmd #N]\`. If you see \`... (showing last 4000 of N chars)\`, use \`read_command_output cmd_id=N\` to re-read the output with pagination. Use \`priority=top\` to see the beginning, \`limit=N\` to control how many lines, \`offset=N\` to advance through pages, or \`filter="pattern"\` to extract only matching lines.

@@ -1308,6 +1308,9 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
               }
             } catch { /* editor not fully initialized yet */ }
           }
+          // Clear stale LSP markers so old errors don't linger after agent fixes.
+          // The SSE-based diagnostics will repopulate with fresh results shortly.
+          clearLspMarkersForFile(match.id);
           modifiedFileId = modifiedFileId || match.id;
         } else {
           const f = createFile(af.name, af.content);
@@ -1327,7 +1330,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     });
     if (newFileId) setActiveFileId(newFileId);
     else if (modifiedFileId) setActiveFileId(modifiedFileId);
-  }, [fsBasePath]);
+  }, [fsBasePath, clearLspMarkersForFile]);
 
   const agentDiffsPendingRef = useRef<Record<string, { originalContent: string; newContent: string }>>({});
   // Keep a ref of latest files so applyAgentFileChanges can resolve diffs immediately

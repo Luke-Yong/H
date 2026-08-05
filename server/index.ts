@@ -1505,7 +1505,7 @@ app.post("/api/file-tracking/reset-snapshot", (_req, res) => {
 });
 
 // ── LSP (Language Server) endpoints ──
-import { getCompletions, getFileDiagnostics, getLspStatus, watchDiagnostics, notifyFileChange } from "./lsp";
+import { getCompletions, getFileDiagnostics, getLspStatus, watchDiagnostics, notifyFileChange, getDiagnosticsForRoot } from "./lsp";
 
 app.post("/api/lsp/complete", (req, res) => {
   try {
@@ -1568,6 +1568,18 @@ app.post("/api/lsp/diagnostics", (req, res) => {
   } catch (err) {
     console.error(`LSP diagnostics fatal: ${err instanceof Error ? err.message : String(err)}`);
     res.json({ ok: false, markers: [], error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// ── LSP diagnostics – read cached diagnostics (used by read_problems tool) ──
+app.get("/api/lsp/diagnostics", (req, res) => {
+  try {
+    const rootPath = String(req.query.rootPath || "");
+    if (!rootPath) return res.json({ ok: false, error: "Missing rootPath" });
+    const results = getDiagnosticsForRoot(rootPath);
+    res.json({ ok: true, diagnostics: results });
+  } catch (err) {
+    res.json({ ok: false, error: err instanceof Error ? err.message : String(err) });
   }
 });
 
