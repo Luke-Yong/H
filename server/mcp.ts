@@ -10,7 +10,7 @@
 
 import fs from "fs";
 import path from "path";
-import { execSync, spawn } from "child_process";
+import { execSync, spawn, exec } from "child_process";
 import { Readable, Writable } from "stream";
 import { EventEmitter } from "events";
 
@@ -74,18 +74,20 @@ interface ServerInfo {
 // On Windows with core.autocrlf=true, Git expects CRLF in the working tree.
 // Node's fs.writeFileSync always writes LF. Without normalization, Git sees
 // every line as modified even when content is otherwise identical.
-function getLineEnding(cwd: string): "\r\n" | "\n" {
-  try {
-    const autocrlf = execSync("git config core.autocrlf", {
-      cwd,
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
-    if (autocrlf === "true" && process.platform === "win32") {
-      return "\r\n";
-    }
-  } catch { /* not a git repo or config missing */ }
-  return "\n";
+// Uses async exec() to avoid blocking the Node.js event loop.
+function getLineEnding(cwd: string): Promise<"\r\n" | "\n"> {
+  return new Promise((resolve) => {
+    exec("git config core.autocrlf", { cwd, encoding: "utf-8", timeout: 3000 }, (err, stdout) => {
+      if (!err && stdout) {
+        const autocrlf = stdout.trim();
+        if (autocrlf === "true" && process.platform === "win32") {
+          resolve("\r\n");
+          return;
+        }
+      }
+      resolve("\n");
+    });
+  });
 }
 
 export class HarnessMcpServer extends EventEmitter {
@@ -325,7 +327,7 @@ export class HarnessMcpServer extends EventEmitter {
         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
         let content = String(args.content || "");
         // Normalize line endings to match the project's Git convention.
-        const lineEnding = getLineEnding(dir);
+        const lineEnding = await getLineEnding(dir);
         if (lineEnding === "\r\n") {
           content = content.replace(/\r\n/g, "\n").split("\n").join("\r\n");
         }

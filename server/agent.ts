@@ -17,7 +17,7 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import crypto from "crypto";
-import { execSync, spawn } from "child_process";
+import { spawn, exec } from "child_process";
 
 // ── Types ──
 
@@ -1148,18 +1148,83 @@ function detectProjectBuild(root: string): string | null {
 // On Windows with core.autocrlf=true, Git expects CRLF in the working tree.
 // Node's fs.writeFileSync always writes LF. Without normalization, Git sees
 // every line as modified even when content is otherwise identical.
-function getLineEnding(cwd: string): "\r\n" | "\n" {
-  try {
-    const autocrlf = execSync("git config core.autocrlf", {
-      cwd,
-      encoding: "utf-8",
+// Uses async exec() to avoid blocking the Node.js event loop — execSync
+// would freeze SSE writes and cause visible hangs during write_file calls.
+function getLineEnding(cwd: string): Promise<"\r\n" | "\n"> {
+  return new Promise((resolve) => {
+    exec("git config core.autocrlf", { cwd, encoding: "utf-8", timeout: 3000 }, (err, stdout) => {
+      if (!err && stdout) {
+        const autocrlf = stdout.trim();
+        if (autocrlf === "true" && process.platform === "win32") {
+          resolve("\r\n");
+          return;
+        }
+      }
+      resolve("\n");
+    });
+  });
+}
+
+// ── ripgrep-based grep (async — avoids blocking the event loop) ──
+// Returns null if rg is unavailable or fails, so the caller can fall back.
+function grepWithRg(
+  root: string,
+  pattern: string,
+  glob: string,
+  maxMatches: number,
+): Promise<string | null> {
+  return new Promise((resolve) => {
+    // Quick async check: is rg on PATH? Try `rg --version`.
+    const check = spawn("rg", ["--version"], {
+      shell: process.platform === "win32",
       stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
-    if (autocrlf === "true" && process.platform === "win32") {
-      return "\r\n";
-    }
-  } catch { /* not a git repo or config missing */ }
-  return "\n";
+    });
+    const checkTimeout = setTimeout(() => { check.kill(); resolve(null); }, 3000);
+    check.on("close", (code: number | null) => {
+      clearTimeout(checkTimeout);
+      if (code !== 0) { resolve(null); return; }
+      // rg is available — run the search
+      const args: string[] = [
+        "--no-heading", "-n", "-i", "--no-ignore-vcs",
+        "-g", "!**/.git/**",
+        "-g", "!**/node_modules/**",
+        "-g", "!**/dist/**",
+        "-g", "!**/.next/**",
+        "-g", "!**/venv/**",
+        "-g", "!**/.venv/**",
+        "-g", "!**/__pycache__/**",
+        "-g", "!**/.pytest_cache/**",
+        "-g", "!**/env/**",
+        "-g", "!*.env*", "-g", "!*.key", "-g", "!*.pem", "-g", "!*.p12", "-g", "!*.pfx",
+        "-g", "!*.min.js", "-g", "!*.map", "-g", "!*.lock", "-g", "!*.pyc",
+        "-g", "!*.png", "-g", "!*.jpg", "-g", "!*.gif", "-g", "!*.ico", "-g", "!*.woff*",
+      ];
+      if (glob) args.push("-g", JSON.parse(JSON.stringify(glob)) as string);
+      args.push(pattern);
+      const proc = spawn("rg", args, { cwd: root });
+      const outChunks: Buffer[] = [];
+      const errChunks: Buffer[] = [];
+      proc.stdout.on("data", (d: Buffer) => outChunks.push(d));
+      proc.stderr.on("data", (d: Buffer) => errChunks.push(d));
+      const procTimeout = setTimeout(() => { proc.kill(); resolve(null); }, 10000);
+      proc.on("close", (rc: number | null) => {
+        clearTimeout(procTimeout);
+        const raw = Buffer.concat(outChunks).toString("utf8").trim();
+        if (!raw || rc === 1) { resolve(`No matches for "${pattern}" found.`); return; }
+        if (rc !== 0) { resolve(null); return; }
+        const lines = raw.split(/\r?\n/);
+        const results: string[] = [];
+        for (const line of lines) {
+          if (results.length >= maxMatches) break;
+          const m = line.match(/^(.+?):(\d+):(.*)$/);
+          if (m) results.push(`${m[1]}:${m[2]}: ${m[3].substring(0, 120)}`);
+        }
+        resolve(results.join("\n") + (results.length >= maxMatches ? `\n... (truncated at ${maxMatches} results)` : ""));
+      });
+      proc.on("error", () => resolve(null));
+    });
+    check.on("error", () => resolve(null));
+  });
 }
 
 export async function runFsTool(name: string, params: Record<string, unknown>, root: string): Promise<string | null> {
@@ -1214,7 +1279,7 @@ export async function runFsTool(name: string, params: Record<string, unknown>, r
     // Normalize line endings to match the project's Git convention.
     // Without this, writing LF on a Windows repo with core.autocrlf=true
     // causes Git to flag every line as modified.
-    const lineEnding = getLineEnding(dir);
+    const lineEnding = await getLineEnding(dir);
     if (lineEnding === "\r\n") {
       content = content.replace(/\r\n/g, "\n").split("\n").join("\r\n");
     }
@@ -1292,11 +1357,17 @@ export async function runFsTool(name: string, params: Record<string, unknown>, r
     if (!fs.existsSync(base)) return `Directory not found: ${params.subdir || "."}`;
     const rawPattern = String(params.pattern || "");
     if (!rawPattern) return "Provide a non-empty pattern.";
+    const globStr = String(params.glob || "");
+    const MAX_MATCHES = 80;
+
+    // ── Try ripgrep first (async spawn — avoids blocking the event loop) ──
+    const rgResult = await grepWithRg(base, rawPattern, globStr, MAX_MATCHES);
+    if (rgResult !== null) return rgResult;
+
+    // ── Fallback: synchronous Node.js walk (may block event loop) ──
     let regex: RegExp;
     try { regex = new RegExp(rawPattern, "gi"); } catch { regex = new RegExp(rawPattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"); }
-    const globStr = String(params.glob || "");
     const results: string[] = [];
-    const MAX_MATCHES = 80;
     function walk(dir: string) {
       if (results.length >= MAX_MATCHES) return;
       let entries: fs.Dirent[];
@@ -1305,9 +1376,7 @@ export async function runFsTool(name: string, params: Record<string, unknown>, r
         if (e.name === "node_modules" || e.name === ".git") continue;
         const full = path.join(dir, e.name);
         if (e.isDirectory()) { walk(full); continue; }
-        // Skip secret files
         if (isSecretPath(full)) continue;
-        // glob filter
         if (globStr) {
           const ext = path.extname(e.name).toLowerCase();
           const g = globStr.toLowerCase();
@@ -1320,7 +1389,7 @@ export async function runFsTool(name: string, params: Record<string, unknown>, r
           const lines = text.split("\n");
           for (let i = 0; i < lines.length; i++) {
             if (regex.test(lines[i])) {
-              regex.lastIndex = 0; // reset after test
+              regex.lastIndex = 0;
               const rel = path.relative(root, full).replace(/\\/g, "/");
               results.push(`${rel}:${i + 1}: ${lines[i].trim().slice(0, 120)}`);
               if (results.length >= MAX_MATCHES) return;
