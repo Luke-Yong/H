@@ -2266,6 +2266,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
   const feedback = useCallback((v: "up" | "down") => setThumbsFeedback(v), []);
   const [expandedDiffPath, setExpandedDiffPath] = useState<string | null>(null);
   const [expandedGroupDiffKey, setExpandedGroupDiffKey] = useState<string | null>(null);
+  const [showGlobalDiff, setShowGlobalDiff] = useState(false);
 
   // ── Simple line-by-line diff (LCS-based unified diff) ──
   const computeUnifiedDiff = useCallback((original: string, current: string, contextLines = 3): string => {
@@ -2427,8 +2428,8 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
 
   const [showPendingBanner, setShowPendingBanner] = useState(false);
 
-  // Clear diff panel when messages change
-  useEffect(() => { setExpandedDiffPath(null); setExpandedGroupDiffKey(null); }, [messages.length]);
+  // Clear diff panels when messages change
+  useEffect(() => { setExpandedDiffPath(null); setExpandedGroupDiffKey(null); setShowGlobalDiff(false); }, [messages.length]);
 
   // ── Accept/reject pending diff ──
 
@@ -3450,7 +3451,11 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
             })()}
             <div className="agent-footer-actions">
               {changedFiles.length > 0 && (
-                <button className="agent-footer-btn" title={`${changedFiles.length} file${changedFiles.length > 1 ? "s" : ""} changed`}>
+                <button
+                  className={`agent-footer-btn${showGlobalDiff ? " active" : ""}`}
+                  title={`${changedFiles.length} file${changedFiles.length > 1 ? "s" : ""} changed`}
+                  onClick={() => setShowGlobalDiff((v) => !v)}
+                >
                   <i className="codicon codicon-diff" /> {changedFiles.length}
                 </button>
               )}
@@ -3616,6 +3621,38 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
           </div>
         </div>
       </div>
+      {/* ── Global diff popup ── */}
+      {showGlobalDiff && changedFiles.length > 0 && (
+        <div className="dialog-overlay" onClick={(e) => { if (e.target === e.currentTarget) setShowGlobalDiff(false); }}>
+          <div className="dialog-box" style={{ width: "min(720px, 90vw)", maxHeight: "80vh", display: "flex", flexDirection: "column" }}>
+            <div className="dialog-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span>Changes ({changedFiles.length} file{changedFiles.length > 1 ? "s" : ""})</span>
+              <button className="agent-footer-btn" onClick={() => setShowGlobalDiff(false)} title="Close">
+                <i className="codicon codicon-close" />
+              </button>
+            </div>
+            <div style={{ overflow: "auto", flex: 1 }}>
+              <div className="agent-group-diff-panel">
+                {changedFiles.map((f) => (
+                  <div key={f.path} className="agent-group-diff-file">
+                    <div className="agent-group-diff-file-header" onClick={() => setExpandedDiffPath(expandedDiffPath === f.path ? null : f.path)}>
+                      <i className={`codicon codicon-${expandedDiffPath === f.path ? "chevron-down" : "chevron-right"}`} />
+                      {f.path}
+                    </div>
+                    {expandedDiffPath === f.path && (
+                      <div className="agent-diff-content">
+                        {(f.diff || "(no changes)").split("\n").map((line, i) => (
+                          <span key={i} className={`agent-diff-line${line.startsWith("+") ? " added" : line.startsWith("-") ? " removed" : ""}`}>{line}{"\n"}</span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
