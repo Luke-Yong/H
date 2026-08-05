@@ -1190,6 +1190,11 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
               activeDelegationMarkerRef.current = marker;
             }
             });
+          // Yield a frame so the browser paints the tool card (spinner, styling)
+          // before tool_end arrives in the next SSE event. Without this, fast
+          // tools (write_file, edit_file, etc.) complete before the card is ever
+          // shown in its "waiting" state.
+          await new Promise<void>(r => { requestAnimationFrame(() => r()); });
         } else if (evt.type === "tool_end") {
           // Switch file changes from streaming to done and auto-apply to editor.
           const tn = evt.toolName;
@@ -1464,9 +1469,59 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
         }
 
         if (evt.type === "tool_start") {
-          // Track write_todos so the pending banner stays in sync
+          // Track file changes and write_todos so the pending banner stays in sync
           const tn = evt.toolName;
-          if (tn === "write_todos" && Array.isArray(evt.toolParams?.todos)) {
+          if (tn === "write_file" && evt.toolParams?.path) {
+            const p = String(evt.toolParams.path);
+            const name = p.split(/[/\\]/).pop() || p;
+            const content = String(evt.toolParams.content || "");
+            const tokenCount = Math.round(content.length / 4);
+            fileChangesRef.current.push({
+              path: p, name, content, changeType: "write",
+              status: "streaming",
+              tokenCount,
+              originalContent: (evt as any).originalContent ?? null,
+            });
+          } else if (tn === "edit_file" && evt.toolParams?.path) {
+            const p = String(evt.toolParams.path);
+            const name = p.split(/[/\\]/).pop() || p;
+            const oldStr = String(evt.toolParams.old_string || "");
+            const newStr = String(evt.toolParams.new_string || "");
+            const orig = (evt as any).originalContent;
+            const content = orig ? orig.split(oldStr).join(newStr) : newStr;
+            const tokenCount = Math.round((oldStr.length + newStr.length) / 4);
+            fileChangesRef.current.push({
+              path: p, name, content, changeType: "write",
+              status: "streaming",
+              tokenCount,
+              originalContent: orig ?? null,
+            });
+          } else if (tn === "delete_file" && evt.toolParams?.path) {
+            const p = String(evt.toolParams.path);
+            const name = p.split(/[/\\]/).pop() || p;
+            fileChangesRef.current.push({
+              path: p, name, changeType: "delete",
+              status: "done",
+              originalContent: (evt as any).originalContent ?? null,
+            });
+          } else if (tn === "create_directory" && evt.toolParams?.path) {
+            const p = String(evt.toolParams.path);
+            const name = p.split(/[/\\]/).pop() || p;
+            fileChangesRef.current.push({
+              path: p, name, changeType: "create",
+              status: "done",
+            });
+          } else if (tn === "rename_file" && evt.toolParams?.oldPath) {
+            const oldP = String(evt.toolParams.oldPath);
+            const newP = String(evt.toolParams.newPath || "");
+            const name = oldP.split(/[/\\]/).pop() || oldP;
+            fileChangesRef.current.push({
+              path: oldP, name, changeType: "rename",
+              status: "done",
+              content: newP,
+              originalContent: oldP,
+            });
+          } else if (tn === "write_todos" && Array.isArray(evt.toolParams?.todos)) {
             todosRef.current = (evt.toolParams.todos as any[]).map((t: any): TodoItem => ({
               id: String(t.id || ""),
               text: String(t.text || ""),
@@ -1487,6 +1542,10 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
             // Capture token count from file-changes before clearing, keyed by path
             for (const fc of fileChangesRef.current) {
               if (fc.tokenCount != null) fcTokenByPathRef.current.set(fc.path, fc.tokenCount);
+            }
+            // Save changes for tool_end (ref is cleared below)
+            if (fileChangesRef.current.length > 0) {
+              pendingFileChangesRef.current = fileChangesRef.current;
             }
             fileChangesRef.current = [];
             todosRef.current = [];
@@ -1527,18 +1586,64 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
               openEditorFile?.(p);
             }
           }
-           pushRaw(id, { role: "tool", content: "", toolName: tn, toolParams: evt.toolParams, toolCallId: evt.toolCallId, state: "waiting", sandboxOutput: tn === "run_command" ? "" : undefined, tokenCount: fcTokenCount, agentMarker: marker2, ...(isSubAgent2 ? { subAgentName: "Sub-agent" } : {}) });
-          if (evt.toolCallId) toolCallMsgIdRef.current.set(evt.toolCallId, id);
+          flushSync(() => {
+            pushRaw(id, { role: "tool", content: "", toolName: tn, toolParams: evt.toolParams, toolCallId: evt.toolCallId, state: "waiting", sandboxOutput: tn === "run_command" ? "" : undefined, tokenCount: fcTokenCount, agentMarker: marker2, ...(isSubAgent2 ? { subAgentName: "Sub-agent" } : {}) });
+            if (evt.toolCallId) toolCallMsgIdRef.current.set(evt.toolCallId, id);
+          });
           // For run_in_terminal: store refs so permission_required and terminal bridge can find the card
           if (tn === "run_in_terminal") {
             agentTermMsgIdRef.current = id;
             agentTermOutputRef.current = "";
           }
+          // Yield a frame so the browser paints the tool card (spinner, styling)
+          // before tool_end arrives in the next SSE event.
+          await new Promise<void>(r => { requestAnimationFrame(() => r()); });
           return true;
         }
 
         if (evt.type === "tool_end") {
-          const DESTRUCTIVE = ["edit_file"];
+          // Switch file changes from streaming to done and auto-apply to editor.
+          if (tn === "write_file" || tn === "edit_file") {
+            setMessages((prev) => {
+              let changed = false;
+              const next = prev.map((m) => {
+                if (!m.fileChanges) return m;
+                const updated = m.fileChanges.map((fc) => {
+                  if (fc.status === "streaming") {
+                    changed = true;
+                    return { ...fc, status: "done" as const, linesAdded: Math.max(1, Math.round((fc.tokenCount ?? 0) / 40)), linesRemoved: 0 };
+                  }
+                  return fc;
+                });
+                return changed ? { ...m, fileChanges: updated } : m;
+              });
+              return changed ? next : prev;
+            });
+            for (const fc of pendingFileChangesRef.current) {
+              if (fc.status === "streaming") {
+                fc.status = "done";
+                fc.linesAdded = Math.max(1, Math.round((fc.tokenCount ?? 0) / 40));
+                fc.linesRemoved = 0;
+              }
+            }
+            if (pendingFileChangesRef.current.length > 0) {
+              applyEditorFiles([...pendingFileChangesRef.current]);
+              pendingFileChangesRef.current = [];
+            }
+            onRefreshFs?.();
+          } else if (tn === "delete_file" || tn === "create_directory" || tn === "rename_file") {
+            onRefreshFs?.();
+            if (tn === "rename_file") {
+              const root = (getFsBasePath?.() || "").replace(/[/\\]$/, "");
+              let oldP = String(evt.toolParams?.oldPath || "");
+              let newP = String(evt.toolParams?.newPath || "");
+              if (root && oldP && newP) {
+                if (!/^[a-zA-Z]:/.test(oldP) && !oldP.startsWith("/")) oldP = root + "/" + oldP;
+                if (!/^[a-zA-Z]:/.test(newP) && !newP.startsWith("/")) newP = root + "/" + newP;
+                renameEditorFile?.(oldP, newP);
+              }
+            }
+          }
           if (tn === "task_complete") {
             const tr = String(evt.toolResult || "");
             if (tr && tr !== "OK") {
@@ -1598,6 +1703,9 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
             pushRaw(assistantMsgId, { role: "assistant", content: "", state: "thinking" });
           }
           // Sync Monaco diffs for permission-gated destructive file tools
+          // (write_file / edit_file are now handled earlier in the tool_end block;
+          //  keep the array empty here so the else-branch onRefreshFs still fires.)
+          const DESTRUCTIVE: string[] = [];
           if (DESTRUCTIVE.includes(tn) && id) {
             const params = evt.toolParams || {};
             const orig = evt.originalContent ?? null;

@@ -1214,9 +1214,8 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
             // Dedup: if another tab with the same name was added while fetch was in flight
             const dup = prev.find((x) => normPath(x._fsPath) === target);
             if (dup) {
-              dup.content = data.content;
               openId = dup.id;
-              return prev;
+              return prev.map((x) => x.id === dup.id ? { ...x, content: data.content } : x);
             }
             return [...prev, f];
           });
@@ -1296,6 +1295,18 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
               method: "POST", headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ path: match._fsPath, content: af.content }),
             }).catch(() => {});
+          }
+          // Push content directly to Monaco so the editor reflects the change
+          // immediately, even if React's re-render / @monaco-editor/react value
+          // sync hasn't caught up yet (e.g. file is open but not the active tab).
+          const editor = editorByFileIdRef.current[match.id];
+          if (editor) {
+            try {
+              const model = (editor as any).getModel?.();
+              if (model && model.getValue() !== af.content) {
+                model.setValue(af.content);
+              }
+            } catch { /* editor not fully initialized yet */ }
           }
           modifiedFileId = modifiedFileId || match.id;
         } else {
@@ -1399,28 +1410,37 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
 
   const applyAgentFileChanges = useCallback((changes: { name: string; content: string; fsPath?: string; originalContent?: string | null }[]) => {
     applyAiFiles(changes);
-    // Store diffs by file name — resolved to file IDs by useEffect below.
-    // Include new files too (originalContent may be null for created files).
     const pending: Record<string, { originalContent: string; newContent: string }> = {};
     for (const c of changes) {
       pending[c.name] = { originalContent: c.originalContent || "", newContent: c.content };
     }
-    if (Object.keys(pending).length > 0) {
-      agentDiffsPendingRef.current = pending;
-      // After React commits, apply decorations directly using the ref.
-      requestAnimationFrame(() => {
-        const latestFiles = filesRef.current;
-        const pendingNow = agentDiffsPendingRef.current;
-        for (const diffName of Object.keys(pendingNow)) {
-          const match = latestFiles.find((f) => f.name === diffName);
-          if (match) {
-            const editor = editorByFileIdRef.current[match.id];
-            if (editor) {
-              applyAgentDiffDecorations(editor, match.id, pendingNow[diffName]);
-            }
-          }
+    if (Object.keys(pending).length === 0) return;
+
+    // Apply diff decorations immediately for files whose editors are mounted.
+    // (requestAnimationFrame would race with the React useEffect that clears
+    // agentDiffsPendingRef, losing all decoration data.)
+    const latestFiles = filesRef.current;
+    const idMap: Record<string, { originalContent: string; newContent: string }> = {};
+    const stillPending: Record<string, { originalContent: string; newContent: string }> = {};
+    for (const diffName of Object.keys(pending)) {
+      const match = latestFiles.find((f) => f.name === diffName);
+      if (match) {
+        idMap[match.id] = pending[diffName];
+        const editor = editorByFileIdRef.current[match.id];
+        if (editor) {
+          applyAgentDiffDecorations(editor, match.id, pending[diffName]);
         }
-      });
+      } else {
+        // File not yet in the files list (e.g. openFsFile fetch still in-flight).
+        // Stash in pending ref so the files useEffect picks them up when it arrives.
+        stillPending[diffName] = pending[diffName];
+      }
+    }
+    if (Object.keys(idMap).length > 0) {
+      setAgentDiffs(idMap);
+    }
+    if (Object.keys(stillPending).length > 0) {
+      agentDiffsPendingRef.current = { ...agentDiffsPendingRef.current, ...stillPending };
     }
   }, [applyAiFiles, applyAgentDiffDecorations]);
 

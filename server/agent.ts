@@ -1148,7 +1148,10 @@ export async function runFsTool(name: string, params: Record<string, unknown>, r
         .join("\n");
       return `Directory listing for ${params.path}:\n${listing || "(empty)"}`;
     }
-    const text = fs.readFileSync(filePath, "utf-8");
+    // Normalize CRLF → LF so the agent sees clean line endings. Without this,
+    // the agent constructs old_string without \r, but edit_file reads the raw
+    // file with \r\n — causing a persistent "old_string not found" mismatch.
+    const text = fs.readFileSync(filePath, "utf-8").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
     const lines = text.split("\n");
     const start = Math.max(1, Number(params.offset) || 1) - 1; // 0-based
     const end = params.limit != null ? start + Number(params.limit) : lines.length;
@@ -1177,7 +1180,10 @@ export async function runFsTool(name: string, params: Record<string, unknown>, r
     const newStr = String(params.new_string || "");
     const replaceAll = Boolean(params.replace_all);
     if (!oldStr) return "old_string is required.";
-    const original = fs.readFileSync(filePath, "utf-8");
+    // Normalize CRLF → LF so matching works regardless of the file's line ending
+    // style. read_file already normalizes its output, so the agent's old_string
+    // uses LF; the on-disk file may use CRLF.
+    const original = fs.readFileSync(filePath, "utf-8").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
     const count = (original.match(new RegExp(oldStr.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g")) || []).length;
     if (count === 0) return `old_string not found in ${params.path}.`;
     if (count > 1 && !replaceAll) {
@@ -2496,14 +2502,19 @@ async function* runSubAgentStream(
         return { phase: "browser_tool", toolName: fnName, toolCallId: tc.id, params, subState };
       }
 
-      // Yield tool_start with agent marker
+      // Yield tool_start with agent marker and original content for diff decorations
       subState.messages.push({
         role: "assistant",
         content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]),
         name: fnName,
         ...rc(reasoningContent),
       });
-      yield { type: "tool_start", toolName: fnName, toolParams: params, toolCallId: tc.id, agentMarker } as SubAgentStreamEvent;
+      let subOriginalContent: string | null = null;
+      if (fnName === "edit_file" || fnName === "write_file" || fnName === "delete_file") {
+        const targetPath = path.resolve(subState.projectRoot, String(params.path || params.oldPath || ""));
+        try { subOriginalContent = fs.readFileSync(targetPath, "utf-8").replace(/\r\n/g, "\n").replace(/\r/g, "\n"); } catch { subOriginalContent = null; }
+      }
+      yield { type: "tool_start", toolName: fnName, toolParams: params, toolCallId: tc.id, agentMarker, ...(subOriginalContent !== null ? { originalContent: subOriginalContent } : {}) } as SubAgentStreamEvent;
 
       const fsResult = await runFsTool(fnName, params, subState.projectRoot);
       if (fsResult !== null) {
@@ -3207,7 +3218,7 @@ export async function agentLoop(
       let originalContent: string | null = null;
       if (fnName === "write_file" || fnName === "edit_file" || fnName === "delete_file") {
         const targetPath = path.resolve(projectRoot, String(params.path || ""));
-        try { originalContent = fs.readFileSync(targetPath, "utf-8"); } catch { originalContent = null; }
+        try { originalContent = fs.readFileSync(targetPath, "utf-8").replace(/\r\n/g, "\n").replace(/\r/g, "\n"); } catch { originalContent = null; }
       }
 
       // Check if this is a filesystem tool the server can execute directly.
@@ -3680,7 +3691,7 @@ export async function* agentLoopStream(
         let originalContent: string | null = null;
         if (fnName === "edit_file" || fnName === "write_file" || fnName === "delete_file") {
           const targetPath = path.resolve(projectRoot, String(params.path || params.oldPath || ""));
-          try { originalContent = fs.readFileSync(targetPath, "utf-8"); } catch { originalContent = null; }
+          try { originalContent = fs.readFileSync(targetPath, "utf-8").replace(/\r\n/g, "\n").replace(/\r/g, "\n"); } catch { originalContent = null; }
         }
         yield {
           type: "tool_start", toolName: fnName, toolParams: params,
