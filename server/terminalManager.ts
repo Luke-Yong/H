@@ -161,6 +161,9 @@ function getShellArgs(cwd: string, venvDir?: string, activateScript?: string): s
 }
 
 export function createSession(ws: WebSocket, groupKey: string, opts?: { cwd?: string; venvDir?: string; activateScript?: string }): string {
+  // Reset URL dedup for this terminal group on each new process —
+  // otherwise restarts (Ctrl+C → re-run) won't re-trigger browser open.
+  groupSeenUrls.delete(groupKey);
   const next = (groupIdCounters.get(groupKey) || 0) + 1;
   groupIdCounters.set(groupKey, next);
   const id = String(next);

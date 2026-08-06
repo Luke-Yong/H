@@ -2188,14 +2188,17 @@ app.use("/_browser", (req, res, next) => {
 
   const client = parsed.protocol === "https:" ? https : http;
 
+  const reqHeaders = { ...req.headers };
+  delete reqHeaders.referer;
+  delete reqHeaders.referrer;
+
   const proxyReq = client.request(
     targetUrl,
     {
       method: req.method,
       headers: {
-        ...req.headers,
+        ...reqHeaders,
         host: parsed.host,
-        referer: undefined as any,
       },
     },
     (proxyRes) => {

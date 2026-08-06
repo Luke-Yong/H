@@ -526,6 +526,12 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     return `/_browser?url=${encodeURIComponent(real)}`;
   }, []);
 
+  // Absolute version for desktop webview (loadURL resolves relative to current page)
+  const toProxySrcAbs = useCallback((real: string): string => {
+    if (!real) return real;
+    return `${window.location.origin}/_browser?url=${encodeURIComponent(real)}`;
+  }, []);
+
   // Decodes a proxy URL back to the real URL for display
   const fromProxySrc = useCallback((proxy: string): string => {
     try {
@@ -1178,7 +1184,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
 
     let nextUrl = liveUrlRef.current;
     try {
-      nextUrl = view.getURL?.() || liveUrlRef.current;
+      nextUrl = fromProxySrc(view.getURL?.() || "") || liveUrlRef.current;
     } catch {
       return;
     }
@@ -1336,9 +1342,17 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
             var body = document.body;
             if (!body) return;
             var text = (body.textContent || '').trim();
-            var isJsonBody = body.children.length === 0
-              || (body.children.length === 1 && body.children[0] && body.children[0].tagName === 'PRE');
-            if (isJsonBody && (text.startsWith('{') || text.startsWith('['))) {
+            if (!text.startsWith('{') && !text.startsWith('[')) return;
+            // Count non-Harness children (skip __harness_inspector_info injected at dom-ready)
+            var nonHarnessChildren = [];
+            for (var i = 0; i < body.children.length; i++) {
+              if (body.children[i].id !== '__harness_inspector_info') {
+                nonHarnessChildren.push(body.children[i]);
+              }
+            }
+            var isJsonBody = nonHarnessChildren.length === 0
+              || (nonHarnessChildren.length === 1 && nonHarnessChildren[0].tagName === 'PRE');
+            if (isJsonBody) {
               try {
                 var parsed = JSON.parse(text);
                 var formatted = JSON.stringify(parsed, null, 2);
@@ -1368,6 +1382,23 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     const handleDomReady = () => {
       webviewReadyRef.current = true;
       syncDesktopState("dom-ready");
+      // Detect JSON responses BEFORE injecting Harness code (which adds children to body)
+      void view.executeJavaScript?.(`
+        (function(){
+          var body = document.body;
+          if (!body) return;
+          var text = (body.textContent || '').trim();
+          var isJsonBody = body.children.length === 0
+            || (body.children.length === 1 && body.children[0] && body.children[0].tagName === 'PRE');
+          if (isJsonBody && (text.startsWith('{') || text.startsWith('['))) {
+            try {
+              var parsed = JSON.parse(text);
+              var formatted = JSON.stringify(parsed, null, 2);
+              body.innerHTML = '<pre style="font:12px monospace;padding:12px;white-space:pre-wrap;color:#ccc;background:#1a1a1a;margin:0;min-height:100vh;">' + formatted.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</pre>';
+            } catch(e) {}
+          }
+        })()
+      `, false).catch(() => {});
       void view.executeJavaScript?.(DESKTOP_INJECT_CODE, false).catch(() => {});
     };
     const handleDidFailLoad = () => { navigatingRef.current = false; setLoadingState(false); setPageError("Failed to load page. The server may not be running or the URL is invalid."); };
@@ -1559,9 +1590,9 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
 
     // Explicit loadURL for desktop webview (src attribute update alone may not trigger navigation)
     if (isDesktop) {
-      webviewRef.current?.loadURL?.(final);
+      webviewRef.current?.loadURL?.(toProxySrcAbs(final));
     }
-  }, [onUrlChange, tabId, isDesktop]);
+  }, [onUrlChange, tabId, isDesktop, toProxySrcAbs]);
 
   const refresh = useCallback(() => {
     if (isDesktop) {
@@ -1796,12 +1827,12 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     onUrlChange?.(tabId, final);
 
     if (isDesktop) {
-      webviewRef.current?.loadURL?.(final);
+      webviewRef.current?.loadURL?.(toProxySrcAbs(final));
     }
 
     // Blur the input after navigation
     e.currentTarget.blur();
-  }, [tabId, isDesktop, onUrlChange]);
+  }, [tabId, isDesktop, onUrlChange, toProxySrcAbs]);
 
   const setViewportPreset = useCallback((presetId: string) => {
     const preset = VIEWPORT_PRESETS.find((p) => p.id === presetId);
@@ -1818,7 +1849,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   }, []);
 
   const geolocationNeedsSecureContext = perms.geolocation && currentUrl && !supportsGeolocation(currentUrl);
-  const desktopSrc = navTabId === tabId ? navUrl : url;
+  const desktopSrc = toProxySrcAbs(navTabId === tabId ? navUrl : url);
 
   // ── Agent tool methods exposed via ref ──
   const getIframe = useCallback((): HTMLIFrameElement | null => {
@@ -1854,7 +1885,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
       await new Promise((r) => setTimeout(r, 2000));
       try {
         const wv = getWebview();
-        const newUrl = wv ? (wv as any).getURL() : "";
+        const newUrl = wv ? fromProxySrc((wv as any).getURL() || "") : "";
         return fallback + (newUrl ? " (navigation triggered, now at " + newUrl + ")" : " (navigation triggered)");
       } catch {
         return fallback + " (navigation triggered)";
@@ -2093,7 +2124,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
       // Explicit loadURL for desktop webview — src attribute update via React
       // alone may not trigger navigation if the URL string hasn't changed.
       if (isDesktop) {
-        webviewRef.current?.loadURL?.(url);
+        webviewRef.current?.loadURL?.(toProxySrcAbs(url));
       }
     }
   }, [activeTab, onUrlChange, isDesktop]);
