@@ -733,29 +733,30 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
 
   // Reload threads when project path changes — auto‑select the latest chat.
   useEffect(() => {
-    const loaded = loadThreads(threadKey);
-    setThreads(loaded);
-    if (loaded.length > 0) {
-      // Pick the most recent thread by createdAt
-      const latest = loaded.reduce((a, b) => (a.createdAt > b.createdAt ? a : b));
-      setActiveThreadId(latest.id);
-      setMessages(latest.messages);
-      syncMid(latest.messages);
-      autoCollapseThreadMessages(latest.messages);
-      // Loaded saved chats are no longer streaming — show the footer.
-      setAgentStatus("completed");
-      setAgentUsage(latest.usage ?? null);
-      setLoading(false);
-    } else {
-      setActiveThreadId("");
-      setMessages([]);
-      setCollapsedOutputs(new Set());
-      autoCollapsedIdsRef.current = new Set();
-      setAgentStatus("idle");
-      setAgentUsage(null);
-    }
-    preRoundRef.current = [];
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Defer thread loading from localStorage to avoid blocking first paint
+    const timer = setTimeout(() => {
+      const loaded = loadThreads(threadKey);
+      setThreads(loaded);
+      if (loaded.length > 0) {
+        const latest = loaded.reduce((a, b) => (a.createdAt > b.createdAt ? a : b));
+        setActiveThreadId(latest.id);
+        setMessages(latest.messages);
+        syncMid(latest.messages);
+        autoCollapseThreadMessages(latest.messages);
+        setAgentStatus("completed");
+        setAgentUsage(latest.usage ?? null);
+        setLoading(false);
+      } else {
+        setActiveThreadId("");
+        setMessages([]);
+        setCollapsedOutputs(new Set());
+        autoCollapsedIdsRef.current = new Set();
+        setAgentStatus("idle");
+        setAgentUsage(null);
+      }
+      preRoundRef.current = [];
+    }, 0);
+    return () => clearTimeout(timer);
   }, [threadKey]);
 
   // Stable ref for getProjectFiles to avoid re-running the file-list effect
@@ -765,6 +766,8 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
 
   // Load project files async for mention dropdown
   useEffect(() => {
+    // Only load project files when there are actual messages (skip empty initial state)
+    if (messages.length === 0) return;
     let active = true;
     setFileLoading(true);
     (async () => {
@@ -1300,15 +1303,13 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
           // Capture the last file-change token count before the assistant flush clears the ref
           const lastFcBeforeFlush = fileChangesRef.current[fileChangesRef.current.length - 1];
           const fcTokenSaved = lastFcBeforeFlush?.tokenCount;
-          // End the assistant message's streaming state
+          // End the assistant message's streaming state (no flushSync — batched with tool card below)
           if (assistantMsgId) {
-            flushSync(() => {
-              setMessages((prev) => {
-                const next = [...prev];
-                const idx = next.findIndex((m) => m.id === assistantMsgId);
-                if (idx >= 0) next[idx] = { ...next[idx], state: undefined, thought: currentThought, fileChanges: fileChangesRef.current.length > 0 ? [...fileChangesRef.current] : undefined, todos: todosRef.current.length > 0 ? [...todosRef.current] : undefined };
-                return next;
-              });
+            setMessages((prev) => {
+              const next = [...prev];
+              const idx = next.findIndex((m) => m.id === assistantMsgId);
+              if (idx >= 0) next[idx] = { ...next[idx], state: undefined, thought: currentThought, fileChanges: fileChangesRef.current.length > 0 ? [...fileChangesRef.current] : undefined, todos: todosRef.current.length > 0 ? [...todosRef.current] : undefined };
+              return next;
             });
             assistantMsgId = null;
             // Save changes for tool_end (ref is cleared below)
@@ -1339,8 +1340,10 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
           const isSubAgent = !!(evt as any).isSubAgent;
           const marker = (evt as any).agentMarker || activeDelegationMarkerRef.current || (isSubAgent ? "code-writer" : "main");
           streamToolRef.current.set(id, { name: evt.toolName, params: evt.toolParams || {}, agentMarker: marker });
-          // Create the card immediately — command line will be visible right away.
-          // Open file in Monaco for file tools (close tab for delete to release handle)
+          // Defer opening the file in editor — don't block the SSE event loop.
+          // The editor file open triggers network fetches and state updates; we queue it
+          // via setTimeout so the tool card paints first, then the file opens.
+          let deferredOpenPath: string | null = null;
           const FILE_EDIT_TOOLS = ["write_file", "edit_file", "delete_file", "rename_file"];
           if (FILE_EDIT_TOOLS.includes(evt.toolName) && (evt.toolParams?.path || evt.toolParams?.oldPath)) {
             const root = (getFsBasePath?.() || "").replace(/[/\\]$/, "");
@@ -1351,7 +1354,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
             if (evt.toolName === "delete_file") {
               closeEditorFile?.(p);
             } else {
-              openEditorFile?.(p);
+              deferredOpenPath = p;
             }
           }
           flushSync(() => {
@@ -1379,6 +1382,8 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
           // tools (write_file, edit_file, etc.) complete before the card is ever
           // shown in its "waiting" state.
           await new Promise<void>(r => { requestAnimationFrame(() => r()); });
+          // Deferred: open the file in editor now that the tool card is painted
+          if (deferredOpenPath) openEditorFile?.(deferredOpenPath);
         } else if (evt.type === "tool_end") {
           // Switch file changes from streaming to done and auto-apply to editor.
           const tn = evt.toolName;
@@ -1740,13 +1745,11 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
           }
           // End assistant streaming, flush file changes to the assistant message
           if (assistantMsgId) {
-            flushSync(() => {
-              setMessages((prev) => {
-                const next = [...prev];
-                const idx = next.findIndex((m) => m.id === assistantMsgId);
-                if (idx >= 0) next[idx] = { ...next[idx], state: undefined, thought: currentThought, fileChanges: fileChangesRef.current.length > 0 ? [...fileChangesRef.current] : undefined, todos: todosRef.current.length > 0 ? [...todosRef.current] : undefined };
-                return next;
-              });
+            setMessages((prev) => {
+              const next = [...prev];
+              const idx = next.findIndex((m) => m.id === assistantMsgId);
+              if (idx >= 0) next[idx] = { ...next[idx], state: undefined, thought: currentThought, fileChanges: fileChangesRef.current.length > 0 ? [...fileChangesRef.current] : undefined, todos: todosRef.current.length > 0 ? [...todosRef.current] : undefined };
+              return next;
             });
             assistantMsgId = null;
             // Capture token count from file-changes before clearing, keyed by path
@@ -1782,7 +1785,8 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
           // Look up token count from the file-change just flushed above
           const fp = String(evt.toolParams?.path || evt.toolParams?.oldPath || "");
           const fcTokenCount = fp ? fcTokenByPathRef.current.get(fp) : undefined;
-          // Open file in Monaco for file tools (close tab for delete to release handle)
+          // Defer file open — don't block the SSE event loop
+          let deferredOpenPath2: string | null = null;
           const FILE_EDIT_TOOLS2 = ["write_file", "edit_file", "delete_file", "rename_file"];
           if (FILE_EDIT_TOOLS2.includes(tn) && fp) {
             const root = (getFsBasePath?.() || "").replace(/[/\\]$/, "");
@@ -1793,7 +1797,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
             if (tn === "delete_file") {
               closeEditorFile?.(p);
             } else {
-              openEditorFile?.(p);
+              deferredOpenPath2 = p;
             }
           }
           flushSync(() => {
@@ -1812,6 +1816,8 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
           // Yield a frame so the browser paints the tool card (spinner, styling)
           // before tool_end arrives in the next SSE event.
           await new Promise<void>(r => { requestAnimationFrame(() => r()); });
+          // Deferred: open the file in editor now that the tool card is painted
+          if (deferredOpenPath2) openEditorFile?.(deferredOpenPath2);
           return true;
         }
 
@@ -2598,7 +2604,13 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
   }, []);
 
   // ── Simple line-by-line diff (LCS-based unified diff) ──
+  const diffCacheRef = useRef<Map<string, string>>(new Map());
   const computeUnifiedDiff = useCallback((original: string, current: string, contextLines = 3): string => {
+    const cacheKey = `${original.length}:${current.length}:${original.slice(0, 200)}:${current.slice(0, 200)}`;
+    const cached = diffCacheRef.current.get(cacheKey);
+    if (cached !== undefined) return cached;
+    if (diffCacheRef.current.size > 200) diffCacheRef.current.clear();
+
     const oLines = original.split("\n");
     const cLines = current.split("\n");
     // LCS table
@@ -2636,7 +2648,9 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
       for (let k = changeStart; k < trailing; k++) out += `${rawLines[k].kind}${rawLines[k].text}\n`;
       h = trailing;
     }
-    return out.trimEnd();
+    const result = out.trimEnd();
+    diffCacheRef.current.set(cacheKey, result);
+    return result;
   }, []);
 
   // ── Collect changed files from all assistant messages ──
