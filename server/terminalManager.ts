@@ -284,21 +284,47 @@ export function writeToSession(groupKey: string, sessionId: string, data: string
   // and stays alive (interactive shells ignore SIGINT).
   // On Windows, \x03 through stdin does NOT trigger Ctrl+C (PowerShell in pipe
   // mode requires GenerateConsoleCtrlEvent which Node.js can't call directly).
-  // Instead, kill the process and auto-recreate a fresh session in-place so
-  // the user gets a new prompt. The old session is removed and term:exit is
-  // sent BEFORE the replacement so the client reuses the same group (no new tab).
+  // Instead, kill the old process and spawn a fresh shell in the SAME session.
+  // The client's terminal is never disposed, so scrollback history is preserved
+  // and no new tab is created.
   if (data === "\x03") {
     if (isWin) {
-      const oldId = s.id;
       const recreateOpts = s.createOpts;
-      removeSession(groupKey, oldId);
-      if (s.ws.readyState === WebSocket.OPEN) {
-        s.ws.send(`term:exit:${oldId}:-1`);
-      }
+      // Strip old listeners so the process close doesn't send term:exit
+      s.proc?.removeAllListeners();
       s.proc?.kill();
-      if (recreateOpts && s.ws.readyState === WebSocket.OPEN) {
+      if (recreateOpts) {
         setTimeout(() => {
-          createSession(s.ws, groupKey, recreateOpts);
+          const shell = getShellPath();
+          const cwd = recreateOpts.cwd && fs.statSync(recreateOpts.cwd, { throwIfNoEntry: false })?.isDirectory()
+            ? recreateOpts.cwd : os.homedir();
+          const args = getShellArgs(cwd, recreateOpts.venvDir, recreateOpts.activateScript);
+          const env = buildEnvForCwd(cwd, recreateOpts.venvDir);
+          const newProc = spawn(shell, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+          s.proc = newProc;
+          newProc.stdout?.on("data", (data: Buffer) => {
+            if (s.ws.readyState === WebSocket.OPEN) {
+              s.ws.send(`term:out:${s.id}:${data.toString()}`);
+              scanAndEmitUrl(s.ws, groupKey, s.id, data.toString());
+            }
+          });
+          newProc.stderr?.on("data", (data: Buffer) => {
+            if (s.ws.readyState === WebSocket.OPEN) {
+              s.ws.send(`term:out:${s.id}:${data.toString()}`);
+              scanAndEmitUrl(s.ws, groupKey, s.id, data.toString());
+            }
+          });
+          newProc.on("close", (code) => {
+            if (s.ws.readyState === WebSocket.OPEN) {
+              s.ws.send(`term:exit:${s.id}:${code ?? -1}`);
+            }
+            removeSession(groupKey, s.id);
+          });
+          newProc.on("error", (err) => {
+            if (s.ws.readyState === WebSocket.OPEN) {
+              s.ws.send(`term:out:${s.id}:Shell error: ${err.message}\r\n`);
+            }
+          });
         }, 50);
       }
     } else {
