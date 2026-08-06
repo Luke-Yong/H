@@ -1954,7 +1954,6 @@ body.resizing iframe { pointer-events: none; }
   font-size: 11px;
   line-height: 1.5;
   color: #d4d4d4;
-  white-space: pre;
   overflow-x: auto;
   border-top: 1px solid #3c3c3c;
   z-index: 9999;
@@ -1969,6 +1968,27 @@ body.resizing iframe { pointer-events: none; }
 }
 .agent-diff-line.added { background: rgba(78, 201, 78, 0.08); color: #4ec94e; }
 .agent-diff-line.removed { background: rgba(248, 81, 73, 0.08); color: #f85149; }
+
+.agent-diff-row {
+  display: flex;
+  white-space: pre;
+}
+.agent-diff-row.added { background: rgba(78, 201, 78, 0.08); }
+.agent-diff-row.removed { background: rgba(248, 81, 73, 0.08); }
+.agent-diff-ln {
+  min-width: 38px;
+  padding: 0 6px;
+  text-align: right;
+  color: #6e7681;
+  user-select: none;
+  flex-shrink: 0;
+}
+.agent-diff-line-text {
+  padding: 0 12px;
+  flex: 1;
+}
+.agent-diff-row.added .agent-diff-line-text { color: #4ec94e; }
+.agent-diff-row.removed .agent-diff-line-text { color: #f85149; }
 
 /* ── Inline group diff panel (per-turn footer) ── */
 .agent-group-diff-panel {

@@ -2556,6 +2556,33 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
   const [expandedGroupDiffKey, setExpandedGroupDiffKey] = useState<string | null>(null);
   const [showGlobalDiff, setShowGlobalDiff] = useState(false);
 
+  // ── Render diff content with line numbers ──
+  const renderDiffLines = useCallback((diff: string) => {
+    if (!diff) return <span className="agent-diff-line">(no changes)</span>;
+    let oldLine = 1;
+    let newLine = 1;
+    return diff.split("\n").map((line, i) => {
+      const prefix = line[0];
+      let oldNum = "";
+      let newNum = "";
+      if (prefix === " ") {
+        oldNum = String(oldLine++);
+        newNum = String(newLine++);
+      } else if (prefix === "-") {
+        oldNum = String(oldLine++);
+      } else if (prefix === "+") {
+        newNum = String(newLine++);
+      }
+      return (
+        <div key={i} className={`agent-diff-row${prefix === "+" ? " added" : prefix === "-" ? " removed" : ""}`}>
+          <span className="agent-diff-ln">{oldNum}</span>
+          <span className="agent-diff-ln">{newNum}</span>
+          <span className="agent-diff-line-text">{line}</span>
+        </div>
+      );
+    });
+  }, []);
+
   // ── Simple line-by-line diff (LCS-based unified diff) ──
   const computeUnifiedDiff = useCallback((original: string, current: string, contextLines = 3): string => {
     const oLines = original.split("\n");
@@ -3537,17 +3564,15 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
             </div>
             {expandedGroupDiffKey === group.key && (
               <div className="agent-group-diff-panel">
-                {getGroupDiffFiles(group.items).map((f) => (
-                  <div key={f.path} className="agent-group-diff-file">
-                    <div className="agent-group-diff-file-header" onClick={() => setExpandedDiffPath(expandedDiffPath === f.path ? null : f.path)}>
-                      <i className={`codicon codicon-${expandedDiffPath === f.path ? "chevron-down" : "chevron-right"}`} />
+                {getGroupDiffFiles(group.items).map((f, fi) => (
+                  <div key={`${f.path}-${fi}`} className="agent-group-diff-file">
+                    <div className="agent-group-diff-file-header" onClick={() => setExpandedDiffPath(expandedDiffPath === f.path + "-" + fi ? null : f.path + "-" + fi)}>
+                      <i className={`codicon codicon-${expandedDiffPath === f.path + "-" + fi ? "chevron-down" : "chevron-right"}`} />
                       {f.path}
                     </div>
-                    {expandedDiffPath === f.path && (
+                    {expandedDiffPath === f.path + "-" + fi && (
                       <div className="agent-diff-content">
-                        {f.diff.split("\n").map((line, i) => (
-                          <span key={i} className={`agent-diff-line${line.startsWith("+") ? " added" : line.startsWith("-") ? " removed" : ""}`}>{line}{"\n"}</span>
-                        ))}
+                        {renderDiffLines(f.diff)}
                       </div>
                     )}
                   </div>
@@ -3827,17 +3852,15 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
             </div>
             <div style={{ overflow: "auto", flex: 1 }}>
               <div className="agent-group-diff-panel">
-                {changedFiles.map((f) => (
-                  <div key={f.path} className="agent-group-diff-file">
-                    <div className="agent-group-diff-file-header" onClick={() => setExpandedDiffPath(expandedDiffPath === f.path ? null : f.path)}>
-                      <i className={`codicon codicon-${expandedDiffPath === f.path ? "chevron-down" : "chevron-right"}`} />
+                {changedFiles.map((f, fi) => (
+                  <div key={`${f.path}-${fi}`} className="agent-group-diff-file">
+                    <div className="agent-group-diff-file-header" onClick={() => setExpandedDiffPath(expandedDiffPath === f.path + "-" + fi ? null : f.path + "-" + fi)}>
+                      <i className={`codicon codicon-${expandedDiffPath === f.path + "-" + fi ? "chevron-down" : "chevron-right"}`} />
                       {f.path}
                     </div>
-                    {expandedDiffPath === f.path && (
+                    {expandedDiffPath === f.path + "-" + fi && (
                       <div className="agent-diff-content">
-                        {(f.diff || "(no changes)").split("\n").map((line, i) => (
-                          <span key={i} className={`agent-diff-line${line.startsWith("+") ? " added" : line.startsWith("-") ? " removed" : ""}`}>{line}{"\n"}</span>
-                        ))}
+                        {renderDiffLines(f.diff || "")}
                       </div>
                     )}
                   </div>
