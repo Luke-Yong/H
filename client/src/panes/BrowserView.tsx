@@ -554,6 +554,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   });
   const [viewportScale, setViewportScale] = useState(0.5);
   const [loading, setLoading] = useState(false);
+  const [pageError, setPageError] = useState<string | null>(null);
   // Unified loading setter with a safety timeout: page background activity
   // (subframe/resource loads) can fire load-start events without a matching
   // main-frame finish, so this guarantees loading can never stay stuck on.
@@ -633,11 +634,11 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   useEffect(() => {
     if (urlSyncFromWebviewRef.current) {
       urlSyncFromWebviewRef.current = false;
-      // Sync display-only state (address bar) but do NOT touch navUrl/navTabId
       setCurrentUrl(url);
       setInputUrl(url);
       setSecure(isHttps(url));
       liveUrlRef.current = url;
+      setPageError(null);
       if (url) setLoadingState(true);
     } else {
       setNavTabId(tabId);
@@ -646,6 +647,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
       setInputUrl(url);
       setSecure(isHttps(url));
       liveUrlRef.current = url;
+      setPageError(null);
       if (url) setLoadingState(true);
     }
 
@@ -1014,7 +1016,25 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   // On every iframe load (React synthetic), inject hooks
   const iframeLoadHandler = useCallback((e: React.SyntheticEvent<HTMLIFrameElement>) => {
     setLoadingState(false);
+    setPageError(null);
     injectIntoIframe(e.currentTarget);
+    // Detect JSON responses in iframe
+    try {
+      const doc = e.currentTarget.contentDocument;
+      if (doc && doc.body) {
+        const text = (doc.body.textContent || "").trim();
+        // Check if body is just JSON (either raw or browser-wrapped in <pre>)
+        const isJsonBody = doc.body.children.length === 0
+          || (doc.body.children.length === 1 && doc.body.children[0]?.tagName === "PRE");
+        if (isJsonBody && (text.startsWith("{") || text.startsWith("["))) {
+          try {
+            const parsed = JSON.parse(text);
+            const formatted = JSON.stringify(parsed, null, 2);
+            doc.body.innerHTML = '<pre style="font:12px monospace;padding:12px;white-space:pre-wrap;color:#ccc;background:#1a1a1a;margin:0;min-height:100vh;">' + formatted.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</pre>';
+          } catch {}
+        }
+      }
+    } catch {}
   }, [injectIntoIframe, tabId, currentUrl]);
 
   // Ref for early injection from polling (defined after injectIntoIframe)
@@ -1306,11 +1326,28 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     const onDidFinishLoad = () => {
       navigatingRef.current = false;
       setLoadingState(false);
+      setPageError(null);
       syncDesktopState("did-finish-load");
       if (webviewReadyRef.current) {
         void view.executeJavaScript?.(DESKTOP_INJECT_CODE, false).catch(() => {});
-        // Read final DOM state (injection may have been blocked by __harnessPatched guard,
-        // but the tree may have changed since the last MutationObserver signal)
+        // Detect JSON responses that would render as white page
+        void view.executeJavaScript?.(`
+          (function(){
+            var body = document.body;
+            if (!body) return;
+            var text = (body.textContent || '').trim();
+            var isJsonBody = body.children.length === 0
+              || (body.children.length === 1 && body.children[0] && body.children[0].tagName === 'PRE');
+            if (isJsonBody && (text.startsWith('{') || text.startsWith('['))) {
+              try {
+                var parsed = JSON.parse(text);
+                var formatted = JSON.stringify(parsed, null, 2);
+                body.innerHTML = '<pre style="font:12px monospace;padding:12px;white-space:pre-wrap;color:#ccc;background:#1a1a1a;margin:0;min-height:100vh;">' + formatted.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</pre>';
+              } catch(e) {}
+            }
+          })()
+        `, false).catch(() => {});
+        // Read final DOM state
         void readDesktopDomTree();
       }
     };
@@ -1333,7 +1370,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
       syncDesktopState("dom-ready");
       void view.executeJavaScript?.(DESKTOP_INJECT_CODE, false).catch(() => {});
     };
-    const handleDidFailLoad = () => { navigatingRef.current = false; setLoadingState(false); };
+    const handleDidFailLoad = () => { navigatingRef.current = false; setLoadingState(false); setPageError("Failed to load page. The server may not be running or the URL is invalid."); };
     const handleConsoleMessage = (event: Event) => {
       const details = event as Event & {
         level?: number;
@@ -1513,6 +1550,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
 
     liveUrlRef.current = final;
     navigatingRef.current = true;
+    setPageError(null);
     setNavUrl(final);
     setCurrentUrl(final);
     setInputUrl(final);
@@ -1750,6 +1788,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
 
     liveUrlRef.current = final;
     navigatingRef.current = true;
+    setPageError(null);
     setNavUrl(final);
     setCurrentUrl(final);
     setInputUrl(final);
@@ -2044,6 +2083,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     if (activeTab) {
       liveUrlRef.current = url;
       navigatingRef.current = true;
+      setPageError(null);
       setNavTabId(activeTab.id);
       setNavUrl(url);
       setCurrentUrl(url);
@@ -2520,6 +2560,27 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
                   onLoad={iframeLoadHandler}
                   style={{ width: "100%", height: "100%", border: "none" }}
                 />
+              )}
+              {pageError && (
+                <div style={{
+                  position: "absolute", inset: 0, display: "flex", flexDirection: "column",
+                  alignItems: "center", justifyContent: "center",
+                  background: "rgba(20,20,20,0.95)", color: "#ccc", zIndex: 10,
+                  fontFamily: "var(--mono-font, monospace)", fontSize: 12, padding: 24,
+                }}>
+                  <div style={{ color: "#e1251b", fontSize: 16, fontWeight: 700, marginBottom: 12 }}>Page Load Error</div>
+                  <div style={{ textAlign: "center", maxWidth: 500, lineHeight: 1.5 }}>{pageError}</div>
+                  <button
+                    onClick={() => setPageError(null)}
+                    style={{
+                      marginTop: 16, padding: "6px 16px", background: "rgba(255,255,255,0.1)",
+                      border: "1px solid rgba(255,255,255,0.2)", borderRadius: 3,
+                      color: "#ccc", cursor: "pointer", fontSize: 12,
+                    }}
+                  >
+                    Dismiss
+                  </button>
+                </div>
               )}
             </div>
           </div>

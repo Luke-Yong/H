@@ -381,16 +381,9 @@ body.resizing iframe { pointer-events: none; }
   min-width: 260px;
   background: var(--bg-pane);
   border-right: 1px solid var(--border);
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
   flex-shrink: 0;
-}
-
-/* Commit log section fills remaining height */
-.scm-section.log-section {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
 }
 
 .scm-header {
@@ -456,6 +449,11 @@ body.resizing iframe { pointer-events: none; }
 .scm-graph-btn:disabled { opacity: 0.4; cursor: default; }
 
 .scm-section {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
   border-bottom: 1px solid var(--border);
   padding: 8px 0;
 }
@@ -471,6 +469,11 @@ body.resizing iframe { pointer-events: none; }
   color: var(--text-dim);
   letter-spacing: 0.3px;
   cursor: pointer;
+  position: sticky;
+  top: 0;
+  background: var(--bg-pane);
+  z-index: 1;
+  flex-shrink: 0;
 }
 
 .scm-section-toggle { font-size: 10px; }
@@ -481,6 +484,12 @@ body.resizing iframe { pointer-events: none; }
   border-radius: 10px;
   font-size: 11px;
   font-weight: 400;
+}
+
+.scm-section-body {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
 }
 
 .scm-item {
@@ -528,7 +537,9 @@ body.resizing iframe { pointer-events: none; }
 .scm-github-link:hover { text-decoration: underline; }
 
 .scm-log-body {
-  flex: 1; overflow-y: auto; overflow-x: hidden;
+  max-height: 320px;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .scm-log-item {
@@ -2157,7 +2168,7 @@ details[open] .agent-thought-summary::before { transform: rotate(90deg); }
   width: 18px; flex-shrink: 0; text-align: center;
   font-size: 13px; color: var(--text-dim); padding-top: 1px;
 }
-.agent-content { flex: 1; min-width: 0; }
+.agent-content { flex: 1; min-width: 0; user-select: text; }
 
 .agent-tool-tag {
   display: inline-flex; align-items: center; gap: 4px;
@@ -2166,7 +2177,7 @@ details[open] .agent-thought-summary::before { transform: rotate(90deg); }
   margin-bottom: 4px;
 }
 
-.agent-text { font-size: 12px; line-height: 1.5; color: var(--text); }
+.agent-text { font-size: 12px; line-height: 1.5; color: var(--text); user-select: text; }
 .agent-md-preview { display: block; }
 .agent-md-preview > :first-child { margin-top: 0; }
 .agent-md-preview > :last-child { margin-bottom: 0; }
