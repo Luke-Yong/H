@@ -74,6 +74,8 @@ export interface AgentState {
   latestTodos?: { id: string; text: string; status: string; agentMarker?: string }[];
   /** Latest validated summary submitted via write_summary. Required before task_complete. */
   latestSummary?: string;
+  /** Latest problems from read_problems — used to block task_complete if unaddressed errors remain. */
+  latestProblems?: { errorCount: number; warningCount: number; summary: string };
   /** Cumulative DeepSeek API usage across the current run. */
   apiUsageTotals?: DeepSeekApiUsage & { requestCount: number };
 }
@@ -1883,7 +1885,7 @@ export function summarizeCommandResult(raw: string, label: string): string {
   return summary;
 }
 
-async function runReadProblems(root: string): Promise<{ raw: string; summary: string }> {
+async function runReadProblems(root: string): Promise<{ raw: string; summary: string; errorCount: number; warningCount: number }> {
   // ── Prefer LSP diagnostics (real-time, per-file, already shown in terminal Problems tab) ──
   try {
     const lspDiags = getDiagnosticsForRoot(root);
@@ -1904,7 +1906,7 @@ async function runReadProblems(root: string): Promise<{ raw: string; summary: st
       }
       const summary = `LSP diagnostics: ${totalErrors} error${totalErrors !== 1 ? "s" : ""}, ${totalWarnings} warning${totalWarnings !== 1 ? "s" : ""} across ${lspDiags.length} file${lspDiags.length !== 1 ? "s" : ""}.\n${lines.join("\n")}`;
       const raw = lines.join("\n");
-      return { raw, summary };
+      return { raw, summary, errorCount: totalErrors, warningCount: totalWarnings };
     }
   } catch { /* LSP not available — fall through to build command */ }
 
@@ -1912,12 +1914,16 @@ async function runReadProblems(root: string): Promise<{ raw: string; summary: st
   const cmd = detectProjectBuild(root);
   if (!cmd) {
     const summary = 'No build system detected and no LSP diagnostics available. Try a specific command with run_command (e.g. npx tsc --noEmit, python -m compileall -x "venv|\\.venv|__pycache__|\\.egg-info|node_modules" ., go vet ./...).';
-    return { raw: summary, summary };
+    return { raw: summary, summary, errorCount: 0, warningCount: 0 };
   }
   const raw = await runCommand(cmd, root);
+  const exitMatch = raw.match(/^Exit code (\d+):/);
+  const buildErrorCount = exitMatch && parseInt(exitMatch[1], 10) !== 0 ? 1 : 0;
   return {
     raw,
     summary: summarizeCommandResult(raw, `Build check (${cmd})`),
+    errorCount: buildErrorCount,
+    warningCount: 0,
   };
 }
 
@@ -2021,7 +2027,7 @@ You have access to tools that let you read/write files, run commands, and delega
 3. **Update todos after EVERY step.** After completing a tool call that moves the current item forward, call \`write_todos\` again with the updated status. Mark the item \`completed\` if done, or keep it \`in_progress\`. This keeps the user informed of your progress.
 4. **ALL items must be \`completed\` or \`cancelled\` before you can finish.** \`write_todos\` is a tracking tool, NOT a terminal action — updating todos does not finish the task. You MUST continue to the next item.
 5. Use tools one at a time. After each tool call, read the result before deciding the next step.
-6. **When all items are done, call \`write_summary\` (structured template), then call \`task_complete\`.** NEVER stop the conversation without calling \`task_complete\`. Writing todos alone does NOT finish the task.
+6. **When all items are done, call \`write_summary\` (structured template), then call \`task_complete\`.** NEVER stop the conversation without calling \`task_complete\`. Writing todos alone does NOT finish the task. Before calling \`task_complete\`, you MUST call \`read_problems\` to verify no errors remain — \`task_complete\` will be BLOCKED if \`read_problems\` detects unresolved errors.
 7. If you encounter an error, explain what happened and suggest how to fix it.
 8. Keep responses concise — one sentence of reasoning, one tool call.
 9. **Browser interactions MUST be delegated to the browser sub-agent.** You do NOT have browser tools. For ANY browser task — navigating, checking if a page loads, inspecting the DOM, taking screenshots, clicking, typing, scrolling, testing — call \`delegate_task agent_type: "browser"\` with a clear description. The sub-agent returns a summary.
@@ -2578,7 +2584,10 @@ function buildTaskCompleteReminder(state: AgentState, scope: "agent" | "sub-agen
   const todoRequirement = state.latestTodos && state.latestTodos.length > 0
     ? ` Your summary must include a "### Todo Progress" section covering every todo item's final status.`
     : "";
-  return `Do not end with a plain assistant message. You must call write_summary, then task_complete, to finish this ${scope}.${todoRequirement} If you already wrote a summary in normal text, call write_summary with that summary using the required structured format, then call task_complete.`;
+  const problemReminder = state.latestProblems && state.latestProblems.errorCount > 0
+    ? ` You have ${state.latestProblems.errorCount} unaddressed error${state.latestProblems.errorCount !== 1 ? "s" : ""} — call read_problems to review them, fix the errors, then call read_problems again to verify before task_complete.`
+    : "";
+  return `Do not end with a plain assistant message. You must call write_summary, then task_complete, to finish this ${scope}.${todoRequirement}${problemReminder} If you already wrote a summary in normal text, call write_summary with that summary using the required structured format, then call task_complete.`;
 }
 
 // ── Todo completion guard: detect pending tasks at task_complete ──
@@ -3447,6 +3456,7 @@ export async function agentLoop(
       if (fnName === "read_problems") {
         state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc2(reasoningContent) });
         const diagResult = await runReadProblems(projectRoot);
+        state.latestProblems = { errorCount: diagResult.errorCount, warningCount: diagResult.warningCount, summary: diagResult.summary };
         state.messages.push({ role: "tool", content: diagResult.summary, tool_call_id: tc.id });
         executedTools.push({ name: fnName, result: diagResult.summary.slice(0, 1000) });
         continue;
@@ -3500,6 +3510,13 @@ export async function agentLoop(
           state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc2(reasoningContent) });
           state.messages.push({ role: "tool", content: rejectMsg, tool_call_id: tc.id });
           state.messages.push({ role: "user", content: `Your task_complete was rejected because you still have pending tasks. Call write_todos to update them (mark as completed or cancelled), then call task_complete again.` });
+          continue;
+        }
+        if (state.latestProblems && state.latestProblems.errorCount > 0) {
+          const rejectMsg = `Cannot complete: ${state.latestProblems.errorCount} error${state.latestProblems.errorCount !== 1 ? "s" : ""} still present. Fix the errors detected by read_problems, then call read_problems again to verify they are resolved before calling task_complete.\n\nLast problems summary:\n${state.latestProblems.summary.slice(0, 500)}`;
+          state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc2(reasoningContent) });
+          state.messages.push({ role: "tool", content: rejectMsg, tool_call_id: tc.id });
+          state.messages.push({ role: "user", content: rejectMsg });
           continue;
         }
         if (!state.latestSummary) {
@@ -3863,6 +3880,7 @@ export async function* agentLoopStream(
       if (fnName === "read_problems") {
         yield { type: "tool_start", toolName: fnName, toolParams: params };
         const diagResult = await runReadProblems(projectRoot);
+        state.latestProblems = { errorCount: diagResult.errorCount, warningCount: diagResult.warningCount, summary: diagResult.summary };
         state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
         state.messages.push({ role: "tool", content: diagResult.summary, tool_call_id: tc.id });
         yield {
@@ -3982,6 +4000,14 @@ export async function* agentLoopStream(
           state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
           state.messages.push({ role: "tool", content: rejectMsg, tool_call_id: tc.id });
           state.messages.push({ role: "user", content: `Your task_complete was rejected because you still have pending tasks. Call write_todos to update them (mark as completed or cancelled), then call task_complete again.` });
+          yield { type: "tool_end", toolName: fnName, toolCallId: tc.id, toolResult: rejectMsg };
+          continue;
+        }
+        if (state.latestProblems && state.latestProblems.errorCount > 0) {
+          const rejectMsg = `Cannot complete: ${state.latestProblems.errorCount} error${state.latestProblems.errorCount !== 1 ? "s" : ""} still present. Fix the errors detected by read_problems, then call read_problems again to verify they are resolved before calling task_complete.\n\nLast problems summary:\n${state.latestProblems.summary.slice(0, 500)}`;
+          state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
+          state.messages.push({ role: "tool", content: rejectMsg, tool_call_id: tc.id });
+          state.messages.push({ role: "user", content: rejectMsg });
           yield { type: "tool_end", toolName: fnName, toolCallId: tc.id, toolResult: rejectMsg };
           continue;
         }

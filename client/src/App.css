@@ -886,6 +886,7 @@ body.resizing iframe { pointer-events: none; }
 .console-list {
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 8px;
   font-family: "Cascadia Code", "Fira Code", monospace;
   font-size: 12px;
@@ -2085,6 +2086,7 @@ body.resizing iframe { pointer-events: none; }
   max-height: 300px; overflow-y: auto;
   font-family: var(--mono-font, monospace);
   cursor: pointer;
+  max-width: 100%; overflow-wrap: break-word;
 }
 .agent-terminal-out-collapsed {
   display: flex; align-items: center; gap: 6px;
@@ -2188,7 +2190,7 @@ details[open] .agent-thought-summary::before { transform: rotate(90deg); }
   width: 18px; flex-shrink: 0; text-align: center;
   font-size: 13px; color: var(--text-dim); padding-top: 1px;
 }
-.agent-content { flex: 1; min-width: 0; user-select: text; }
+.agent-content { flex: 1; min-width: 0; user-select: text; overflow-wrap: break-word; }
 
 .agent-tool-tag {
   display: inline-flex; align-items: center; gap: 4px;
@@ -2197,7 +2199,7 @@ details[open] .agent-thought-summary::before { transform: rotate(90deg); }
   margin-bottom: 4px;
 }
 
-.agent-text { font-size: 12px; line-height: 1.5; color: var(--text); user-select: text; }
+.agent-text { font-size: 12px; line-height: 1.5; color: var(--text); user-select: text; overflow-wrap: break-word; word-break: break-word; }
 .agent-md-preview { display: block; }
 .agent-md-preview > :first-child { margin-top: 0; }
 .agent-md-preview > :last-child { margin-bottom: 0; }
@@ -2277,6 +2279,8 @@ details[open] .agent-thought-summary::before { transform: rotate(90deg); }
   font-size: 11px; line-height: 1.4; white-space: pre-wrap;
   overflow-x: auto; max-height: 200px; overflow-y: auto;
   font-family: var(--mono-font, monospace); color: #ccc;
+  max-width: 100%;
+  overflow-wrap: break-word;
 }
 
 /* ── User message action buttons ── */

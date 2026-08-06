@@ -959,13 +959,18 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
 
   // Auto-scroll to bottom only when user is already near the bottom.
   // If they've scrolled up to read history, don't yank them back.
+  // Deferred via rAF so the browser has laid out new content (important for
+  // fast tool calls where flushSync forces synchronous DOM updates).
   useEffect(() => {
     const el = consoleListRef.current;
     if (!el) return;
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
-    if (nearBottom || !userScrolledUpRef.current) {
-      el.scrollTop = el.scrollHeight;
-    }
+    const raf = requestAnimationFrame(() => {
+      const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+      if (nearBottom || !userScrolledUpRef.current) {
+        el.scrollTop = el.scrollHeight;
+      }
+    });
+    return () => cancelAnimationFrame(raf);
   }, [messages]);
 
   // Track manual scroll — if user scrolls up, stop auto-scrolling.
