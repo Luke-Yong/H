@@ -2556,11 +2556,20 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
   const [expandedGroupDiffKey, setExpandedGroupDiffKey] = useState<string | null>(null);
   const [showGlobalDiff, setShowGlobalDiff] = useState(false);
 
+  // ── Find the 0-based first line where original and current differ ──
+  const findFirstChangedLine = useCallback((original: string, current: string): number => {
+    const oLines = original.split("\n");
+    const cLines = current.split("\n");
+    let i = 0;
+    while (i < oLines.length && i < cLines.length && oLines[i] === cLines[i]) i++;
+    return i;
+  }, []);
+
   // ── Render diff content with line numbers ──
-  const renderDiffLines = useCallback((diff: string) => {
+  const renderDiffLines = useCallback((diff: string, startLine = 1) => {
     if (!diff) return <span className="agent-diff-line">(no changes)</span>;
-    let oldLine = 1;
-    let newLine = 1;
+    let oldLine = startLine;
+    let newLine = startLine;
     return diff.split("\n").map((line, i) => {
       const prefix = line[0];
       let oldNum = "";
@@ -2625,37 +2634,38 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
     return out.trimEnd();
   }, []);
 
-  // ── Collect changed files from the last assistant message ──
+  // ── Collect changed files from all assistant messages ──
   const changedFiles = useMemo(() => {
     if (messages.length === 0) return [];
-    const files: { path: string; name: string; diff: string }[] = [];
+    const files: { path: string; name: string; diff: string; startLine: number }[] = [];
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i];
       if (m.role === "assistant" && m.fileChanges && m.fileChanges.length > 0) {
         for (const fc of m.fileChanges) {
           if (fc.changeType === "write" && fc.originalContent != null && fc.content) {
-            files.push({ path: fc.path, name: fc.name, diff: computeUnifiedDiff(fc.originalContent || "", fc.content) });
+            const startLine = findFirstChangedLine(fc.originalContent || "", fc.content) + 1;
+            files.push({ path: fc.path, name: fc.name, diff: computeUnifiedDiff(fc.originalContent || "", fc.content), startLine });
           }
         }
-        break;
       }
     }
     return files;
-  }, [messages, computeUnifiedDiff]);
+  }, [messages, computeUnifiedDiff, findFirstChangedLine]);
 
   const getGroupDiffFiles = useCallback((items: ConsoleMessage[]) => {
-    const files: { path: string; name: string; diff: string }[] = [];
+    const files: { path: string; name: string; diff: string; startLine: number }[] = [];
     for (const m of items) {
       if (m.role === "assistant" && m.fileChanges && m.fileChanges.length > 0) {
         for (const fc of m.fileChanges) {
           if (fc.changeType === "write" && fc.originalContent != null && fc.content) {
-            files.push({ path: fc.path, name: fc.name, diff: computeUnifiedDiff(fc.originalContent || "", fc.content) });
+            const startLine = findFirstChangedLine(fc.originalContent || "", fc.content) + 1;
+            files.push({ path: fc.path, name: fc.name, diff: computeUnifiedDiff(fc.originalContent || "", fc.content), startLine });
           }
         }
       }
     }
     return files;
-  }, [computeUnifiedDiff]);
+  }, [computeUnifiedDiff, findFirstChangedLine]);
 
   // ── Pending items for the input-area banner ──
   const [pendingTodosFilter, setPendingTodosFilter] = useState<"all" | "main" | "sub">("all");
@@ -3572,7 +3582,7 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
                     </div>
                     {expandedDiffPath === f.path + "-" + fi && (
                       <div className="agent-diff-content">
-                        {renderDiffLines(f.diff)}
+                        {renderDiffLines(f.diff, f.startLine)}
                       </div>
                     )}
                   </div>
@@ -3860,7 +3870,7 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
                     </div>
                     {expandedDiffPath === f.path + "-" + fi && (
                       <div className="agent-diff-content">
-                        {renderDiffLines(f.diff || "")}
+                        {renderDiffLines(f.diff || "", f.startLine)}
                       </div>
                     )}
                   </div>
