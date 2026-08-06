@@ -1268,10 +1268,10 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   }, [files, activeFileId]);
 
   const applyAiFiles = useCallback((aiFiles: { name: string; content: string; fsPath?: string; isNew?: boolean }[]) => {
-    let newFileId = "";
-    let modifiedFileId = "";
     setFiles((prev) => {
       const updated = [...prev];
+      let newFileId = "";
+      let modifiedFileId = "";
       for (const af of aiFiles) {
         // Dedup: match by _fsPath first, then by name.
         const target = af.fsPath ? normPath(af.fsPath) : "";
@@ -1326,10 +1326,13 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
           newFileId = newFileId || f.id;
         }
       }
+      // Must set activeFileId inside the updater — React 18 defers functional
+      // updater execution, so reading newFileId/modifiedFileId outside would
+      // always be "" (the tab would open but never become active).
+      if (newFileId) setActiveFileId(newFileId);
+      else if (modifiedFileId) setActiveFileId(modifiedFileId);
       return updated;
     });
-    if (newFileId) setActiveFileId(newFileId);
-    else if (modifiedFileId) setActiveFileId(modifiedFileId);
   }, [fsBasePath, clearLspMarkersForFile]);
 
   const agentDiffsPendingRef = useRef<Record<string, { originalContent: string; newContent: string }>>({});

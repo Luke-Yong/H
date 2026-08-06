@@ -876,10 +876,16 @@ export default function TerminalPane({
           void navigator.clipboard.writeText(sel).catch(() => {});
           return false;
         }
-        // Explicit Ctrl+C: write ^C and send interrupt to process
+        // Send Ctrl+C interrupt — match IDE behavior: show ^C, clear input,
+        // reset history index, and update gutter decoration.
         inst.term.write("^C\r\n");
         inst.input = "";
         inst.cursor = 0;
+        inst.historyIndex = inst.history.length;
+        if (inst.commandRunning && inst.lastCommandMarker) {
+          setCommandDecorationKind(inst, inst.lastCommandMarker, "interrupted");
+          inst.commandRunning = false;
+        }
         sendToServer(inst.id, "\x03");
         return false;
       }

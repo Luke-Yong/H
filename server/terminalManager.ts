@@ -279,21 +279,30 @@ export function writeToSession(groupKey: string, sessionId: string, data: string
     s.pty?.write(data);
     return;
   }
-  // Pipe backend: \x03 (Ctrl+C) doesn't work through stdin on any OS.
-  // On Unix, send SIGINT; on Windows, kill the process (TerminateProcess).
-  // In either case this kills the shell process. Auto-recreate a fresh session
-  // immediately so the user gets a new prompt instead of a dead terminal.
+  // Pipe backend: \x03 (Ctrl+C)
+  // On Unix, send SIGINT — the shell forwards it to the foreground process
+  // and stays alive (interactive shells ignore SIGINT).
+  // On Windows, \x03 through stdin does NOT trigger Ctrl+C (PowerShell in pipe
+  // mode requires GenerateConsoleCtrlEvent which Node.js can't call directly).
+  // Instead, kill the process and auto-recreate a fresh session in-place so
+  // the user gets a new prompt. The old session is removed and term:exit is
+  // sent BEFORE the replacement so the client reuses the same group (no new tab).
   if (data === "\x03") {
     if (isWin) {
+      const oldId = s.id;
+      const recreateOpts = s.createOpts;
+      removeSession(groupKey, oldId);
+      if (s.ws.readyState === WebSocket.OPEN) {
+        s.ws.send(`term:exit:${oldId}:-1`);
+      }
       s.proc?.kill();
+      if (recreateOpts && s.ws.readyState === WebSocket.OPEN) {
+        setTimeout(() => {
+          createSession(s.ws, groupKey, recreateOpts);
+        }, 50);
+      }
     } else {
       s.proc?.kill("SIGINT");
-    }
-    const recreateOpts = s.createOpts;
-    if (recreateOpts && s.ws.readyState === WebSocket.OPEN) {
-      setTimeout(() => {
-        createSession(s.ws, groupKey, recreateOpts);
-      }, 50);
     }
     return;
   }
