@@ -278,6 +278,14 @@ export function writeToSession(groupKey: string, sessionId: string, data: string
   const group = sessions.get(groupKey);
   const s = group?.find((x) => x.id === sessionId);
   if (!s) return;
+
+  // Reset URL dedup when user starts a new command (Enter) or interrupts (Ctrl+C).
+  // Otherwise restarting a server (Ctrl+C → re-run) won't re-trigger browser open
+  // since the PTY session persists across commands.
+  if (data.includes("\r") || data === "\x03") {
+    groupSeenUrls.delete(groupKey);
+  }
+
   if (s.backend === "pty") {
     s.pty?.write(data);
     return;
