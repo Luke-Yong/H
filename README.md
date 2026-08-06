@@ -1148,6 +1148,26 @@ Harness enforces **structured summaries** on `write_summary`. The server validat
 
 Summaries that are too short, match thought-process patterns (e.g. "I did the task", "OK, completed"), or lack concrete details (no file references, actions, or results) are **rejected**. The agent receives the rejection as a tool error and must call `write_summary` again with a proper summary.
 
+#### Problem Lock
+
+Harness enforces **problem checking** before task completion. `task_complete` is **rejected** if `read_problems` has detected unresolved errors (`errorCount > 0`). The agent must fix all errors, call `read_problems` again to verify they are resolved, and only then may call `task_complete`.
+
+```
+Agent: edit_file — makes a change
+Agent: task_complete
+  → REJECTED: "Cannot complete: 3 errors still present."
+Agent: read_problems
+  → LSP diagnostics: 0 errors, 0 warnings.
+Agent: task_complete
+  → ACCEPTED
+```
+
+`read_problems` aggregates diagnostics from two sources:
+- **LSP diagnostics** (real-time, per-file) — TypeScript errors, linter warnings, etc. from the IDE's language server
+- **Build command fallback** — if LSP is unavailable, runs the project's build/lint command (`npx tsc --noEmit`, `python -m compileall`, etc.)
+
+The problem lock ensures the agent cannot declare a task complete while known errors remain in the project. Warnings do not block — only errors (`severity === 8` in LSP, or non-zero exit code from build commands).
+
 ### Persistent Memory
 
 Harness includes a **cross-session memory system** backed by SQLite. The agent can store key decisions, user preferences, project conventions, and discovered patterns — and recall them in future sessions.

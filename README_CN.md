@@ -1129,6 +1129,26 @@ Harness 对 `write_summary` 强制执行**结构化摘要**。服务器根据所
 
 太短、匹配思考过程模式（例如"我完成了任务"、"好的，已完成"）或缺乏具体细节（无文件引用、操作或结果）的摘要会被**拒绝**。Agent 将拒绝作为工具错误接收，必须使用适当的摘要重新调用 `write_summary`。
 
+#### 问题锁定
+
+Harness 在任务完成前强制执行**问题检查**。如果 `read_problems` 检测到未解决的错误（`errorCount > 0`），`task_complete` 会被**拒绝**。Agent 必须修复所有错误，再次调用 `read_problems` 验证已解决，然后才能调用 `task_complete`。
+
+```
+Agent: edit_file — 进行更改
+Agent: task_complete
+  → 拒绝："Cannot complete: 3 errors still present."
+Agent: read_problems
+  → LSP 诊断：0 个错误，0 个警告。
+Agent: task_complete
+  → 接受
+```
+
+`read_problems` 从两个来源聚合诊断信息：
+- **LSP 诊断**（实时、按文件）— 来自 IDE 语言服务器的 TypeScript 错误、linter 警告等
+- **构建命令回退** — 如果 LSP 不可用，运行项目的构建/lint 命令（`npx tsc --noEmit`、`python -m compileall` 等）
+
+问题锁定确保 Agent 在项目中存在已知错误时无法声明任务完成。警告不会阻止 — 只有错误（LSP 中 `severity === 8`，或构建命令的非零退出码）会阻止。
+
 ### 持久化记忆
 
 Harness 包含一个基于 SQLite 的**跨会话记忆系统**。Agent 可以存储关键决策、用户偏好、项目约定和发现的模式 — 并在未来的会话中回忆它们。

@@ -739,10 +739,12 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
       setThreads(loaded);
       if (loaded.length > 0) {
         const latest = loaded.reduce((a, b) => (a.createdAt > b.createdAt ? a : b));
+        // Strip streaming states from historical messages — they are no longer live
+        const restored = latest.messages.map((m) => ({ ...m, state: undefined }));
         setActiveThreadId(latest.id);
-        setMessages(latest.messages);
-        syncMid(latest.messages);
-        autoCollapseThreadMessages(latest.messages);
+        setMessages(restored);
+        syncMid(restored);
+        autoCollapseThreadMessages(restored);
         setAgentStatus("completed");
         setAgentUsage(latest.usage ?? null);
         setLoading(false);
@@ -788,7 +790,9 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
         const idx = prev.findIndex((t) => t.id === activeThreadId);
         if (idx === -1) return prev;
         const next = [...prev];
-        next[idx] = { ...next[idx], messages };
+        // Strip streaming states before persisting
+        const clean = messages.map((m) => ({ ...m, state: undefined }));
+        next[idx] = { ...next[idx], messages: clean };
         return next;
       });
     }, 500);
@@ -827,10 +831,12 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
   const selectThread = useCallback((id: string) => {
     const t = threads.find((t) => t.id === id);
     if (t) {
+      // Strip streaming states from historical messages
+      const restored = t.messages.map((m) => ({ ...m, state: undefined }));
       setActiveThreadId(id);
-      setMessages(t.messages);
-      syncMid(t.messages);
-      autoCollapseThreadMessages(t.messages);
+      setMessages(restored);
+      syncMid(restored);
+      autoCollapseThreadMessages(restored);
       preRoundRef.current = [];
       // Loaded saved chats are no longer streaming — show the footer.
       setAgentStatus("completed");
