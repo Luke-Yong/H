@@ -2186,6 +2186,9 @@ app.use("/_browser", (req, res, next) => {
   // Build the actual path from the proxied request (strip /_browser and query)
   const proxyPath = req.url.includes("?") ? "" : req.url.slice("/_browser".length) || "/";
 
+  // Display-friendly title for proxied JSON pages (used below in HTML templates)
+  const pageTitle = parsed.host + parsed.pathname;
+
   const client = parsed.protocol === "https:" ? https : http;
 
   const reqHeaders = { ...req.headers };
@@ -2228,7 +2231,7 @@ app.use("/_browser", (req, res, next) => {
               const parsed = JSON.parse(body);
               const formatted = JSON.stringify(parsed, null, 2);
               headers["content-type"] = "text/html; charset=utf-8";
-              const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+              const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${pageTitle}</title><style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#1e1e1e;color:#d4d4d4;font:13px/1.5 'Cascadia Code','Fira Code',Consolas,monospace;padding:16px;white-space:pre-wrap;word-break:break-word}
 .key{color:#8E9FFF}.str{color:#ce9178}.num{color:#b5cea8}.bool{color:#4D6BFE}.nil{color:#4D6BFE}.bracket{color:#ffd700}
@@ -2255,7 +2258,7 @@ body{background:#1e1e1e;color:#d4d4d4;font:13px/1.5 'Cascadia Code','Fira Code',
           try {
             const parsed = JSON.parse(body);
             const formatted = JSON.stringify(parsed, null, 2);
-            const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+            const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${pageTitle}</title><style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#1e1e1e;color:#d4d4d4;font:13px/1.5 'Cascadia Code','Fira Code',Consolas,monospace;padding:16px;white-space:pre-wrap;word-break:break-word}
 .key{color:#8E9FFF}.str{color:#ce9178}.num{color:#b5cea8}.bool{color:#4D6BFE}.nil{color:#4D6BFE}.bracket{color:#ffd700}
@@ -2282,7 +2285,7 @@ body{background:#1e1e1e;color:#d4d4d4;font:13px/1.5 'Cascadia Code','Fira Code',
               const parsed = JSON.parse(body);
               const formatted = JSON.stringify(parsed, null, 2);
               proxyHeaders["content-type"] = "text/html; charset=utf-8";
-              const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+              const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${pageTitle}</title><style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#1e1e1e;color:#d4d4d4;font:13px/1.5 'Cascadia Code','Fira Code',Consolas,monospace;padding:16px;white-space:pre-wrap;word-break:break-word}
 .key{color:#8E9FFF}.str{color:#ce9178}.num{color:#b5cea8}.bool{color:#4D6BFE}.nil{color:#4D6BFE}.bracket{color:#ffd700}
