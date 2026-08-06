@@ -311,6 +311,18 @@ export default function App() {
     openBrowserTabForUrl(url);
   }, [openBrowserTabForUrl]);
 
+  // Buffer debug entries to avoid calling setState inside console overrides during
+  // React's render phase — that can cause "Maximum update depth exceeded" when
+  // React's own dev-mode warnings use console.error.
+  const pendingDebugRef = useRef<DebugConsoleEntry[]>([]);
+  const debugFlushScheduledRef = useRef(false);
+
+  const flushDebugEntries = useCallback(() => {
+    if (pendingDebugRef.current.length === 0) return;
+    const batch = pendingDebugRef.current.splice(0);
+    setDebugEntries((prev) => [...prev.slice(-(Math.max(0, 400 - batch.length))), ...batch]);
+  }, []);
+
   const appendDebugEntry = useCallback((entry: Omit<DebugConsoleEntry, "id" | "time"> & { time?: number }) => {
     const next: DebugConsoleEntry = {
       id: `dbg-${++debugIdRef.current}`,
@@ -319,10 +331,19 @@ export default function App() {
       source: entry.source,
       text: entry.text,
     };
-    setDebugEntries((prev) => [...prev.slice(-399), next]);
-  }, []);
+    pendingDebugRef.current.push(next);
+    if (pendingDebugRef.current.length > 500) pendingDebugRef.current.shift();
+    if (!debugFlushScheduledRef.current) {
+      debugFlushScheduledRef.current = true;
+      queueMicrotask(() => {
+        debugFlushScheduledRef.current = false;
+        flushDebugEntries();
+      });
+    }
+  }, [flushDebugEntries]);
 
   const clearDebugEntries = useCallback(() => {
+    pendingDebugRef.current = [];
     setDebugEntries([]);
   }, []);
 

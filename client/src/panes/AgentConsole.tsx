@@ -189,6 +189,31 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
   const [collapsedOutputs, setCollapsedOutputs] = useState<Set<string>>(new Set());
   // Track which IDs have been auto-collapsed (so we don't re-collapse user-expanded ones)
   const autoCollapsedIdsRef = useRef<Set<string>>(new Set());
+
+  // Auto-collapse tool outputs/code blocks for messages loaded from history
+  // (live events auto-collapse via tool_ended handlers; this handles restored threads)
+  const autoCollapseThreadMessages = useCallback((msgs: ConsoleMessage[]) => {
+    const ids = new Set<string>();
+    for (const msg of msgs) {
+      if (msg.role === "tool" && msg.toolName && msg.toolName !== "run_in_terminal" && msg.state !== "waiting") {
+        if (!autoCollapsedIdsRef.current.has(msg.id)) {
+          autoCollapsedIdsRef.current.add(msg.id);
+          ids.add(msg.id);
+          ids.add(`${msg.id}-code`);
+        }
+        if (msg.toolName === "delegate_task" && msg.subAgentMessages) {
+          for (let i = 0; i < msg.subAgentMessages.length; i++) {
+            if (msg.subAgentMessages[i].role === "tool" || msg.subAgentMessages[i].name) {
+              ids.add(`${msg.id}-sa-${i}`);
+            }
+          }
+        }
+      }
+    }
+    if (ids.size > 0) {
+      setCollapsedOutputs((prev) => { const next = new Set(prev); for (const id of ids) next.add(id); return next; });
+    }
+  }, []);
   // Track agent terminal output streaming from the bridge
   const agentTermMsgIdRef = useRef<string | null>(null);
   const agentTermOutputRef = useRef<string>("");
@@ -595,6 +620,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
       setActiveThreadId(latest.id);
       setMessages(latest.messages);
       syncMid(latest.messages);
+      autoCollapseThreadMessages(latest.messages);
       // Loaded saved chats are no longer streaming — show the footer.
       setAgentStatus("completed");
       setAgentUsage(latest.usage ?? null);
@@ -602,6 +628,8 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
     } else {
       setActiveThreadId("");
       setMessages([]);
+      setCollapsedOutputs(new Set());
+      autoCollapsedIdsRef.current = new Set();
       setAgentStatus("idle");
       setAgentUsage(null);
     }
@@ -650,6 +678,8 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
     setThreads((prev) => [...prev, t]);
     setActiveThreadId(id);
     setMessages([]);
+    setCollapsedOutputs(new Set());
+    autoCollapsedIdsRef.current = new Set();
     setAgentStatus("idle");
     setAgentUsage(null);
     return id;
@@ -671,6 +701,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
       setActiveThreadId(id);
       setMessages(t.messages);
       syncMid(t.messages);
+      autoCollapseThreadMessages(t.messages);
       preRoundRef.current = [];
       // Loaded saved chats are no longer streaming — show the footer.
       setAgentStatus("completed");
@@ -691,6 +722,8 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
     if (activeThreadId === id) {
       setActiveThreadId("");
       setMessages([]);
+      setCollapsedOutputs(new Set());
+      autoCollapsedIdsRef.current = new Set();
       setAgentStatus("idle");
       setAgentUsage(null);
       preRoundRef.current = [];
@@ -1460,9 +1493,11 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
     } catch (err: any) {
       if (err?.name !== "AbortError") {
         push({ role: "system", content: `Error: ${String(err)}` });
+        setAgentStatus("completed");
+        setLoading(false);
       }
-      setAgentStatus("completed");
-      setLoading(false);
+      // On abort, the stop() callback already set status to "stopped"
+      // and loading to false — don't override with "completed".
     }
 
     // ── Shared SSE event handler for continue loops ──
@@ -2237,9 +2272,13 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
     try {
       await runAgent(tid, msg, ctrl.signal);
     } catch (err: any) {
-      if (err?.name !== "AbortError") push({ role: "assistant", content: `Error: ${String(err)}` });
-      setAgentStatus("completed");
-      setLoading(false);
+      if (err?.name !== "AbortError") {
+        push({ role: "assistant", content: `Error: ${String(err)}` });
+        setAgentStatus("completed");
+        setLoading(false);
+      }
+      // On abort, the stop() callback already set status to "stopped"
+      // and loading to false — don't override with "completed".
     }
     abortRef.current = null;
   }, [input, runAgent, push, messages, ensureThread, updateThreadTitle]);
@@ -2247,10 +2286,64 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
   const stop = useCallback(() => {
     abortRef.current?.abort();
     abortRef.current = null;
+
+    // Flush pending todos and file-changes to the last assistant message.
+    // When the agent is stopped mid-turn, any in_progress todos are reverted
+    // to pending (interrupted, not completed) and streaming file-changes are
+    // finalized so the UI shows accurate state instead of losing them.
+    const hasTodos = todosRef.current.length > 0;
+    const hasFileChanges = fileChangesRef.current.length > 0;
+
+    if (hasTodos || hasFileChanges) {
+      setMessages((prev) => {
+        const next = [...prev];
+        for (let i = next.length - 1; i >= 0; i--) {
+          if (next[i].role === "assistant" && next[i].state !== undefined) {
+            const resolvedTodos = hasTodos
+              ? todosRef.current.map((t) =>
+                  t.status === "in_progress" ? { ...t, status: "pending" as const } : t
+                )
+              : undefined;
+            const resolvedFileChanges = hasFileChanges
+              ? fileChangesRef.current.map((fc) =>
+                  fc.status === "streaming" ? { ...fc, status: "done" as const } : fc
+                )
+              : undefined;
+            next[i] = {
+              ...next[i],
+              state: undefined,
+              todos: resolvedTodos,
+              fileChanges: resolvedFileChanges,
+            };
+            break;
+          }
+        }
+        return next;
+      });
+    }
+
+    fileChangesRef.current = [];
+    todosRef.current = [];
+
     setLoading(false);
     setAgentStatus("stopped");
+
+    // Compute a rough estimated token count from all message content
+    // so the usage footer shows meaningful metrics even when stopped mid-turn.
+    let contentLen = 0;
+    for (const m of messages) {
+      contentLen += (m.content?.length || 0) + (m.thought?.length || 0);
+    }
+    if (contentLen > 0) {
+      setAgentUsage({
+        estimatedTokens: Math.round(contentLen / 4),
+        contextLimit: agentUsage?.contextLimit ?? 128_000,
+        turns: totalTurnsRef.current,
+      });
+    }
+
     push({ role: "system", content: "Stopped." });
-  }, [push]);
+  }, [push, messages, agentUsage]);
 
   const insertHash = useCallback(() => {
     setInput((prev) => prev + "#");
@@ -2400,6 +2493,8 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
   }, [computeUnifiedDiff]);
 
   // ── Pending items for the input-area banner ──
+  const [pendingTodosFilter, setPendingTodosFilter] = useState<"all" | "main" | "sub">("all");
+
   const pendingTodos = useMemo(() => {
     // Only use the latest todos — when the agent calls write_todos again,
     // old messages still carry stale todo arrays. We want just the newest.
@@ -2413,6 +2508,24 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
     }
     return latestTodos;
   }, [messages]);
+
+  // Group pending todos by agent: main vs sub-agents
+  const { mainTodos, subTodos, filteredTodos } = useMemo(() => {
+    const main: typeof pendingTodos = [];
+    const sub: typeof pendingTodos = [];
+    for (const t of pendingTodos) {
+      if (!t.agentMarker || t.agentMarker === "main") {
+        main.push(t);
+      } else {
+        sub.push(t);
+      }
+    }
+    const filtered =
+      pendingTodosFilter === "all" ? pendingTodos :
+      pendingTodosFilter === "main" ? main :
+      sub;
+    return { mainTodos: main, subTodos: sub, filteredTodos: filtered };
+  }, [pendingTodos, pendingTodosFilter]);
 
   const unconfirmedFileChanges: { path: string; name: string; msgId: string }[] = useMemo(() => {
     const result: { path: string; name: string; msgId: string }[] = [];
@@ -3642,10 +3755,39 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
           {pendingTodos.length > 0 && (
             <details className="agent-pending-todos" open={showPendingBanner} onToggle={(e) => setShowPendingBanner((e.target as HTMLDetailsElement).open)}>
               <summary className="agent-pending-summary">
-                <i className="codicon codicon-checklist" /> {pendingTodos.length} pending task{pendingTodos.length > 1 ? "s" : ""}
+                <i className="codicon codicon-checklist" />
+                <span className="agent-pending-count">
+                  {filteredTodos.length}/{pendingTodos.length} pending task{pendingTodos.length > 1 ? "s" : ""}
+                </span>
+                {(mainTodos.length > 0 || subTodos.length > 0) && (
+                  <span className="agent-pending-filter-pills" onClick={(e) => e.preventDefault()}>
+                    <button
+                      className={`agent-pending-filter-pill${pendingTodosFilter === "all" ? " active" : ""}`}
+                      onClick={() => setPendingTodosFilter("all")}
+                    >
+                      All{mainTodos.length > 0 && subTodos.length > 0 ? ` ${pendingTodos.length}` : ""}
+                    </button>
+                    {mainTodos.length > 0 && (
+                      <button
+                        className={`agent-pending-filter-pill agent-pending-filter-pill-main${pendingTodosFilter === "main" ? " active" : ""}`}
+                        onClick={() => setPendingTodosFilter("main")}
+                      >
+                        Main{mainTodos.length ? ` ${mainTodos.length}` : ""}
+                      </button>
+                    )}
+                    {subTodos.length > 0 && (
+                      <button
+                        className={`agent-pending-filter-pill agent-pending-filter-pill-sub${pendingTodosFilter === "sub" ? " active" : ""}`}
+                        onClick={() => setPendingTodosFilter("sub")}
+                      >
+                        Sub{String.fromCodePoint(0x2192)} {subTodos.length}
+                      </button>
+                    )}
+                  </span>
+                )}
               </summary>
               <div className="agent-pending-list">
-                {pendingTodos.map((t) => (
+                {filteredTodos.map((t) => (
                   <div key={t.id} className={`agent-todo-item ${t.status}`}>
                     <i className={`codicon codicon-${t.status === "in_progress" ? "loading" : "circle-outline"}`} />
                     <span className="agent-todo-text">{t.text}</span>

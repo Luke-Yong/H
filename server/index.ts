@@ -2217,6 +2217,25 @@ app.use("/_browser", (req, res, next) => {
         proxyRes.setEncoding("utf8");
         proxyRes.on("data", (chunk: string) => { body += chunk; });
         proxyRes.on("end", () => {
+          // If the response body looks like JSON (some APIs return HTML content-type for JSON),
+          // render it with syntax highlighting instead of treating it as HTML.
+          const trimmed = body.trim();
+          if ((trimmed.startsWith("{") || trimmed.startsWith("[")) && trimmed.length < 5_000_000) {
+            try {
+              const parsed = JSON.parse(body);
+              const formatted = JSON.stringify(parsed, null, 2);
+              headers["content-type"] = "text/html; charset=utf-8";
+              const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#1e1e1e;color:#d4d4d4;font:13px/1.5 'Cascadia Code','Fira Code',Consolas,monospace;padding:16px;white-space:pre-wrap;word-break:break-word}
+.key{color:#8E9FFF}.str{color:#ce9178}.num{color:#b5cea8}.bool{color:#4D6BFE}.nil{color:#4D6BFE}.bracket{color:#ffd700}
+</style></head><body>${highlightJson(formatted)}</body></html>`;
+              res.writeHead(proxyRes.statusCode || 200, headers);
+              res.end(html);
+              return;
+            } catch { /* not valid JSON, fall through to HTML injection */ }
+          }
+          // Normal HTML response: inject base tag
           const baseTag = `<base href="${targetUrl.replace(/"/g, "&quot;")}">`;
           const injected = body.replace(/<head[^>]*>/i, (match) => match + baseTag);
           res.writeHead(proxyRes.statusCode || 200, headers);
@@ -2246,8 +2265,33 @@ body{background:#1e1e1e;color:#d4d4d4;font:13px/1.5 'Cascadia Code','Fira Code',
           }
         });
       } else {
-        res.writeHead(proxyRes.statusCode || 200, headers);
-        proxyRes.pipe(res);
+        // For unrecognized content types, sniff the body for JSON to avoid
+        // rendering raw JSON as plain text (which may appear as white screen if
+        // the content contains angle brackets interpreted as HTML tags).
+        const proxyHeaders = { ...headers };
+        let body = "";
+        proxyRes.setEncoding("utf8");
+        proxyRes.on("data", (chunk: string) => { body += chunk; });
+        proxyRes.on("end", () => {
+          const trimmed = body.trim();
+          if ((trimmed.startsWith("{") || trimmed.startsWith("[")) && trimmed.length < 5_000_000) {
+            try {
+              const parsed = JSON.parse(body);
+              const formatted = JSON.stringify(parsed, null, 2);
+              proxyHeaders["content-type"] = "text/html; charset=utf-8";
+              const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#1e1e1e;color:#d4d4d4;font:13px/1.5 'Cascadia Code','Fira Code',Consolas,monospace;padding:16px;white-space:pre-wrap;word-break:break-word}
+.key{color:#8E9FFF}.str{color:#ce9178}.num{color:#b5cea8}.bool{color:#4D6BFE}.nil{color:#4D6BFE}.bracket{color:#ffd700}
+</style></head><body>${highlightJson(formatted)}</body></html>`;
+              res.writeHead(proxyRes.statusCode || 200, proxyHeaders);
+              res.end(html);
+              return;
+            } catch { /* not valid JSON */ }
+          }
+          res.writeHead(proxyRes.statusCode || 200, proxyHeaders);
+          res.end(body);
+        });
       }
     }
   );

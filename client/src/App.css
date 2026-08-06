@@ -2280,6 +2280,27 @@ details[open] .agent-thought-summary::before { transform: rotate(90deg); }
 .agent-pending-todos[open] .agent-pending-summary::before { transform: rotate(90deg); }
 .agent-pending-summary:hover { color: var(--text); }
 
+.agent-pending-count { flex-shrink: 0; margin-right: 2px; }
+.agent-pending-filter-pills {
+  display: inline-flex; align-items: center; gap: 3px;
+  margin-left: 2px; flex-shrink: 0;
+}
+.agent-pending-filter-pill {
+  padding: 1px 6px; font-size: 10px; font-weight: 500;
+  cursor: pointer; border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 3px; background: transparent; color: var(--text-dim);
+  line-height: 1.4; transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.agent-pending-filter-pill:hover { color: var(--text); border-color: rgba(255,255,255,0.2); background: rgba(255,255,255,0.04); }
+.agent-pending-filter-pill.active {
+  color: var(--text); background: rgba(255,255,255,0.08);
+  border-color: rgba(255,255,255,0.15);
+}
+.agent-pending-filter-pill-main { border-color: rgba(0, 122, 204, 0.25); }
+.agent-pending-filter-pill-main.active { background: rgba(0, 122, 204, 0.12); border-color: rgba(0, 122, 204, 0.35); color: rgba(80, 180, 255, 0.9); }
+.agent-pending-filter-pill-sub { border-color: rgba(140, 100, 220, 0.25); }
+.agent-pending-filter-pill-sub.active { background: rgba(140, 100, 220, 0.12); border-color: rgba(140, 100, 220, 0.35); color: rgba(170, 130, 240, 0.9); }
+
 .agent-pending-list { padding: 2px 0 4px 16px; }
 .agent-pending-list .agent-todo-item { padding: 1px 0; }
 
