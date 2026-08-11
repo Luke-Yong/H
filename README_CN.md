@@ -1,7 +1,7 @@
 # H
 
 **AI 编程助手。** 27 个工具、11 种子 Agent 类型，基于 DeepSeek。  
-比 VS Code 少约 6 倍内存占用。
+内存占用约 VS Code 的 1/6，磁盘占用约 1/5。
 
 [English](README.md) · [完整架构 →](ARCHITECTURE_CN.md)
 
@@ -11,7 +11,8 @@
 
 | | H | VS Code OSS |
 |---|---|---|
-| **内存（空闲）** | ~60 MB | ~350–500 MB |
+| **RAM（空闲）** | ~200–300 MB | ~1–2 GB |
+| **磁盘占用** | ~200–300 MB | ~1–2 GB |
 | **AI 原生** | 内置 Agent 循环，27 个工具 | 仅扩展（Copilot、Continue） |
 | **Agent 类型** | 11 种专用子 Agent（浏览器、代码编写、研究、规划、安全审计、架构分析…） | 无内置 |
 | **浏览器** | 内置 Electron webview + DOM 索引 | 无 |
@@ -75,4 +76,4 @@ AGPL-3.0 — 详见 [LICENSE](LICENSE)。
 
 ---
 
-*~60 MB 空闲内存。Agent 优先。开源。*
+*~250 MB RAM，~250 MB 磁盘。Agent 优先。开源。*

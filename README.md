@@ -1,7 +1,7 @@
 # H
 
 **AI coding agent.** 27 tools, 11 sub-agent types, DeepSeek-powered.  
-~6× less memory than VS Code.
+~5× less RAM & disk than VS Code.
 
 [中文文档](README_CN.md) · [Full Architecture →](ARCHITECTURE.md)
 
@@ -11,7 +11,8 @@
 
 | | H | VS Code OSS |
 |---|---|---|
-| **Memory (idle)** | ~60 MB | ~350–500 MB |
+| **RAM (idle)** | ~200–300 MB | ~1–2 GB |
+| **Disk size** | ~200–300 MB | ~1–2 GB |
 | **AI-native** | Built-in agent loop with 27 tools | Extensions only (Copilot, Continue) |
 | **Agent types** | 11 specialized sub-agents (browser, code-writer, researcher, planner, security-auditor, architect…) | None built-in |
 | **Browser** | Built-in Electron webview + DOM indexing | None |
@@ -75,4 +76,4 @@ Copyright (c) 2026 Luke Yong.
 
 ---
 
-*~60 MB idle. Agent-first. Open source.*
+*~250 MB RAM, ~250 MB disk. Agent-first. Open source.*
