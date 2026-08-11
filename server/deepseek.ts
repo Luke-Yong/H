@@ -1,4 +1,4 @@
-import fs from "fs";
+﻿import fs from "fs";
 import path from "path";
 import { createHash } from "crypto";
 
@@ -134,60 +134,7 @@ async function deepseekFetch(
   return res;
 }
 
-// ── Debug: log outgoing messages to file ──
-let logSeq = 0;
-let lastCleanupDay = 0;
-
-function logOutgoing(label: string, messages: Array<any>, cacheCtx?: string) {
-  try {
-    const dir = path.resolve(process.cwd(), ".h-debug");
-    fs.mkdirSync(dir, { recursive: true });
-    // Cleanup files older than 7 days (run once per day max)
-    const now = Date.now();
-    const DAY_MS = 86_400_000;
-    const MAX_AGE = 7 * DAY_MS;
-    if (!lastCleanupDay || now - lastCleanupDay > DAY_MS) {
-      lastCleanupDay = now;
-      try {
-        const files = fs.readdirSync(dir);
-        let deleted = 0;
-        for (const f of files) {
-          const fp = path.join(dir, f);
-          try {
-            if (fs.statSync(fp).mtimeMs < now - MAX_AGE) { fs.unlinkSync(fp); deleted++; }
-          } catch {}
-        }
-        if (deleted > 0) console.log(`[debug] Cleaned up ${deleted} debug files older than 7 days.`);
-      } catch {}
-    }
-    const seq = String(++logSeq).padStart(3, "0");
-    const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-    const file = path.join(dir, `${ts}_${seq}_${label}.json`);
-    // Only include role, content, tool_calls, reasoning_content — strip noise
-    const compact = messages.map((m: any) => {
-      const out: any = { role: m.role };
-      if (m.content != null) out.content = typeof m.content === "string" ? m.content.slice(0, 200) : m.content;
-      if (m.tool_calls) out.tool_calls = m.tool_calls.map((tc: any) => ({ id: tc.id, fn: tc.function?.name, args: tc.function?.arguments?.slice(0, 200) }));
-      if (m.reasoning_content != null) out.reasoning_content = m.reasoning_content.slice(0, 200);
-      if (m.tool_call_id) out.tool_call_id = m.tool_call_id;
-      if (m.name) out.name = m.name;
-      return out;
-    });
-    // Also count which assistant messages have/miss reasoning_content
-    const ac = compact.filter((m: any) => m.role === "assistant" && m.tool_calls);
-    const missing = ac.filter((m: any) => m.reasoning_content == null);
-    const meta: any = { role: "_meta", assistantWithTools: ac.length, missingReasoning: missing.length };
-    if (cacheCtx) {
-      meta.cacheContextId = cacheCtx;
-      meta.cacheRequests = cacheRequestCount;
-      meta.cacheHits = cacheHitCount;
-    }
-    compact.push(meta);
-    fs.writeFileSync(file, JSON.stringify(compact, null, 2), "utf-8");
-  } catch (err) {
-    console.error("[h-debug] Failed to write debug log:", err instanceof Error ? err.message : String(err));
-  }
-}
+// ── Prefix cache tracking ──
 
 export async function chatDeepSeek(
   userMessage: string,
@@ -248,7 +195,6 @@ export async function chatDeepSeekTool(
 ): Promise<ToolCallResult> {
   const sysMsg = messages.find((m) => m.role === "system");
   const cacheCtx = computeCacheContextId(sysMsg?.content);
-  logOutgoing("tool", messages as any[], cacheCtx);
 
   const res = await deepseekFetch(opts?.apiKey || "", {
     model: opts?.model || "",
@@ -352,7 +298,6 @@ export async function* chatDeepSeekToolStream(
   // Compute cache context ID from the system message (prefix for DeepSeek's KV cache)
   const sysMsg = messages.find((m) => m.role === "system");
   const cacheCtx = computeCacheContextId(sysMsg?.content);
-  logOutgoing("stream", messages as any[], cacheCtx);
 
   const res = await deepseekFetch(opts.apiKey, {
     model: opts.model || "",

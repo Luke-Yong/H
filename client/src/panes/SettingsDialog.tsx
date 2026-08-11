@@ -193,9 +193,7 @@ function AboutTab() {
             <p>Deleting <code>~/.h/</code> removes all H data.</p>
             <h4>3. External Data Transmission</h4>
             <p>Project source code (files, file tree, prompts) is transmitted to DeepSeek's API (<code>api.deepseek.com</code>) as part of agent operations. No code is transmitted anywhere else.</p>
-            <h4>4. Debug Logging (Opt-in)</h4>
-            <p>Agent debug logs are stored locally at <code>&lt;project&gt;/.h-debug/</code> and auto-deleted after 7 days. This directory is <code>.gitignore</code>'d.</p>
-            <h4>5. Your Rights</h4>
+            <h4>4. Your Rights</h4>
             <p>All data resides on your machine. You can delete all data by removing the <code>~/.h/</code> directory. API keys can be removed at any time via Settings.</p>
           </div>
         )}
