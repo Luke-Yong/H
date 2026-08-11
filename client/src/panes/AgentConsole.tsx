@@ -96,7 +96,7 @@ function syncMid(messages: ConsoleMessage[]) {
   if (_mid <= maxId) _mid = maxId + 1;
 }
 
-const STORAGE_PREFIX = "harness-chat-threads";
+const STORAGE_PREFIX = "h-chat-threads";
 
 function storageKey(projectPath: string): string {
   // Normalize path to a stable key (replace backslashes, strip trailing slash)
@@ -123,10 +123,10 @@ function saveThreads(key: string, threads: ChatThread[]) {
 }
 
 function getStoredModel(): string {
-  try { return localStorage.getItem("harness-model") || ""; } catch { return ""; }
+  try { return localStorage.getItem("h-model") || ""; } catch { return ""; }
 }
 function getStoredThinking(): boolean {
-  try { return localStorage.getItem("harness-thinking") === "true"; } catch { return false; }
+  try { return localStorage.getItem("h-thinking") === "true"; } catch { return false; }
 }
 
 // ── Props ──
@@ -394,17 +394,17 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
     thinking: boolean;
   }
   function getStoredPresets(): ModelPreset[] {
-    try { return JSON.parse(localStorage.getItem("harness-presets") || "[]"); } catch { return []; }
+    try { return JSON.parse(localStorage.getItem("h-presets") || "[]"); } catch { return []; }
   }
   function saveStoredPresets(ps: ModelPreset[]) {
-    localStorage.setItem("harness-presets", JSON.stringify(ps));
+    localStorage.setItem("h-presets", JSON.stringify(ps));
   }
 
   const storedPresets = useMemo(() => getStoredPresets(), []);
   const [presets, setPresets] = useState<ModelPreset[]>(storedPresets);
   // Active preset id (null = custom un-saved config)
   const [activePresetId, setActivePresetId] = useState<string>(() => {
-    try { return localStorage.getItem("harness-active-preset") || ""; } catch { return ""; }
+    try { return localStorage.getItem("h-active-preset") || ""; } catch { return ""; }
   });
   const activePreset = useMemo(() => presets.find((p) => p.id === activePresetId) || null, [presets, activePresetId]);
 
@@ -427,20 +427,20 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
   // Listen for localStorage changes from other windows (e.g. settings window)
   useEffect(() => {
     const handleStorage = (e: StorageEvent) => {
-      if (e.key === "harness-presets") {
+      if (e.key === "h-presets") {
         setPresets(getStoredPresets());
-      } else if (e.key === "harness-active-preset") {
-        const newId = localStorage.getItem("harness-active-preset") || "";
+      } else if (e.key === "h-active-preset") {
+        const newId = localStorage.getItem("h-active-preset") || "";
         setActivePresetId(newId);
         if (!newId) {
           setSelectedModel(getStoredModel());
           setIsThinking(getStoredThinking());
         }
-      } else if (e.key === "harness-model") {
+      } else if (e.key === "h-model") {
         if (!activePresetId) setSelectedModel(getStoredModel());
-      } else if (e.key === "harness-thinking") {
+      } else if (e.key === "h-thinking") {
         if (!activePresetId) setIsThinking(getStoredThinking());
-      } else if (e.key === "harness-api-key-changed") {
+      } else if (e.key === "h-api-key-changed") {
         void refreshAgentConfig();
       }
     };
@@ -473,7 +473,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
   }, []);
 
   useEffect(() => {
-    try { localStorage.removeItem("harness-api-key"); } catch {}
+    try { localStorage.removeItem("h-api-key"); } catch {}
     void refreshAgentConfig();
   }, [refreshAgentConfig]);
 
@@ -541,7 +541,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
       const next = [...filtered, p];
       setPresets(next); saveStoredPresets(next);
       setActivePresetId(p.id);
-      localStorage.setItem("harness-active-preset", p.id);
+      localStorage.setItem("h-active-preset", p.id);
     }
     setModelPickerOpen(false);
   }, [activePreset, editIsThinking, editModelInput, presets]);
@@ -553,7 +553,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
     const next = [...filtered, p];
     setPresets(next); saveStoredPresets(next);
     setActivePresetId(p.id);
-    localStorage.setItem("harness-active-preset", p.id);
+    localStorage.setItem("h-active-preset", p.id);
     setModelPickerOpen(false);
   }, [editIsThinking, editModelInput, presets]);
 
@@ -562,7 +562,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
     setPresets(next); saveStoredPresets(next);
     if (activePresetId === id) {
       setActivePresetId("");
-      localStorage.removeItem("harness-active-preset");
+      localStorage.removeItem("h-active-preset");
     }
   }, [presets, activePresetId]);
 
@@ -570,7 +570,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
     const p = presets.find((x) => x.id === id);
     if (p) {
       setActivePresetId(id);
-      localStorage.setItem("harness-active-preset", id);
+      localStorage.setItem("h-active-preset", id);
       setSelectedModel(p.model);
       setIsThinking(p.thinking);
       setEditIsThinking(p.thinking);
@@ -586,9 +586,9 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
   const saveModelAndClose = useCallback(() => {
     const id = editModelInput.trim();
     setSelectedModel(id);
-    localStorage.setItem("harness-model", id);
+    localStorage.setItem("h-model", id);
     setIsThinking(editIsThinking);
-    localStorage.setItem("harness-thinking", String(editIsThinking));
+    localStorage.setItem("h-thinking", String(editIsThinking));
     setModelPickerOpen(false);
   }, [editModelInput, editIsThinking]);
 
@@ -3828,7 +3828,7 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
         {/* ── Model selector ── */}
         <div className="agent-model-bar">
           <div className="agent-model-selector" ref={modelPickerRef}>
-            <button className="agent-model-btn" onClick={() => { setModelPickerOpen((v) => { if (!v) { setEditingModel(false); setEditingApiKey(false); setPresets(getStoredPresets()); const aid = localStorage.getItem("harness-active-preset") || ""; if (aid) setActivePresetId(aid); else { setSelectedModel(getStoredModel()); setIsThinking(getStoredThinking()); } } return !v; }); void refreshAgentConfig(); }} title={apiKeyConfigured ? "Configure model" : "Add an API key to start chatting"}>
+            <button className="agent-model-btn" onClick={() => { setModelPickerOpen((v) => { if (!v) { setEditingModel(false); setEditingApiKey(false); setPresets(getStoredPresets()); const aid = localStorage.getItem("h-active-preset") || ""; if (aid) setActivePresetId(aid); else { setSelectedModel(getStoredModel()); setIsThinking(getStoredThinking()); } } return !v; }); void refreshAgentConfig(); }} title={apiKeyConfigured ? "Configure model" : "Add an API key to start chatting"}>
               {!configChecked ? (
                 <span style={{color: "#888"}}>Checking...</span>
               ) : !apiKeyConfigured ? (

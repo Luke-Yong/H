@@ -1,5 +1,5 @@
-// ── Harness MCP Server ──
-// Implements the Model Context Protocol (MCP) to expose Harness tools
+// ── H MCP Server ──
+// Implements the Model Context Protocol (MCP) to expose H tools
 // to MCP-compatible clients (Claude Desktop, Cursor, etc.).
 //
 // Supports both stdio transport (for standalone operation) and SSE transport
@@ -90,12 +90,12 @@ function getLineEnding(cwd: string): Promise<"\r\n" | "\n"> {
   });
 }
 
-export class HarnessMcpServer extends EventEmitter {
+export class HMcpServer extends EventEmitter {
   private initialized = false;
   private clientCapabilities: Record<string, unknown> = {};
   private projectRoot: string;
   public readonly serverInfo: ServerInfo = {
-    name: "harness",
+    name: "h",
     version: "1.0.0",
   };
 
@@ -722,7 +722,7 @@ export class HarnessMcpServer extends EventEmitter {
 
 // ── Stdio Transport ──
 
-export function runStdioServer(server: HarnessMcpServer) {
+export function runStdioServer(server: HMcpServer) {
   let buffer = "";
 
   process.stdin.setEncoding("utf-8");
@@ -771,7 +771,7 @@ export function runStdioServer(server: HarnessMcpServer) {
 // For integrating MCP into the existing Express server.
 
 export function handleMcpSseRequest(
-  server: HarnessMcpServer,
+  server: HMcpServer,
   reqBody: JsonRpcRequest,
 ): Promise<JsonRpcResponse | null> {
   return server.handleMessage(reqBody);

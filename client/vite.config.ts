@@ -7,7 +7,7 @@ import http from "http";
 import type { IncomingMessage, ServerResponse } from "http";
 import type { ViteDevServer } from "vite";
 
-const PORTS_DIR = path.join(os.tmpdir(), "harness-ports");
+const PORTS_DIR = path.join(os.tmpdir(), "h-ports");
 const EXPRESS_PORT_FILE = path.join(PORTS_DIR, "express-port");
 const VITE_PORT_FILE = path.join(PORTS_DIR, "vite-port");
 
@@ -81,9 +81,9 @@ function proxyRequest(req: IncomingMessage, res: ServerResponse) {
   req.pipe(proxyReq);
 }
 
-function harnessProxyPlugin() {
+function hProxyPlugin() {
   return {
-    name: "harness-proxy",
+    name: "h-proxy",
     configureServer(server: ViteDevServer) {
       // HTTP proxy for /api and /_browser — use req.url directly
       // (Connect's use("/api", ...) strips the prefix, breaking forwarding)
@@ -143,7 +143,7 @@ function harnessProxyPlugin() {
 
 function writeVitePortPlugin() {
   return {
-    name: "harness-write-vite-port",
+    name: "h-write-vite-port",
     configureServer(server: ViteDevServer) {
       server.httpServer?.once("listening", () => {
         try {
@@ -158,5 +158,5 @@ function writeVitePortPlugin() {
 }
 
 export default defineConfig({
-  plugins: [react(), harnessProxyPlugin(), writeVitePortPlugin()],
+  plugins: [react(), hProxyPlugin(), writeVitePortPlugin()],
 });

@@ -98,18 +98,18 @@ const VIEWPORT_PRESETS: ViewportPreset[] = [
 ];
 
 const DOM_INDEXING_HELPERS = String.raw`
-const HARNESS_BUCKET_ORDER = ['TL', 'TC', 'TR', 'ML', 'MC', 'MR', 'BL', 'BC', 'BR'];
-const harnessNormalizeText = (value, maxLen) => {
+const H_BUCKET_ORDER = ['TL', 'TC', 'TR', 'ML', 'MC', 'MR', 'BL', 'BC', 'BR'];
+const hNormalizeText = (value, maxLen) => {
   const text = String(value || '').replace(/\s+/g, ' ').trim();
   if (!text) return '';
   return typeof maxLen === 'number' && maxLen > 0 && text.length > maxLen ? text.slice(0, maxLen) : text;
 };
-const harnessQuoteText = (value, maxLen) => '"' + harnessNormalizeText(value, maxLen).replace(/"/g, "'") + '"';
-const harnessInViewport = (r, vw, vh) => !(r.width <= 0 || r.height <= 0 || r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw);
-const harnessIsCollapsed = (el) => {
+const hQuoteText = (value, maxLen) => '"' + hNormalizeText(value, maxLen).replace(/"/g, "'") + '"';
+const hInViewport = (r, vw, vh) => !(r.width <= 0 || r.height <= 0 || r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw);
+const hIsCollapsed = (el) => {
   if (!el || el.nodeType !== 1) return true;
   if (el.hasAttribute('hidden') || el.getAttribute('aria-hidden') === 'true' || el.hasAttribute('inert')) return true;
-  if (el.getAttribute('aria-expanded') === 'false' && !harnessPrimaryLabel(el)) return true;
+  if (el.getAttribute('aria-expanded') === 'false' && !hPrimaryLabel(el)) return true;
   let cur = el;
   while (cur && cur !== document.body && cur !== document.documentElement) {
     if (cur.hasAttribute && (cur.hasAttribute('hidden') || cur.getAttribute('aria-hidden') === 'true' || cur.hasAttribute('inert'))) return true;
@@ -133,7 +133,7 @@ const harnessIsCollapsed = (el) => {
   }
   return false;
 };
-const harnessSamplePoints = (r, vw, vh) => {
+const hSamplePoints = (r, vw, vh) => {
   const padX = Math.max(1, Math.min(6, r.width / 4));
   const padY = Math.max(1, Math.min(6, r.height / 4));
   const clampX = (v) => Math.max(0, Math.min(v, Math.max(0, vw - 1)));
@@ -146,9 +146,9 @@ const harnessSamplePoints = (r, vw, vh) => {
     [clampX(r.right - padX), clampY(r.bottom - padY)],
   ];
 };
-const harnessIsOccluded = (el, r, vw, vh) => {
+const hIsOccluded = (el, r, vw, vh) => {
   if (r.width < 2 || r.height < 2) return true;
-  const samples = harnessSamplePoints(r, vw, vh);
+  const samples = hSamplePoints(r, vw, vh);
   let visibleHits = 0;
   for (let i = 0; i < samples.length; i++) {
     const pt = samples[i];
@@ -161,7 +161,7 @@ const harnessIsOccluded = (el, r, vw, vh) => {
   }
   return true;
 };
-const harnessPosKey = (r, vw, vh) => {
+const hPosKey = (r, vw, vh) => {
   const cx = r.left + r.width / 2;
   const cy = r.top + r.height / 2;
   const ry = cy / Math.max(vh, 1);
@@ -170,11 +170,11 @@ const harnessPosKey = (r, vw, vh) => {
   const col = rx < 0.33 ? 'L' : (rx < 0.66 ? 'C' : 'R');
   return row + col;
 };
-const harnessPrimaryLabel = (el) => {
+const hPrimaryLabel = (el) => {
   const tag = el.tagName.toLowerCase();
   const candidates = [];
   const push = (value) => {
-    const text = harnessNormalizeText(value, 80);
+    const text = hNormalizeText(value, 80);
     if (text) candidates.push(text);
   };
   push(el.getAttribute('aria-label'));
@@ -211,7 +211,7 @@ const harnessPrimaryLabel = (el) => {
   }
   return candidates[0] || '';
 };
-const harnessAncestorContext = (el) => {
+const hAncestorContext = (el) => {
   const parts = [];
   let cur = el.parentElement;
   let depth = 0;
@@ -228,20 +228,20 @@ const harnessAncestorContext = (el) => {
     const interestingRole = /^(dialog|form|navigation|main|region|complementary|banner|tabpanel|tablist|listbox|menu|grid|row|toolbar|list|listitem)$/i.test(role);
     const interestingClass = /(modal|dialog|drawer|panel|card|form|menu|nav|toolbar|sidebar|content|table|row|list|grid|section)/i.test(marker);
     if (interestingTag || interestingRole || interestingClass || cur.getAttribute('aria-label')) {
-      const label = harnessPrimaryLabel(cur);
-      parts.push((tag + id + classPart) + (label ? ' ' + harnessQuoteText(label, 50) : ''));
+      const label = hPrimaryLabel(cur);
+      parts.push((tag + id + classPart) + (label ? ' ' + hQuoteText(label, 50) : ''));
     }
     cur = cur.parentElement;
     depth++;
   }
   return parts.join(' <= ');
 };
-const harnessActionableRank = (el) => {
+const hActionableRank = (el) => {
   const tag = el.tagName.toLowerCase();
   const role = (el.getAttribute('role') || '').toLowerCase();
   if (el.disabled || el.getAttribute('aria-disabled') === 'true') return -1;
   if (tag === 'input' && String(el.type || '').toLowerCase() === 'hidden') return -1;
-  if (harnessIsCollapsed(el)) return -1;
+  if (hIsCollapsed(el)) return -1;
   try {
     const cs = window.getComputedStyle(el);
     if (cs.display === 'none' || cs.visibility === 'hidden' || cs.pointerEvents === 'none') return -1;
@@ -249,7 +249,7 @@ const harnessActionableRank = (el) => {
   let rank = 0;
   if (tag === 'button' || tag === 'select' || tag === 'textarea' || tag === 'summary') rank = 6;
   else if (tag === 'input') rank = 6;
-  else if (tag === 'a' && (el.href || harnessPrimaryLabel(el))) rank = 5;
+  else if (tag === 'a' && (el.href || hPrimaryLabel(el))) rank = 5;
   else if (tag === 'label' && (el.getAttribute('for') || el.control)) rank = 5;
   else if (/^(button|link|tab|menuitem|option|checkbox|radio|switch|textbox|combobox|listbox|slider|spinbutton)$/.test(role)) rank = 5;
   else if (el.getAttribute('contenteditable') === '' || el.getAttribute('contenteditable') === 'true') rank = 5;
@@ -262,7 +262,7 @@ const harnessActionableRank = (el) => {
   } catch (_) {}
   return rank;
 };
-const harnessShouldInclude = (el, actionable, label) => {
+const hShouldInclude = (el, actionable, label) => {
   if (actionable) return true;
   const tag = el.tagName.toLowerCase();
   const role = el.getAttribute('role');
@@ -278,7 +278,7 @@ const harnessShouldInclude = (el, actionable, label) => {
 //   NN|tag#id[type] "label" FLAGS x,y:WxH ^ctx
 // FLAGS (space-separated, alphabetically ordered):
 //   A=clickable A+=interactive checked disabled readonly required
-const harnessBuildFlags = (el, actionableRank) => {
+const hBuildFlags = (el, actionableRank) => {
   const flags = [];
   if (actionableRank >= 6) flags.push('A+');
   else if (actionableRank > 0) flags.push('A');
@@ -294,7 +294,7 @@ const harnessBuildFlags = (el, actionableRank) => {
   }
   return flags.join(' ');
 };
-const harnessBuildGridLine = (item, index) => {
+const hBuildGridLine = (item, index) => {
   const el = item.el;
   const r = item.r;
   const tag = el.tagName.toLowerCase();
@@ -304,8 +304,8 @@ const harnessBuildGridLine = (item, index) => {
     const itype = (el.type || 'text').toLowerCase();
     tagPart = tag + idPart + '[' + itype + ']';
   }
-  const labelPart = harnessQuoteText(item.label || '', 72);
-  const flagsPart = harnessBuildFlags(el, item.actionableRank);
+  const labelPart = hQuoteText(item.label || '', 72);
+  const flagsPart = hBuildFlags(el, item.actionableRank);
   const x = Math.round(r.left);
   const y = Math.round(r.top);
   const w = Math.round(r.width);
@@ -317,18 +317,18 @@ const harnessBuildGridLine = (item, index) => {
   const pad = idxStr.length < 3 ? ' '.repeat(3 - idxStr.length) : '';
   return pad + idxStr + '|' + tagPart + ' ' + labelPart + (flagsPart ? ' ' + flagsPart : '') + ' ' + posPart + ctxPart;
 };
-const harnessBuildGrid = (items, vw, vh) => {
+const hBuildGrid = (items, vw, vh) => {
   const buckets = Object.create(null);
-  for (let i = 0; i < HARNESS_BUCKET_ORDER.length; i++) buckets[HARNESS_BUCKET_ORDER[i]] = [];
+  for (let i = 0; i < H_BUCKET_ORDER.length; i++) buckets[H_BUCKET_ORDER[i]] = [];
   for (let i = 0; i < items.length; i++) {
     const it = items[i];
-    buckets[it.pk].push(harnessBuildGridLine(it, i));
+    buckets[it.pk].push(hBuildGridLine(it, i));
   }
   const lines = [];
   lines.push('V:' + vw + 'x' + vh);
   lines.push('---');
-  for (let i = 0; i < HARNESS_BUCKET_ORDER.length; i++) {
-    const k = HARNESS_BUCKET_ORDER[i];
+  for (let i = 0; i < H_BUCKET_ORDER.length; i++) {
+    const k = H_BUCKET_ORDER[i];
     const arr = buckets[k];
     if (!arr || arr.length === 0) continue;
     lines.push(k + '|' + arr.length);
@@ -339,14 +339,14 @@ const harnessBuildGrid = (items, vw, vh) => {
 // When the viewport is dense, split into horizontal bands so the agent
 // works one region at a time instead of drowning in a flat list.
 // Each band is a self-contained position-grid with its own bucket headers.
-const harnessBuildRegionalGrid = (items, vw, vh) => {
+const hBuildRegionalGrid = (items, vw, vh) => {
   // Split into 2 bands if >400 elements, 3 bands if >800, 4 if >1200
   let numBands = 1;
   if (items.length > 1200) numBands = 4;
   else if (items.length > 800) numBands = 3;
   else if (items.length > 400) numBands = 2;
 
-  if (numBands === 1) return harnessBuildGrid(items, vw, vh);
+  if (numBands === 1) return hBuildGrid(items, vw, vh);
 
   const bandH = vh / numBands;
   const bands = [];
@@ -371,13 +371,13 @@ const harnessBuildRegionalGrid = (items, vw, vh) => {
     if (band.items.length === 0) continue;
     lines.push('--- Band ' + (b + 1) + '/' + numBands + ' (y:' + band.y0 + '-' + band.y1 + ', ' + band.items.length + ' elems) ---');
     const buckets = Object.create(null);
-    for (let i = 0; i < HARNESS_BUCKET_ORDER.length; i++) buckets[HARNESS_BUCKET_ORDER[i]] = [];
+    for (let i = 0; i < H_BUCKET_ORDER.length; i++) buckets[H_BUCKET_ORDER[i]] = [];
     for (let j = 0; j < band.items.length; j++) {
       const it = band.items[j];
-      buckets[it.pk].push(harnessBuildGridLine(it, it.idx));
+      buckets[it.pk].push(hBuildGridLine(it, it.idx));
     }
-    for (let i = 0; i < HARNESS_BUCKET_ORDER.length; i++) {
-      const k = HARNESS_BUCKET_ORDER[i];
+    for (let i = 0; i < H_BUCKET_ORDER.length; i++) {
+      const k = H_BUCKET_ORDER[i];
       const arr = buckets[k];
       if (!arr || arr.length === 0) continue;
       lines.push(k + '|' + arr.length);
@@ -386,7 +386,7 @@ const harnessBuildRegionalGrid = (items, vw, vh) => {
   }
   return lines.join('\\n');
 };
-const harnessCollectItems = (options) => {
+const hCollectItems = (options) => {
   const opts = options || {};
   const vw = window.innerWidth;
   const vh = window.innerHeight;
@@ -399,22 +399,22 @@ const harnessCollectItems = (options) => {
   while ((el = w.nextNode())) {
     if (maxItems > 0 && items.length >= maxItems) break;
     const r = el.getBoundingClientRect();
-    if (!harnessInViewport(r, vw, vh)) {
+    if (!hInViewport(r, vw, vh)) {
       domIdx++;
       continue;
     }
-    if (harnessIsCollapsed(el) || harnessIsOccluded(el, r, vw, vh)) {
+    if (hIsCollapsed(el) || hIsOccluded(el, r, vw, vh)) {
       domIdx++;
       continue;
     }
-    const actionableRank = harnessActionableRank(el);
+    const actionableRank = hActionableRank(el);
     const actionable = actionableRank > 0;
-    const label = harnessPrimaryLabel(el);
+    const label = hPrimaryLabel(el);
     if (actionableOnly && !actionable) {
       domIdx++;
       continue;
     }
-    if (!harnessShouldInclude(el, actionable, label)) {
+    if (!hShouldInclude(el, actionable, label)) {
       domIdx++;
       continue;
     }
@@ -424,9 +424,9 @@ const harnessCollectItems = (options) => {
       domIdx,
       actionable,
       actionableRank,
-      pk: harnessPosKey(r, vw, vh),
+      pk: hPosKey(r, vw, vh),
       label,
-      ancestor: harnessAncestorContext(el),
+      ancestor: hAncestorContext(el),
     });
     domIdx++;
   }
@@ -442,7 +442,7 @@ const harnessCollectItems = (options) => {
   });
   // Stamp each item with its global index so banded grids use stable, clickable indices
   for (let i = 0; i < items.length; i++) items[i].idx = i;
-  return { vw, vh, bucketOrder: HARNESS_BUCKET_ORDER, items };
+  return { vw, vh, bucketOrder: H_BUCKET_ORDER, items };
 };
 `;
 
@@ -510,7 +510,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   onConsoleEntry,
   onOpenDevtools,
 }: Props, ref) {
-  const isDesktop = !!window.harnessDesktop?.isDesktop;
+  const isDesktop = !!window.hDesktop?.isDesktop;
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const webviewRef = useRef<BrowserGuest | null>(null);
   const webviewReadyRef = useRef(false);
@@ -692,7 +692,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     if (!iframe) return;
     iframe.addEventListener("load", syncIframeState);
     // Poll: sync URL/title + attempt early injection (before load event fires)
-    // injectIntoIframe has __harnessPatched guard so repeated calls are safe
+    // injectIntoIframe has __hPatched guard so repeated calls are safe
     const poll = setInterval(() => {
       syncIframeState();
       try { if (iframe.contentDocument?.body) injectIntoIframeRef.current?.(iframe); } catch {}
@@ -723,8 +723,8 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
       // Layer 3: click capture — detect <a> navigation
       const win = iframe.contentWindow as any;
       if (!win) return;
-      if (!win.__harnessPatched) {
-        win.__harnessPatched = true;
+      if (!win.__hPatched) {
+        win.__hPatched = true;
         const patch = (orig: Function) => function(this: any, ...args: any[]) {
           orig.apply(this, args as any);
           syncIframeStateRef.current();
@@ -768,9 +768,9 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
         }, true);
 
         // Console capture — intercept console.log/warn/error/info and post to parent
-        if (!win.__harnessConsolePatched) {
-          win.__harnessConsolePatched = true;
-          win.__harnessConsoleEntries = [];
+        if (!win.__hConsolePatched) {
+          win.__hConsolePatched = true;
+          win.__hConsoleEntries = [];
 
           // Robust object serializer for console output (injected into iframe)
       const serialize = function(v: unknown, depth: number, seen: WeakSet<object>): string {
@@ -830,17 +830,17 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
       };
 
       const postEntry = function(level: string, text: string) {
-        win.__harnessConsoleEntries.push({ level, text, time: Date.now() });
-        if (win.__harnessConsoleEntries.length > 500) win.__harnessConsoleEntries.shift();
+        win.__hConsoleEntries.push({ level, text, time: Date.now() });
+        if (win.__hConsoleEntries.length > 500) win.__hConsoleEntries.shift();
         if (text.length > 2000) {
           let remaining = text, chunk = 0;
           while (remaining) {
-            window.postMessage({ __harness: true, type: "console", level: level, text: remaining.substring(0, 2000), time: Date.now() }, "*");
+            window.postMessage({ __h: true, type: "console", level: level, text: remaining.substring(0, 2000), time: Date.now() }, "*");
             remaining = remaining.substring(2000); chunk++;
-            if (chunk > 5) { window.postMessage({ __harness: true, type: "console", level: level, text: "...[truncated]", time: Date.now() }, "*"); break; }
+            if (chunk > 5) { window.postMessage({ __h: true, type: "console", level: level, text: "...[truncated]", time: Date.now() }, "*"); break; }
           }
         } else {
-          window.postMessage({ __harness: true, type: "console", level: level, text: text, time: Date.now() }, "*");
+          window.postMessage({ __h: true, type: "console", level: level, text: text, time: Date.now() }, "*");
         }
       };
 
@@ -861,7 +861,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
           const origOnerror = win.onerror;
           win.onerror = function (msg: string, source?: string, line?: number, col?: number) {
             window.postMessage({
-              __harness: true,
+              __h: true,
               type: "console",
               level: "error",
               text: `${msg}${source ? ` (${source}:${line}:${col})` : ""}`,
@@ -872,41 +872,41 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
           };
 
           // Intercept alert/confirm/prompt — log to console instead of blocking
-          win.__harnessDialog = { lastText: "", lastResult: false };
+          win.__hDialog = { lastText: "", lastResult: false };
           const origAlert = win.alert;
           win.alert = function(msg: any) {
-            win.__harnessDialog.lastText = String(msg);
+            win.__hDialog.lastText = String(msg);
             postEntry("dialog", "[ALERT] " + String(msg));
           };
           const origConfirm = win.confirm;
           win.confirm = function(msg: any) {
-            win.__harnessDialog.lastText = String(msg);
-            win.__harnessDialog.lastResult = false;
+            win.__hDialog.lastText = String(msg);
+            win.__hDialog.lastResult = false;
             postEntry("dialog", "[CONFIRM] " + String(msg) + " → auto-dismissed as Cancel");
             return false;
           };
           const origPrompt = win.prompt;
           win.prompt = function(msg: any, def?: string) {
-            win.__harnessDialog.lastText = String(msg);
+            win.__hDialog.lastText = String(msg);
             postEntry("dialog", "[PROMPT] " + String(msg) + " → auto-dismissed (default: " + (def || "") + ")");
             return def || "";
           };
 
           // PerformanceObserver: capture failed network requests (4xx/5xx/CORS)
-          win.__harnessRequestErrors = [];
+          win.__hRequestErrors = [];
           try {
             const obs = new (win.PerformanceObserver)((list: any) => {
               for (const entry of list.getEntries()) {
                 const e = entry as any;
                 if (e.responseStatus && (e.responseStatus >= 400 || e.responseStatus === 0)) {
-                  win.__harnessRequestErrors.push({
+                  win.__hRequestErrors.push({
                     url: e.name,
                     method: 'fetch',
                     status: e.responseStatus,
                     type: e.initiatorType,
                     time: Date.now(),
                   });
-                  if (win.__harnessRequestErrors.length > 200) win.__harnessRequestErrors.shift();
+                  if (win.__hRequestErrors.length > 200) win.__hRequestErrors.shift();
                 }
               }
             });
@@ -918,25 +918,25 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
           win.fetch = function(...args: any[]) {
             return origFetch.apply(win, args).then(function(r: Response) {
               if (!r.ok) {
-                win.__harnessRequestErrors.push({
+                win.__hRequestErrors.push({
                   url: typeof args[0] === 'string' ? args[0] : (args[0].url || 'unknown'),
                   method: (args[0].method || 'GET').toUpperCase(),
                   status: r.status,
                   type: 'fetch',
                   time: Date.now(),
                 });
-                if (win.__harnessRequestErrors.length > 200) win.__harnessRequestErrors.shift();
+                if (win.__hRequestErrors.length > 200) win.__hRequestErrors.shift();
               }
               return r;
             }, function(err: any) {
-              win.__harnessRequestErrors.push({
+              win.__hRequestErrors.push({
                 url: typeof args[0] === 'string' ? args[0] : (args[0]?.url || 'unknown'),
                 method: (args[0]?.method || 'GET').toUpperCase(),
                 status: 0,
                 type: 'fetch-error',
                 time: Date.now(),
               });
-              if (win.__harnessRequestErrors.length > 200) win.__harnessRequestErrors.shift();
+              if (win.__hRequestErrors.length > 200) win.__hRequestErrors.shift();
               throw err;
             }) as any;
           };
@@ -976,10 +976,10 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
             }
           };
           walk(d.body, "");
-          window.postMessage({ __harness: true, type: "domTree", nodes }, "*");
+          window.postMessage({ __h: true, type: "domTree", nodes }, "*");
           const w = (iframe as HTMLIFrameElement).contentWindow as any;
-          if (w && !w.__harnessHighlight) {
-            w.__harnessHighlight = (targetUid: string) => {
+          if (w && !w.__hHighlight) {
+            w.__hHighlight = (targetUid: string) => {
               try {
                 const el = d.querySelector('[data-__huid="' + targetUid.replace(/"/g, '\\"') + '"]');
                 if (el) {
@@ -1058,7 +1058,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   // Listen for console/element messages from iframe (only from active tab)
   useEffect(() => {
     const handler = (e: MessageEvent) => {
-      if (!e.data || !e.data.__harness) return;
+      if (!e.data || !e.data.__h) return;
       // Only accept messages from the active tab's iframe or from our own window
       if (!isDesktop && e.data.type !== "requestRefresh" && e.data.type !== "toggle-inspect" && e.data.type !== "highlight" && e.data.type !== "domTree") {
         const activeWin = iframeRef.current?.contentWindow;
@@ -1074,64 +1074,64 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
         };
         onConsoleEntryRef.current?.(tabIdRef.current, entry);
       } else if (e.data.type === "domTree") {
-        window.postMessage({ __harnessDevtools: true, type: "domTree", nodes: e.data.nodes }, "*");
+        window.postMessage({ __hDevtools: true, type: "domTree", nodes: e.data.nodes }, "*");
       } else if (e.data.type === "hoverNode") {
-        window.postMessage({ __harnessDevtools: true, type: "hoverNode", uid: e.data.uid }, "*");
+        window.postMessage({ __hDevtools: true, type: "hoverNode", uid: e.data.uid }, "*");
       } else if (e.data.type === "inspectNode") {
-        window.postMessage({ __harnessDevtools: true, type: "inspectNode", uid: e.data.uid }, "*");
+        window.postMessage({ __hDevtools: true, type: "inspectNode", uid: e.data.uid }, "*");
       } else if (e.data.type === "highlight") {
         if (isDesktop) {
           const view = webviewRef.current;
           if (view) {
-            void view.executeJavaScript?.("window.__harnessHighlight?.('"+String(e.data.uid).replace(/'/g,"\\'")+"')", false).catch(() => {});
+            void view.executeJavaScript?.("window.__hHighlight?.('"+String(e.data.uid).replace(/'/g,"\\'")+"')", false).catch(() => {});
           }
         } else if (iframeRef.current?.contentWindow) {
-          (iframeRef.current.contentWindow as any).__harnessHighlight?.(e.data.uid);
+          (iframeRef.current.contentWindow as any).__hHighlight?.(e.data.uid);
         }
       } else if (e.data.type === "toggle-inspect") {
         setInspectMode(!!e.data.active);
         // Sync inspect state to TerminalPane
-        window.postMessage({ __harnessDevtools: true, type: "inspectState", active: !!e.data.active }, "*");
+        window.postMessage({ __hDevtools: true, type: "inspectState", active: !!e.data.active }, "*");
         if (isDesktop) {
           const view = webviewRef.current;
           if (view) {
             if (e.data.active) {
               void view.executeJavaScript?.(`
-                window.__harnessInspectorActive=true;
+                window.__hInspectorActive=true;
                 (function(){
-                  var s=document.createElement('style');s.id='__harness_inspect_style';
+                  var s=document.createElement('style');s.id='__h_inspect_style';
                   s.textContent='*{cursor:default!important}a,button,input,select,textarea,[onclick]{pointer-events:auto!important}';
                   document.head.appendChild(s);
-                  function block(ev){if(window.__harnessInspectorActive){ev.preventDefault();ev.stopPropagation()}}
+                  function block(ev){if(window.__hInspectorActive){ev.preventDefault();ev.stopPropagation()}}
                   ['mousedown','mouseup','keydown','keypress','submit','focus','auxclick','dblclick','contextmenu'].forEach(function(n){document.addEventListener(n,block,true)});
-                  window.__harnessInspectBlocker=block;
+                  window.__hInspectBlocker=block;
                 })()
               `, false).catch(() => {});
             } else {
               void view.executeJavaScript?.(`
-                window.__harnessInspectorActive=false;
-                var l=window.__harnessLastEl;if(l&&l.style){l.style.outline=''}window.__harnessLastEl=null;
-                var ib=document.getElementById('__harness_inspector_info');if(ib)ib.style.display='none';
-                var ss=document.getElementById('__harness_inspect_style');if(ss)ss.remove();
-                if(window.__harnessInspectBlocker){
-                  var b=window.__harnessInspectBlocker;
+                window.__hInspectorActive=false;
+                var l=window.__hLastEl;if(l&&l.style){l.style.outline=''}window.__hLastEl=null;
+                var ib=document.getElementById('__h_inspector_info');if(ib)ib.style.display='none';
+                var ss=document.getElementById('__h_inspect_style');if(ss)ss.remove();
+                if(window.__hInspectBlocker){
+                  var b=window.__hInspectBlocker;
                   ['mousedown','mouseup','keydown','keypress','submit','focus','auxclick','dblclick','contextmenu'].forEach(function(n){document.removeEventListener(n,b,true)});
-                  delete window.__harnessInspectBlocker;
+                  delete window.__hInspectBlocker;
                 }
               `, false).catch(() => {});
-              window.postMessage({ __harnessDevtools: true, type: "inspectEnd" }, "*");
+              window.postMessage({ __hDevtools: true, type: "inspectEnd" }, "*");
             }
           }
         } else if (iframeRef.current?.contentWindow) {
           if (e.data.active) {
             injectInspectorRef.current?.(iframeRef.current);
           } else {
-            (iframeRef.current.contentWindow as any).__harnessInspectorCleanup?.();
-            window.postMessage({ __harnessDevtools: true, type: "inspectEnd" }, "*");
+            (iframeRef.current.contentWindow as any).__hInspectorCleanup?.();
+            window.postMessage({ __hDevtools: true, type: "inspectEnd" }, "*");
           }
         }
         if (!e.data.active) {
-          window.postMessage({ __harnessDevtools: true, type: "inspectEnd" }, "*");
+          window.postMessage({ __hDevtools: true, type: "inspectEnd" }, "*");
         }
       } else if (e.data.type === "requestRefresh") {
         // TerminalPane just opened — re-send DOM tree
@@ -1156,7 +1156,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
                 }
               };
               walk(d.body, "");
-              window.postMessage({ __harness: true, type: "domTree", nodes }, "*");
+              window.postMessage({ __h: true, type: "domTree", nodes }, "*");
             }
           } catch {}
         }
@@ -1170,12 +1170,12 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   useEffect(() => {
     // Deactivate inspect mode when switching tabs
     if (inspectMode) {
-      window.postMessage({ __harness: true, type: "toggle-inspect", active: false }, "*");
+      window.postMessage({ __h: true, type: "toggle-inspect", active: false }, "*");
     }
     // Clear old tab's DOM tree from TerminalPane immediately
-    window.postMessage({ __harnessDevtools: true, type: "domTree", nodes: [] }, "*");
+    window.postMessage({ __hDevtools: true, type: "domTree", nodes: [] }, "*");
     // Immediately request fresh tree for the new tab
-    window.postMessage({ __harness: true, type: "requestRefresh" }, "*");
+    window.postMessage({ __h: true, type: "requestRefresh" }, "*");
   }, [tabId]);
 
   const syncDesktopState = useCallback((reason: string) => {
@@ -1228,16 +1228,16 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
       var m=document.querySelector('meta[name="viewport"]');
       if(!m){m=document.createElement('meta');m.setAttribute('name','viewport');(document.head||document.documentElement).appendChild(m);}
       m.setAttribute('content','width=${viewportWidth},height=${viewportHeight},initial-scale=1');
-      if(window.__harnessPatched)return;window.__harnessPatched=true;
+      if(window.__hPatched)return;window.__hPatched=true;
       // Signal parent when DOM structure changes (parent reads tree via executeJavaScript)
       var _t=null;
       try{
-        var mo=new MutationObserver(function(){clearTimeout(_t);_t=setTimeout(function(){console.log('[Harness:domChanged]')},150)});
+        var mo=new MutationObserver(function(){clearTimeout(_t);_t=setTimeout(function(){console.log('[H:domChanged]')},150)});
         mo.observe(document.body,{childList:true,subtree:true});
       }catch(e){}
-      console.log('[Harness:domChanged]');
+      console.log('[H:domChanged]');
       // Highlight function for tree→page sync
-      window.__harnessHighlight=function(uid){
+      window.__hHighlight=function(uid){
         var el=document.querySelector('[data-__huid="'+uid.replace(/"/g,'\\"')+'"]');
         if(el){
           el.style.outline='2px solid #4ec94e';el.style.outlineOffset='-1px';
@@ -1247,19 +1247,19 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
       };
       // Hover/click handlers for inspect mode
       var infoBar=document.createElement('div');
-      infoBar.id='__harness_inspector_info';
+      infoBar.id='__h_inspector_info';
       infoBar.style.cssText='position:fixed;bottom:4px;left:4px;max-width:calc(100vw - 8px);min-height:20px;max-height:42px;background:rgba(30,30,30,0.95);color:#ccc;font:10.5px/1.3 monospace;border-radius:3px;z-index:2147483647;padding:2px 6px;display:none;pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
       document.body.appendChild(infoBar);
-      window.__harnessLastEl=null;
+      window.__hLastEl=null;
       document.addEventListener('mouseover',function(e){
-        if(!window.__harnessInspectorActive)return;
+        if(!window.__hInspectorActive)return;
         var t=e.target;
         if(!t||t===document.body||t===document.documentElement||t===infoBar)return;
-        if(window.__harnessLastEl&&window.__harnessLastEl!==t){try{window.__harnessLastEl.style.outline=''}catch(x){}}
+        if(window.__hLastEl&&window.__hLastEl!==t){try{window.__hLastEl.style.outline=''}catch(x){}}
         try{t.style.outline='2px solid #4ec94e';t.style.outlineOffset='-1px'}catch(x){}
-        window.__harnessLastEl=t;
+        window.__hLastEl=t;
         // Walk up to find closest ancestor with data-__huid
-        var el=t;while(el&&el!==document.body&&el!==document.documentElement){var uid=el.getAttribute('data-__huid');if(uid){console.log('[Harness:domNode] '+uid);break}el=el.parentElement}
+        var el=t;while(el&&el!==document.body&&el!==document.documentElement){var uid=el.getAttribute('data-__huid');if(uid){console.log('[H:domNode] '+uid);break}el=el.parentElement}
         var tag=t.tagName.toLowerCase();
         var tid=t.id?'#'+t.id:'';
         var tcls=t.className&&typeof t.className==='string'?'.'+t.className.trim().split(/\s+/).filter(Boolean).join('.'):'';
@@ -1269,7 +1269,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
         infoBar.textContent='<'+tag+tid+tcls+'>  '+rect.width.toFixed(0)+'\xD7'+rect.height.toFixed(0)+' @ ('+rect.left.toFixed(0)+', '+rect.top.toFixed(0)+')  |  '+cs.display+' | '+cs.position+(cs.position!=='static'?' ('+cs.top+','+cs.left+')':'')+'  |  color:'+cs.color+' bg:'+cs.backgroundColor;
       },true);
       document.addEventListener('click',function(e){
-        if(!window.__harnessInspectorActive)return;
+        if(!window.__hInspectorActive)return;
         e.preventDefault();e.stopPropagation();
         var t=e.target;
         // Walk up to find closest ancestor with data-__huid
@@ -1278,16 +1278,16 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
           var tag=(el||t).tagName.toLowerCase();
           var id=(el||t).id?'#'+(el||t).id:'';
           var rect=(el||t).getBoundingClientRect();
-          console.log('[Harness:inspectInfo] <'+tag+id+'>  '+rect.width.toFixed(0)+'\xD7'+rect.height.toFixed(0));
-          console.log('[Harness:inspectNode] '+uid);
+          console.log('[H:inspectInfo] <'+tag+id+'>  '+rect.width.toFixed(0)+'\xD7'+rect.height.toFixed(0));
+          console.log('[H:inspectNode] '+uid);
         }
-        window.__harnessInspectorActive=false;
-        if(window.__harnessLastEl){try{window.__harnessLastEl.style.outline=''}catch(x){}window.__harnessLastEl=null;}
+        window.__hInspectorActive=false;
+        if(window.__hLastEl){try{window.__hLastEl.style.outline=''}catch(x){}window.__hLastEl=null;}
         infoBar.style.display='none';
         // Clean up inspect styles + blockers
-        var ss=document.getElementById('__harness_inspect_style');if(ss)ss.remove();
-        if(window.__harnessInspectBlocker){var b=window.__harnessInspectBlocker;['mousedown','mouseup','keydown','keypress','submit','focus','auxclick','dblclick','contextmenu'].forEach(function(n){document.removeEventListener(n,b,true)});delete window.__harnessInspectBlocker}
-        console.log('[Harness:inspectEnd] ');
+        var ss=document.getElementById('__h_inspect_style');if(ss)ss.remove();
+        if(window.__hInspectBlocker){var b=window.__hInspectBlocker;['mousedown','mouseup','keydown','keypress','submit','focus','auxclick','dblclick','contextmenu'].forEach(function(n){document.removeEventListener(n,b,true)});delete window.__hInspectBlocker}
+        console.log('[H:inspectEnd] ');
       },true);
     })()
   `, [viewportWidth, viewportHeight]);
@@ -1302,7 +1302,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     try {
       const nodes = await view.executeJavaScript?.(DOM_WALK_CODE, false);
       if (Array.isArray(nodes)) {
-        window.postMessage({ __harnessDevtools: true, type: "domTree", nodes }, "*");
+        window.postMessage({ __hDevtools: true, type: "domTree", nodes }, "*");
       }
     } catch { /* webview may not be ready */ }
   }, []);
@@ -1343,15 +1343,15 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
             if (!body) return;
             var text = (body.textContent || '').trim();
             if (!text.startsWith('{') && !text.startsWith('[')) return;
-            // Count non-Harness children (skip __harness_inspector_info injected at dom-ready)
-            var nonHarnessChildren = [];
+            // Count non-H children (skip __h_inspector_info injected at dom-ready)
+            var nonHChildren = [];
             for (var i = 0; i < body.children.length; i++) {
-              if (body.children[i].id !== '__harness_inspector_info') {
-                nonHarnessChildren.push(body.children[i]);
+              if (body.children[i].id !== '__h_inspector_info') {
+                nonHChildren.push(body.children[i]);
               }
             }
-            var isJsonBody = nonHarnessChildren.length === 0
-              || (nonHarnessChildren.length === 1 && nonHarnessChildren[0].tagName === 'PRE');
+            var isJsonBody = nonHChildren.length === 0
+              || (nonHChildren.length === 1 && nonHChildren[0].tagName === 'PRE');
             if (isJsonBody) {
               try {
                 var parsed = JSON.parse(text);
@@ -1382,7 +1382,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     const handleDomReady = () => {
       webviewReadyRef.current = true;
       syncDesktopState("dom-ready");
-      // Detect JSON responses BEFORE injecting Harness code (which adds children to body)
+      // Detect JSON responses BEFORE injecting H code (which adds children to body)
       void view.executeJavaScript?.(`
         (function(){
           var body = document.body;
@@ -1412,24 +1412,24 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
       const msg = details.message || "";
 
       // Internal signals from injected code — not forwarded as console entries
-      if (msg.startsWith("[Harness:")) {
-        if (msg === "[Harness:domChanged]") {
+      if (msg.startsWith("[H:")) {
+        if (msg === "[H:domChanged]") {
           // DOM structure changed — re-read the tree directly
           void readDesktopDomTree();
           return;
         }
-        const match = msg.match(/^\[Harness:(domNode|inspectNode|inspectEnd|inspectInfo)\]\s*(.*)/s);
+        const match = msg.match(/^\[H:(domNode|inspectNode|inspectEnd|inspectInfo)\]\s*(.*)/s);
         if (match) {
           const kind = match[1];
           const text = match[2];
           if (kind === "domNode") {
-            window.postMessage({ __harnessDevtools: true, type: "hoverNode", uid: text }, "*");
+            window.postMessage({ __hDevtools: true, type: "hoverNode", uid: text }, "*");
           } else if (kind === "inspectNode") {
-            window.postMessage({ __harnessDevtools: true, type: "inspectNode", tagHint: text }, "*");
+            window.postMessage({ __hDevtools: true, type: "inspectNode", tagHint: text }, "*");
           } else if (kind === "inspectEnd") {
             setInspectMode(false);
-            window.postMessage({ __harnessDevtools: true, type: "inspectEnd" }, "*");
-            window.postMessage({ __harnessDevtools: true, type: "inspectState", active: false }, "*");
+            window.postMessage({ __hDevtools: true, type: "inspectEnd" }, "*");
+            window.postMessage({ __hDevtools: true, type: "inspectState", active: false }, "*");
           } else if (kind === "inspectInfo") {
             const entry: BrowserConsoleEntry = {
               id: `browser-${Date.now()}-${++consoleSeqRef.current}`,
@@ -1459,7 +1459,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
         channel?: string;
         args?: unknown[];
       };
-      if (details.channel === "harness:browserOpenUrl") {
+      if (details.channel === "h:browserOpenUrl") {
         const popupUrl = typeof details.args?.[0] === "string" ? details.args[0] : "";
         if (popupUrl && popupUrl !== "about:blank") {
           onNewTabRef.current?.(popupUrl);
@@ -1541,7 +1541,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     if (!isDesktop) return;
     const origin = getOrigin(currentUrl);
     if (!origin) return;
-    void window.harnessDesktop?.setSitePermissions?.(origin, { ...perms }).catch(() => {});
+    void window.hDesktop?.setSitePermissions?.(origin, { ...perms }).catch(() => {});
   }, [currentUrl, isDesktop, perms]);
 
   // Close dropdown when clicking the backdrop
@@ -1625,11 +1625,11 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
 
   const toggleInspect = useCallback(() => {
     const next = !inspectMode;
-    window.postMessage({ __harness: true, type: "toggle-inspect", active: next }, "*");
+    window.postMessage({ __h: true, type: "toggle-inspect", active: next }, "*");
     if (next) {
       // Open terminal pane to browser console > elements
       onOpenDevtools?.();
-      window.postMessage({ __harnessDevtools: true, type: "showElements" }, "*");
+      window.postMessage({ __hDevtools: true, type: "showElements" }, "*");
     }
   }, [inspectMode, onOpenDevtools]);
 
@@ -1637,11 +1637,11 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   const injectInspector = useCallback((iframe: HTMLIFrameElement) => {
     try {
       const win = iframe.contentWindow as any;
-      if (!win || win.__harnessInspectorActive) return;
+      if (!win || win.__hInspectorActive) return;
       const doc = win.document;
       if (!doc || !doc.body) return;
 
-      win.__harnessInspectorActive = true;
+      win.__hInspectorActive = true;
       let lastEl: Element | null = null;
 
       // Build and send DOM tree
@@ -1677,11 +1677,11 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
           }
         };
         walk(doc.body, "");
-        window.postMessage({ __harness: true, type: "domTree", nodes }, "*");
+        window.postMessage({ __h: true, type: "domTree", nodes }, "*");
       };
 
       // Highlight element by uid (tree→page hover)
-      win.__harnessHighlight = (targetUid: string) => {
+      win.__hHighlight = (targetUid: string) => {
         try {
           const el = doc.querySelector('[data-__huid="' + targetUid.replace(/"/g, '\\"') + '"]');
           if (el) {
@@ -1703,7 +1703,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
 
       // Force arrow cursor + block page interactions during inspect
       const inspectStyle = doc.createElement("style");
-      inspectStyle.id = "__harness_inspect_style";
+      inspectStyle.id = "__h_inspect_style";
       inspectStyle.textContent = "*{cursor:default!important}";
       doc.head.appendChild(inspectStyle);
       const blockEvent = (ev: Event) => { ev.preventDefault(); ev.stopPropagation(); };
@@ -1712,7 +1712,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
 
       // Info bar at bottom of viewport (multi-line tooltip)
       const infoBar = doc.createElement("div");
-      infoBar.id = "__harness_inspector_info";
+      infoBar.id = "__h_inspector_info";
       infoBar.style.cssText = "position:fixed;bottom:4px;left:4px;max-width:calc(100vw - 8px);min-height:20px;max-height:42px;background:rgba(30,30,30,0.95);color:#ccc;font:10.5px/1.3 monospace;border-radius:3px;z-index:2147483647;padding:2px 6px;display:none;pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
       doc.body.appendChild(infoBar);
 
@@ -1744,7 +1744,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
         let el: Element | null = target;
         while (el && el !== doc.body && el !== doc.documentElement) {
           const uid = el.getAttribute("data-__huid");
-          if (uid) { window.postMessage({ __harness: true, type: "hoverNode", uid }, "*"); break; }
+          if (uid) { window.postMessage({ __h: true, type: "hoverNode", uid }, "*"); break; }
           el = el.parentElement;
         }
       };
@@ -1768,33 +1768,33 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
           const eid = el.id ? "#" + el.id : "";
           const rect = el.getBoundingClientRect();
           window.postMessage({
-            __harness: true,
+            __h: true,
             type: "console",
             level: "info",
             text: "<" + tag + eid + ">  " + rect.width.toFixed(0) + "\xD7" + rect.height.toFixed(0),
             time: Date.now(),
             source: "inspect",
           }, "*");
-          window.postMessage({ __harness: true, type: "inspectNode", uid }, "*");
+          window.postMessage({ __h: true, type: "inspectNode", uid }, "*");
         }
         // Turn off inspect
-        win.__harnessInspectorCleanup?.();
-        window.postMessage({ __harness: true, type: "toggle-inspect", active: false }, "*");
+        win.__hInspectorCleanup?.();
+        window.postMessage({ __h: true, type: "toggle-inspect", active: false }, "*");
       };
 
       doc.addEventListener("mouseover", onMouseOver, true);
       doc.addEventListener("click", onClick, true);
 
-      win.__harnessInspectorCleanup = () => {
+      win.__hInspectorCleanup = () => {
         if (lastEl) (lastEl as HTMLElement).style.outline = "";
         infoBar.remove();
         inspectStyle.remove();
         blockEvents.forEach((n) => doc.removeEventListener(n, blockEvent, true));
         doc.removeEventListener("mouseover", onMouseOver, true);
         doc.removeEventListener("click", onClick, true);
-        delete win.__harnessInspectorActive;
-        delete win.__harnessInspectorCleanup;
-        delete win.__harnessHighlight;
+        delete win.__hInspectorActive;
+        delete win.__hInspectorCleanup;
+        delete win.__hHighlight;
       };
     } catch { /* cross-origin */ }
   }, []);
@@ -1898,8 +1898,8 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     return evalInPage(`
       (() => {
         ${DOM_INDEXING_HELPERS}
-        const collected = harnessCollectItems({ maxItems: 3000 });
-        let grid = harnessBuildRegionalGrid(collected.items, collected.vw, collected.vh);
+        const collected = hCollectItems({ maxItems: 3000 });
+        let grid = hBuildRegionalGrid(collected.items, collected.vw, collected.vh);
         // Character cap: if output exceeds 120K chars, truncate with note
         const MAX_CHARS = 120000;
         if (grid.length > MAX_CHARS) {
@@ -1919,7 +1919,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     const result = await evalInPage(`
       (() => {
         ${DOM_INDEXING_HELPERS}
-        const items = harnessCollectItems({}).items;
+        const items = hCollectItems({}).items;
         const target = items[${index}];
         if (!target || !target.el) return 'element not found at index ${index}';
         const rect = target.el.getBoundingClientRect();
@@ -1958,7 +1958,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     const result = await evalInPage(`
       (() => {
         ${DOM_INDEXING_HELPERS}
-        const items = harnessCollectItems({}).items;
+        const items = hCollectItems({}).items;
         const target = items[${index}];
         if (!target || !target.el) return 'element not found at index ${index}';
         const inp = target.el;
@@ -2022,13 +2022,13 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
         const lines = [];
         lines.push('URL: ' + window.location.href);
         lines.push('Title: ' + document.title);
-        const collected = harnessCollectItems({ maxItems: 800 });
+        const collected = hCollectItems({ maxItems: 800 });
         const items = collected.items;
         const vw = collected.vw, vh = collected.vh;
 
         // Grid of elements (capped at 500)
         const capped = items.slice(0, 500);
-        let grid = harnessBuildRegionalGrid(capped, vw, vh);
+        let grid = hBuildRegionalGrid(capped, vw, vh);
         // Character cap: if grid exceeds 80K chars, truncate
         const MAX_CHARS = 80000;
         if (grid.length > MAX_CHARS) {
@@ -2085,8 +2085,8 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   const getConsoleEntries = useCallback(async (): Promise<string> => {
     return evalInPage(`
       (() => {
-        if (!window.__harnessConsoleEntries) return 'No console entries captured.';
-        const entries = window.__harnessConsoleEntries.slice(-50);
+        if (!window.__hConsoleEntries) return 'No console entries captured.';
+        const entries = window.__hConsoleEntries.slice(-50);
         if (entries.length === 0) return 'Console is empty.';
         return entries.map(function(e) {
           return '[' + e.level.toUpperCase() + '] ' + e.text;
@@ -2099,10 +2099,10 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   const getRequestErrors = useCallback(async (): Promise<string> => {
     return evalInPage(`
       (() => {
-        if (!window.__harnessRequestErrors || window.__harnessRequestErrors.length === 0) {
+        if (!window.__hRequestErrors || window.__hRequestErrors.length === 0) {
           return 'No request errors captured.';
         }
-        const errors = window.__harnessRequestErrors.slice(-30);
+        const errors = window.__hRequestErrors.slice(-30);
         return errors.map(function(r) {
           return '[' + r.status + '] ' + r.method + ' ' + r.url;
         }).join('\\n');
@@ -2190,7 +2190,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     return evalInPage(`
       (() => {
         ${DOM_INDEXING_HELPERS}
-        const items = harnessCollectItems({}).items;
+        const items = hCollectItems({}).items;
         const target = items[${index}];
         if (target && target.el) {
           const el = target.el;
@@ -2222,7 +2222,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     return evalInPage(`
       (() => {
         ${DOM_INDEXING_HELPERS}
-        const items = harnessCollectItems({}).items;
+        const items = hCollectItems({}).items;
         const target = items[${index}];
         if (!target || !target.el) return 'Element not found at index ${index}.';
         const el = target.el;
@@ -2292,7 +2292,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     return evalInPage(`
       (() => {
         ${DOM_INDEXING_HELPERS}
-        const items = harnessCollectItems({}).items;
+        const items = hCollectItems({}).items;
         const target = items[${index}];
         if (!target || !target.el) return 'Element not found at index ${index}.';
         const el = target.el;
@@ -2332,7 +2332,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     return evalInPage(`
       (() => {
         ${DOM_INDEXING_HELPERS}
-        const items = harnessCollectItems({}).items;
+        const items = hCollectItems({}).items;
         const target = items[${index}];
         if (!target || !target.el) return 'Element not found at index ${index}.';
         const el = target.el;
@@ -2416,7 +2416,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
         <button className="browser-btn" onClick={goForward} title="Forward" disabled={!canGoForward}>▶</button>
         {loading ? (
           <button className="browser-btn browser-btn-spinner" title="Loading..." disabled>
-            <svg width="14" height="14" viewBox="0 0 14 14" style={{ animation: "harness-spin 0.8s linear infinite" }}>
+            <svg width="14" height="14" viewBox="0 0 14 14" style={{ animation: "h-spin 0.8s linear infinite" }}>
               <circle cx="7" cy="7" r="5.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeDasharray="24 10" strokeLinecap="round" />
             </svg>
           </button>
@@ -2577,8 +2577,8 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
                   ref={handleWebviewRef}
                   key={tabId}
                   src={desktopSrc}
-                  preload={window.harnessDesktop?.browserPreloadUrl}
-                  partition="harness-browser"
+                  preload={window.hDesktop?.browserPreloadUrl}
+                  partition="h-browser"
                   style={{ width: "100%", height: "100%" }}
                 />
               ) : (

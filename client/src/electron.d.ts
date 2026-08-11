@@ -2,7 +2,7 @@ import type * as React from "react";
 
 declare global {
   interface Window {
-    harnessDesktop?: {
+    hDesktop?: {
       isDesktop: boolean;
       browserPreloadUrl?: string;
       openFolder?: () => Promise<string>;

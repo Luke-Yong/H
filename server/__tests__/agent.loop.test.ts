@@ -42,7 +42,7 @@ describe("agentLoop", () => {
   let tmpDir: string;
 
   beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "harness-loop-"));
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "h-loop-"));
     resetMock(chatDeepSeekTool);
     resetMock(chatDeepSeekToolStream);
   });
@@ -186,7 +186,7 @@ describe("agentLoopStream", () => {
   let tmpDir: string;
 
   beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "harness-stream-"));
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "h-stream-"));
     resetMock(chatDeepSeekTool);
     resetMock(chatDeepSeekToolStream);
   });

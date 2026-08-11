@@ -38,11 +38,11 @@ async function scanAndEmitUrl(ws: WebSocket, groupKey: string, sessionId: string
     const normalized = url.replace(/\/+$/, "").toLowerCase();
     if (set.has(normalized)) continue;
     set.add(normalized);
-    console.log(`[Harness] Detected URL: ${normalized} (session=${sessionId})`);
+    console.log(`[H] Detected URL: ${normalized} (session=${sessionId})`);
     // Only open if it's a web page (text/html), skip API endpoints
     const isWeb = await isWebPage(normalized);
     if (!isWeb) {
-      console.log(`[Harness] Skipping non-HTML URL: ${normalized}`);
+      console.log(`[H] Skipping non-HTML URL: ${normalized}`);
       continue;
     }
     if (ws.readyState === WebSocket.OPEN) {
@@ -66,12 +66,12 @@ const groupIdCounters = new Map<string, number>();
 const isWin = process.platform === "win32";
 
 function getPtyDisabledReason(): string {
-  if (process.env.HARNESS_DISABLE_PTY === "1") {
-    return "disabled by HARNESS_DISABLE_PTY=1";
+  if (process.env.H_DISABLE_PTY === "1") {
+    return "disabled by H_DISABLE_PTY=1";
   }
   // Electron + Windows currently hits a node-pty ConPTY teardown crash
   // (`AttachConsole failed`) when browser clients disconnect.
-  if (isWin && process.env.HARNESS_DESKTOP === "1" && process.env.HARNESS_FORCE_PTY !== "1") {
+  if (isWin && process.env.H_DESKTOP === "1" && process.env.H_FORCE_PTY !== "1") {
     return "disabled on Windows desktop to avoid node-pty AttachConsole crashes";
   }
   return "";
@@ -182,7 +182,7 @@ export function createSession(ws: WebSocket, groupKey: string, opts?: { cwd?: st
   const group = sessions.get(groupKey) || [];
 
   if (ws.readyState === WebSocket.OPEN) {
-    ws.send(`term:out:${id}:[Harness] cwd=${cwd}${venvDir ? ` venvDir=${venvDir}` : ""}\r\n`);
+    ws.send(`term:out:${id}:[H] cwd=${cwd}${venvDir ? ` venvDir=${venvDir}` : ""}\r\n`);
   }
 
   const ptyDisabledReason = getPtyDisabledReason();

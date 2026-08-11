@@ -140,7 +140,7 @@ let lastCleanupDay = 0;
 
 function logOutgoing(label: string, messages: Array<any>, cacheCtx?: string) {
   try {
-    const dir = path.resolve(process.cwd(), ".harness-debug");
+    const dir = path.resolve(process.cwd(), ".h-debug");
     fs.mkdirSync(dir, { recursive: true });
     // Cleanup files older than 7 days (run once per day max)
     const now = Date.now();
@@ -185,7 +185,7 @@ function logOutgoing(label: string, messages: Array<any>, cacheCtx?: string) {
     compact.push(meta);
     fs.writeFileSync(file, JSON.stringify(compact, null, 2), "utf-8");
   } catch (err) {
-    console.error("[harness-debug] Failed to write debug log:", err instanceof Error ? err.message : String(err));
+    console.error("[h-debug] Failed to write debug log:", err instanceof Error ? err.message : String(err));
   }
 }
 

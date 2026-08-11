@@ -1,13 +1,13 @@
 // ── File Tracking Metadata Store ──
 // Lightweight JSON-file-backed cache for file watcher metadata when Git is
 // not available. Uses an in-memory Map that flushes to disk on every write.
-// File: ~/.harness/store/file-tracking.json
+// File: ~/.h/store/file-tracking.json
 
 import path from "path";
 import fs from "fs";
 import os from "os";
 import crypto from "crypto";
-import { FILE_TRACKING_FILE } from "./harnessPaths";
+import { FILE_TRACKING_FILE } from "./hPaths";
 
 // ── Types ──
 

@@ -3,7 +3,7 @@ const path = require("path");
 const fs = require("fs");
 
 async function main() {
-  const exePath = path.join(__dirname, "..", "dist", "win-unpacked", "Harness.exe");
+  const exePath = path.join(__dirname, "..", "dist", "win-unpacked", "H.exe");
   const icoPath = path.join(__dirname, "..", "build", "icon.ico");
 
   if (!fs.existsSync(exePath)) {

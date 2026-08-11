@@ -1,21 +1,21 @@
-// ── Centralised .harness/ directory paths ──
-// All persistent and runtime files live under ~/.harness/ organised into
+// ── Centralised .h/ directory paths ──
+// All persistent and runtime files live under ~/.h/ organised into
 // subdirectories: store/ (persistent data), ports/ (runtime discovery),
 // snapshots/ (knowledge graph exports).
 
 import path from "path";
 import os from "os";
 
-const HARNESS_DIR = path.join(os.homedir(), ".harness");
+const H_DIR = path.join(os.homedir(), ".h");
 
-export const STORE_DIR = path.join(HARNESS_DIR, "store");
+export const STORE_DIR = path.join(H_DIR, "store");
 // ── Ports ──
 // Use tmpdir to avoid sandbox permission issues on some machines
-export const PORTS_DIR = path.join(os.tmpdir(), "harness-ports");
-export const SNAPSHOTS_DIR = path.join(HARNESS_DIR, "snapshots");
+export const PORTS_DIR = path.join(os.tmpdir(), "h-ports");
+export const SNAPSHOTS_DIR = path.join(H_DIR, "snapshots");
 
 // ── Machine key (auto-generated, used for api-keys encryption) ──
-export const HARNESS_KEY_FILE = path.join(HARNESS_DIR, ".key");
+export const H_KEY_FILE = path.join(H_DIR, ".key");
 
 // ── Store ──
 export const API_KEYS_FILE = path.join(STORE_DIR, "api-keys.enc");

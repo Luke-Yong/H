@@ -1,5 +1,5 @@
-const fs = require('fs');
-const file = 'd:/Work Projects/Harness/client/src/panes/AgentConsole.tsx';
+﻿const fs = require('fs');
+const file = 'd:/Work Projects/H/client/src/panes/AgentConsole.tsx';
 let content = fs.readFileSync(file, 'utf8');
 
 // Change 1: Add storage event listener after activePreset effect
@@ -11,18 +11,18 @@ const new1 = `  }, [activePreset]);
   // Listen for localStorage changes from other windows (e.g. settings window)
   useEffect(() => {
     const handleStorage = (e: StorageEvent) => {
-      if (e.key === "harness-presets") {
+      if (e.key === "h-presets") {
         setPresets(getStoredPresets());
-      } else if (e.key === "harness-active-preset") {
-        const newId = localStorage.getItem("harness-active-preset") || "";
+      } else if (e.key === "h-active-preset") {
+        const newId = localStorage.getItem("h-active-preset") || "";
         setActivePresetId(newId);
         if (!newId) {
           setSelectedModel(getStoredModel());
           setIsThinking(getStoredThinking());
         }
-      } else if (e.key === "harness-model") {
+      } else if (e.key === "h-model") {
         if (!activePresetId) setSelectedModel(getStoredModel());
-      } else if (e.key === "harness-thinking") {
+      } else if (e.key === "h-thinking") {
         if (!activePresetId) setIsThinking(getStoredThinking());
       }
     };
@@ -37,17 +37,17 @@ console.log('1. storage listener:', content.includes('handleStorage'));
 // Change 2: Clear model/thinking on delete active preset
 const old2 = `    if (activePresetId === id) {
       setActivePresetId("");
-      localStorage.removeItem("harness-active-preset");
+      localStorage.removeItem("h-active-preset");
     }
   }, [presets, activePresetId]);`;
 const new2 = `    if (activePresetId === id) {
       setActivePresetId("");
-      localStorage.removeItem("harness-active-preset");
+      localStorage.removeItem("h-active-preset");
       // Clear model/thinking so the UI doesn't show stale deleted preset
       setSelectedModel("");
       setIsThinking(false);
-      localStorage.removeItem("harness-model");
-      localStorage.removeItem("harness-thinking");
+      localStorage.removeItem("h-model");
+      localStorage.removeItem("h-thinking");
     }
   }, [presets, activePresetId]);`;
 content = content.replace(old2, new2);
@@ -60,16 +60,16 @@ const old3 = `      setEditIsThinking(p.thinking);
     if (!editingModelRef.current) setModelPickerOpen(false);`;
 const new3 = `      setEditIsThinking(p.thinking);
       setEditModelInput(p.model);
-      localStorage.setItem("harness-model", p.model);
-      localStorage.setItem("harness-thinking", String(p.thinking));
+      localStorage.setItem("h-model", p.model);
+      localStorage.setItem("h-thinking", String(p.thinking));
     }
     if (!editingModelRef.current) setModelPickerOpen(false);`;
 content = content.replace(old3, new3);
-console.log('3. selectPreset localStorage:', content.includes('setItem("harness-model", p.model)'));
+console.log('3. selectPreset localStorage:', content.includes('setItem("h-model", p.model)'));
 
 // Change 4: Remove apiKeyConfigured guard from button onClick, refresh on open
 const old4 = `onClick={() => { if (!apiKeyConfigured) return; setModelPickerOpen((v) => { if (!v) { setEditingModel(false); setEditingApiKey(false); } return !v; }); void refreshAgentConfig(); }}`;
-const new4 = `onClick={() => { setModelPickerOpen((v) => { if (!v) { setEditingModel(false); setEditingApiKey(false); setPresets(getStoredPresets()); const aid = localStorage.getItem("harness-active-preset") || ""; if (aid) setActivePresetId(aid); else { setSelectedModel(getStoredModel()); setIsThinking(getStoredThinking()); } } return !v; }); void refreshAgentConfig(); }}`;
+const new4 = `onClick={() => { setModelPickerOpen((v) => { if (!v) { setEditingModel(false); setEditingApiKey(false); setPresets(getStoredPresets()); const aid = localStorage.getItem("h-active-preset") || ""; if (aid) setActivePresetId(aid); else { setSelectedModel(getStoredModel()); setIsThinking(getStoredThinking()); } } return !v; }); void refreshAgentConfig(); }}`;
 content = content.replace(old4, new4);
 console.log('4. button guard removed:', !content.includes('if (!apiKeyConfigured) return'));
 

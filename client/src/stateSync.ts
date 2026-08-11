@@ -1,8 +1,8 @@
-// Syncs harneess-prefixed localStorage keys to ~/.harness/client-state.json
+// Syncs h-prefixed localStorage keys to ~/.h/client-state.json
 // on the server. This ensures data survives reinstalls since it's stored
 // in the user's home directory, not Electron's ephemeral userData dir.
 
-const LOCALSTORAGE_PREFIX = "harness";
+const LOCALSTORAGE_PREFIX = "h";
 const SAVE_INTERVAL_MS = 30_000;
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;

@@ -664,7 +664,7 @@ body.resizing iframe { pointer-events: none; }
 .browser-btn-mouse.active:hover { background: rgba(78, 201, 78, 0.3); }
 .browser-btn-spinner { display: inline-flex; align-items: center; justify-content: center; opacity: 0.7 !important; }
 
-@keyframes harness-spin { to { transform: rotate(360deg); } }
+@keyframes h-spin { to { transform: rotate(360deg); } }
 
 .browser-url-input {
   flex: 1;

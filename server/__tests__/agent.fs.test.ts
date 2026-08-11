@@ -12,7 +12,7 @@ describe("runFsTool - Filesystem tools", () => {
   let tmpDir: string;
 
   beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "harness-fs-"));
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "h-fs-"));
   });
 
   afterEach(() => {

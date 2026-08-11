@@ -1,4 +1,4 @@
-// ── Harness Agent: tool-calling loop for DeepSeek ──
+// ── H Agent: tool-calling loop for DeepSeek ──
 // Supports browser tools (screenshot, DOM, click, type, eval, navigate),
 // filesystem tools (read_file, write_file), and terminal (run_command).
 //
@@ -9,7 +9,7 @@
 // Conversation state is held in memory keyed by session id.
 
 import { chatDeepSeekTool, chatDeepSeekToolStream, generateEmbedding, type DeepSeekApiUsage } from "./deepseek";
-import { getSnapshotPath } from "./harnessPaths";
+import { getSnapshotPath } from "./hPaths";
 import { getMemoryStore } from "./memory";
 import { killSession, getLastCreatedSessionId } from "./terminalManager";
 import { getDiagnosticsForRoot } from "./lsp";
@@ -1472,7 +1472,7 @@ function runGraphQuery(query: string, projectRoot: string): string {
   const kgPath = getSnapshotPath(hash);
 
   if (!fs.existsSync(kgPath)) {
-    return "Knowledge graph not built yet. Open the project folder in Harness to generate it.";
+    return "Knowledge graph not built yet. Open the project folder in H to generate it.";
   }
 
   const raw = fs.readFileSync(kgPath, "utf-8");
@@ -2018,7 +2018,7 @@ interface PromptChunk {
   always?: boolean;
 }
 
-const CORE_RULES = `You are an expert software developer agent running inside a web IDE called Harness.
+const CORE_RULES = `You are an expert software developer agent running inside a web IDE called H.
 You have access to tools that let you read/write files, run commands, and delegate to specialized sub-agents.
 
 ### Rules
@@ -2983,7 +2983,7 @@ const PLAN_ONLY_TOOLS: ToolDef[] = [
 ];
 
 // ── Planning-phase system prompt ──
-const PLANNING_SYSTEM_PROMPT = `You are a planning specialist for a step-by-step IDE agent called Harness.
+const PLANNING_SYSTEM_PROMPT = `You are a planning specialist for a step-by-step IDE agent called H.
 
 Your ONLY job is to break down the user's task into a sequence of concrete, self-contained steps.
 Each step must be actionable by a code-writing sub-agent that has access to:

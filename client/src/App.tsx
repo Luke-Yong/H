@@ -47,7 +47,7 @@ export default function App() {
   const agentTerminalBridge = useMemo(() => createAgentTerminalBridge(), []);
 
   // Recent paths (persisted to localStorage)
-  const RECENT_PATHS_KEY = "harness_recentPaths";
+  const RECENT_PATHS_KEY = "h_recentPaths";
   const [recentPaths, setRecentPaths] = useState<string[]>(() => {
     try {
       const raw = localStorage.getItem(RECENT_PATHS_KEY);
@@ -102,7 +102,7 @@ export default function App() {
     }
   }, [recentPaths, checkPathExists]);
 
-  // Restore client state from ~/.harness/client-state.json (survives reinstalls)
+  // Restore client state from ~/.h/client-state.json (survives reinstalls)
   const [stateRestored, setStateRestored] = useState(false);
   useEffect(() => {
     loadPersistedState().then(() => {
@@ -148,7 +148,7 @@ export default function App() {
   const gitDetectedPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Persist open editor tabs per folder
-  const TAB_STORAGE_KEY = "harness-open-tabs";
+  const TAB_STORAGE_KEY = "h-open-tabs";
 
   const saveOpenTabs = useCallback(() => {
     const currentPath = prevFsBasePathRef.current || fsBasePath;
@@ -421,7 +421,7 @@ export default function App() {
   }, [appendDebugEntry]);
 
   useEffect(() => {
-    return window.harnessDesktop?.onBrowserOpenUrl?.((url: string) => {
+    return window.hDesktop?.onBrowserOpenUrl?.((url: string) => {
       handleBrowserNewTabFromLink(url);
     });
   }, [handleBrowserNewTabFromLink]);
@@ -540,7 +540,7 @@ export default function App() {
   }, []);
 
   const openFolderImmediate = useCallback(async () => {
-    const desktop = window.harnessDesktop;
+    const desktop = window.hDesktop;
     const isElectronUa = navigator.userAgent.includes("Electron");
     if (desktop?.openFolder) {
       const folderPath = await desktop.openFolder();
@@ -631,9 +631,9 @@ export default function App() {
           isBrowserFs.current = false;
           detectProject(data.path);
         }
-      } else if (window.harnessDesktop?.openFolder) {
+      } else if (window.hDesktop?.openFolder) {
         // Desktop mode: pick parent directory, create subfolder, open only the subfolder
-        const parentPath = await window.harnessDesktop.openFolder();
+        const parentPath = await window.hDesktop.openFolder();
         if (!parentPath?.trim()) return;
         const sep = parentPath.includes("/") ? "/" : "\\";
         const dir = parentPath.trim() + sep + projectName;
@@ -665,7 +665,7 @@ export default function App() {
 
   const createNewFile = useCallback(async (name: string) => {
     try {
-      const desktop = window.harnessDesktop;
+      const desktop = window.hDesktop;
       if (desktop?.openFolder) {
         // Desktop mode: pick folder, create file, open only the new file
         const folderPath = await desktop.openFolder();
@@ -745,7 +745,7 @@ export default function App() {
   }, [detectProject, ensureTerminalVisible, fsBasePath]);
 
   const openFileImmediate = useCallback(async () => {
-    const desktop = window.harnessDesktop;
+    const desktop = window.hDesktop;
     const isElectronUa = navigator.userAgent.includes("Electron");
     if (desktop?.openFile) {
       const filePath = await desktop.openFile();
@@ -793,7 +793,7 @@ export default function App() {
           ? [{ label: "Close File", shortcut: "Ctrl+W", action: () => { editorRef.current?.closeActiveTab(); } } as MenuItem]
           : []),
         "---" as const,
-        { label: "New Window", shortcut: "Ctrl+Shift+N", action: () => { window.harnessDesktop?.newWindow?.(); } },
+        { label: "New Window", shortcut: "Ctrl+Shift+N", action: () => { window.hDesktop?.newWindow?.(); } },
       ),
     },
     {
@@ -823,7 +823,7 @@ export default function App() {
         { label: "Kill Terminal", action: () => setTermVisible(false) },
       ],
     },
-    { label: "Help", items: [{ label: "About Harness", action: () => alert("Harness\nAI-powered coding workspace\nPowered by DeepSeek") }] },
+    { label: "Help", items: [{ label: "About H", action: () => alert("H\nAI-powered coding workspace\nPowered by DeepSeek") }] },
   ], [fsBasePath, statusBar.hasEditor, openFolderImmediate, openFileImmediate, createNewProject, createNewFile, handleBrowserClose, saveOpenTabs]);
 
   return (

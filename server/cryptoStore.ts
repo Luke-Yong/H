@@ -1,11 +1,11 @@
 // ── AES-256-GCM encryption for API keys ──
-// Uses a machine-specific key stored at ~/.harness/.key.
+// Uses a machine-specific key stored at ~/.h/.key.
 // The key is auto-generated on first run and never leaves the machine.
 
 import crypto from "crypto";
 import fs from "fs";
 import path from "path";
-import { HARNESS_KEY_FILE } from "./harnessPaths";
+import { H_KEY_FILE } from "./hPaths";
 
 const ALGORITHM = "aes-256-gcm";
 const IV_LENGTH = 12; // 96 bits for GCM
@@ -15,12 +15,12 @@ const KEY_LENGTH = 32; // 256 bits
 // ── Machine key ──
 
 function getOrCreateMachineKey(): Buffer {
-  if (fs.existsSync(HARNESS_KEY_FILE)) {
-    return fs.readFileSync(HARNESS_KEY_FILE);
+  if (fs.existsSync(H_KEY_FILE)) {
+    return fs.readFileSync(H_KEY_FILE);
   }
   const key = crypto.randomBytes(KEY_LENGTH);
-  fs.mkdirSync(path.dirname(HARNESS_KEY_FILE), { recursive: true });
-  fs.writeFileSync(HARNESS_KEY_FILE, key);
+  fs.mkdirSync(path.dirname(H_KEY_FILE), { recursive: true });
+  fs.writeFileSync(H_KEY_FILE, key);
   return key;
 }
 

@@ -1,27 +1,27 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
-const browserPreloadUrl = ipcRenderer.sendSync("harness:getBrowserPreloadUrl");
+const browserPreloadUrl = ipcRenderer.sendSync("h:getBrowserPreloadUrl");
 
-contextBridge.exposeInMainWorld("harnessDesktop", {
+contextBridge.exposeInMainWorld("hDesktop", {
   isDesktop: true,
   browserPreloadUrl,
-  openFolder: () => ipcRenderer.invoke("harness:openFolder"),
-  openFile: () => ipcRenderer.invoke("harness:openFile"),
+  openFolder: () => ipcRenderer.invoke("h:openFolder"),
+  openFile: () => ipcRenderer.invoke("h:openFile"),
   onBrowserOpenUrl: (callback) => {
     if (typeof callback !== "function") return () => {};
     const listener = (_event, url) => callback(url);
-    ipcRenderer.on("harness:browserOpenUrl", listener);
-    return () => ipcRenderer.removeListener("harness:browserOpenUrl", listener);
+    ipcRenderer.on("h:browserOpenUrl", listener);
+    return () => ipcRenderer.removeListener("h:browserOpenUrl", listener);
   },
   setSitePermissions: (origin, permissions) =>
-    ipcRenderer.invoke("harness:setSitePermissions", { origin, permissions }),
-  openResourceMonitor: () => ipcRenderer.send("harness:openResourceMonitor"),
-  closeResourceMonitor: () => ipcRenderer.send("harness:closeResourceMonitor"),
-  openSettings: () => ipcRenderer.send("harness:openSettings"),
-  closeSettings: () => ipcRenderer.send("harness:closeSettings"),
-  minimize: () => ipcRenderer.send("harness:minimize"),
-  maximize: () => ipcRenderer.send("harness:maximize"),
-  close: () => ipcRenderer.send("harness:close"),
-  isMaximized: () => ipcRenderer.invoke("harness:isMaximized"),
-  newWindow: () => ipcRenderer.send("harness:newWindow"),
+    ipcRenderer.invoke("h:setSitePermissions", { origin, permissions }),
+  openResourceMonitor: () => ipcRenderer.send("h:openResourceMonitor"),
+  closeResourceMonitor: () => ipcRenderer.send("h:closeResourceMonitor"),
+  openSettings: () => ipcRenderer.send("h:openSettings"),
+  closeSettings: () => ipcRenderer.send("h:closeSettings"),
+  minimize: () => ipcRenderer.send("h:minimize"),
+  maximize: () => ipcRenderer.send("h:maximize"),
+  close: () => ipcRenderer.send("h:close"),
+  isMaximized: () => ipcRenderer.invoke("h:isMaximized"),
+  newWindow: () => ipcRenderer.send("h:newWindow"),
 });

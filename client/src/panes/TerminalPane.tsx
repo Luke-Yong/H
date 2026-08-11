@@ -253,7 +253,7 @@ export default function TerminalPane({
       prevDevtoolsKeyRef.current = devtoolsForceKey;
       setActiveCategory("browserConsole");
       // Request fresh DOM tree + console data from webview
-      window.postMessage({ __harness: true, type: "requestRefresh" }, "*");
+      window.postMessage({ __h: true, type: "requestRefresh" }, "*");
     }
   }, [devtoolsForceKey]);
   const [debugSourceFilters, setDebugSourceFilters] = useState<Record<DebugSource, boolean>>({
@@ -401,7 +401,7 @@ export default function TerminalPane({
   // Listen for devtools messages from BrowserView (DOM tree, hover node, inspect)
   useEffect(() => {
     const handler = (e: MessageEvent) => {
-      if (!e.data || !e.data.__harnessDevtools) return;
+      if (!e.data || !e.data.__hDevtools) return;
       if (e.data.type === "domTree") {
         const nodes = e.data.nodes || [];
         setDomTreeNodes(nodes);
@@ -441,7 +441,7 @@ export default function TerminalPane({
     };
     window.addEventListener("message", handler);
     // Request fresh DOM tree on mount (webview may have loaded before terminal opened)
-    window.postMessage({ __harness: true, type: "requestRefresh" }, "*");
+    window.postMessage({ __h: true, type: "requestRefresh" }, "*");
     return () => window.removeEventListener("message", handler);
   }, []);
 
@@ -495,7 +495,7 @@ export default function TerminalPane({
 
   const getHistoryKey = useCallback(() => {
     const c = (cwdRef.current || "").trim();
-    return `harness.term.history:${c || "default"}`;
+    return `h.term.history:${c || "default"}`;
   }, []);
 
   const loadHistory = useCallback((key: string): string[] => {
@@ -853,16 +853,16 @@ export default function TerminalPane({
     }
 
     // Show diagnostic header
-    const isDesktop = !!(window as any).harnessDesktop?.isDesktop;
+    const isDesktop = !!(window as any).hDesktop?.isDesktop;
     if (hasRealCwdRef.current) {
-      term.writeln(`\r\n\x1b[36m[Harness]\x1b[0m cwd=\x1b[33m${cwdRef.current}\x1b[0m  (\x1b[32mElectron\x1b[0m)\r\n`);
+      term.writeln(`\r\n\x1b[36m[H]\x1b[0m cwd=\x1b[33m${cwdRef.current}\x1b[0m  (\x1b[32mElectron\x1b[0m)\r\n`);
     } else {
-      term.writeln("\r\n\x1b[36m[Harness]\x1b[0m \x1b[31mNo project folder detected\x1b[0m");
+      term.writeln("\r\n\x1b[36m[H]\x1b[0m \x1b[31mNo project folder detected\x1b[0m");
       if (isDesktop) {
-        term.writeln("[Harness] You are in Electron but no folder path was provided.");
+        term.writeln("[H] You are in Electron but no folder path was provided.");
       } else {
-        term.writeln("[Harness] You are in a \x1b[33mbrowser\x1b[0m — the file picker can't give real paths.");
-        term.writeln("[Harness] Run \x1b[33mnpm run desktop:dev\x1b[0m for real project-following terminals.\r\n");
+        term.writeln("[H] You are in a \x1b[33mbrowser\x1b[0m — the file picker can't give real paths.");
+        term.writeln("[H] Run \x1b[33mnpm run desktop:dev\x1b[0m for real project-following terminals.\r\n");
       }
     }
 
@@ -1837,7 +1837,7 @@ export default function TerminalPane({
                     onClick={() => {
                       const next = !inspectActive;
                       setInspectActive(next);
-                      window.postMessage({ __harness: true, type: "toggle-inspect", active: next }, "*");
+                      window.postMessage({ __h: true, type: "toggle-inspect", active: next }, "*");
                       if (!next) { setHoveredUid(null); }
                     }}
                     title={inspectActive ? "Exit inspect mode" : "Select an element to inspect"}
@@ -1910,7 +1910,7 @@ export default function TerminalPane({
                       {renderDomTree(domTreeNodes, hoveredUid, (uid) => {
                         hoverFromTreeRef.current = true;
                         setHoveredUid(uid);
-                        window.postMessage({ __harness: true, type: "highlight", uid }, "*");
+                        window.postMessage({ __h: true, type: "highlight", uid }, "*");
                       }, domExpanded, (uid) => {
                         setDomExpanded((prev) => {
                           const next = new Set(prev);

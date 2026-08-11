@@ -101,7 +101,7 @@ function ResourceMonitor() {
   }, []);
 
   const open = () => {
-    const desktop = (window as any).harnessDesktop;
+    const desktop = (window as any).hDesktop;
     if (desktop?.openResourceMonitor) {
       desktop.openResourceMonitor();
     }

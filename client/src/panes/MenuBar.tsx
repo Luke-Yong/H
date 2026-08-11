@@ -76,7 +76,7 @@ export default function MenuBar({ menus }: Props) {
   const [isMax, setIsMax] = useState(false);
 
   const syncMax = useCallback(() => {
-    window.harnessDesktop?.isMaximized?.().then(setIsMax).catch(() => {});
+    window.hDesktop?.isMaximized?.().then(setIsMax).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -86,13 +86,13 @@ export default function MenuBar({ menus }: Props) {
     return () => window.removeEventListener("resize", onResize);
   }, [syncMax]);
 
-  const isDesktop = !!window.harnessDesktop?.isDesktop;
+  const isDesktop = !!window.hDesktop?.isDesktop;
 
   return (
-    <div className="menu-bar" onDoubleClick={() => { window.harnessDesktop?.maximize?.(); syncMax(); }}>
+    <div className="menu-bar" onDoubleClick={() => { window.hDesktop?.maximize?.(); syncMax(); }}>
       <div className="menu-bar-app-name">
         <img src="/icon.svg" className="menu-bar-app-icon" alt="" />
-        Harness
+        H
       </div>
       <div className="menu-bar-menus">
         {menus.map((menu, i) => (
@@ -108,17 +108,17 @@ export default function MenuBar({ menus }: Props) {
       </div>
       {isDesktop && (
         <div className="menu-bar-window-controls">
-          <button className="win-ctrl-btn win-ctrl-min" onClick={() => window.harnessDesktop?.minimize?.()} title="Minimize">
+          <button className="win-ctrl-btn win-ctrl-min" onClick={() => window.hDesktop?.minimize?.()} title="Minimize">
             <svg width="10" height="10" viewBox="0 0 10 10"><rect x="1" y="4.5" width="8" height="1" fill="currentColor" /></svg>
           </button>
-          <button className="win-ctrl-btn win-ctrl-max" onClick={() => { window.harnessDesktop?.maximize?.(); syncMax(); }} title={isMax ? "Restore" : "Maximize"}>
+          <button className="win-ctrl-btn win-ctrl-max" onClick={() => { window.hDesktop?.maximize?.(); syncMax(); }} title={isMax ? "Restore" : "Maximize"}>
             {isMax ? (
               <svg width="10" height="10" viewBox="0 0 10 10"><rect x="2" y="0" width="7" height="7" fill="none" stroke="currentColor" strokeWidth="1" /><rect x="0" y="3" width="7" height="7" fill="#323233" stroke="currentColor" strokeWidth="1" /></svg>
             ) : (
               <svg width="10" height="10" viewBox="0 0 10 10"><rect x="1" y="1" width="8" height="8" fill="none" stroke="currentColor" strokeWidth="1" /></svg>
             )}
           </button>
-          <button className="win-ctrl-btn win-ctrl-close" onClick={() => window.harnessDesktop?.close?.()} title="Close">
+          <button className="win-ctrl-btn win-ctrl-close" onClick={() => window.hDesktop?.close?.()} title="Close">
             <svg width="10" height="10" viewBox="0 0 10 10"><line x1="1" y1="1" x2="9" y2="9" stroke="currentColor" strokeWidth="1.2" /><line x1="9" y1="1" x2="1" y2="9" stroke="currentColor" strokeWidth="1.2" /></svg>
           </button>
         </div>

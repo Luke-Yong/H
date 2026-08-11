@@ -5,7 +5,7 @@ const fs = require("fs");
 const { getBestAvailableLocation } = require("./native-location.cjs");
 require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
 
-const HARNESS_BROWSER_PARTITION = "harness-browser";
+const H_BROWSER_PARTITION = "h-browser";
 const sitePermissions = new Map();
 const LOCATION_REFRESH_INTERVAL_MS = 300_000; // 5 min – Windows location polling is heavier
 const LOCATION_FRESH_MS = 330_000;             // cache valid 5.5 min
@@ -17,8 +17,8 @@ const geoOverrideDebounce = new Map();
 
 function showFatalStartupError(error) {
   const message = error instanceof Error ? (error.stack || error.message) : String(error);
-  try { console.error("[harness-startup]", message); } catch {}
-  try { dialog.showErrorBox("Harness failed to start", message); } catch {}
+  try { console.error("[h-startup]", message); } catch {}
+  try { dialog.showErrorBox("H failed to start", message); } catch {}
 }
 
 process.on("unhandledRejection", (error) => {
@@ -127,7 +127,7 @@ async function waitForUrl(url, timeoutMs) {
 }
 
 // Use tmpdir for port files to avoid sandbox permission issues
-const PORTS_DIR = path.join(require("os").tmpdir(), "harness-ports");
+const PORTS_DIR = path.join(require("os").tmpdir(), "h-ports");
 const EXPRESS_PORT_FILE = path.join(PORTS_DIR, "express-port");
 const VITE_PORT_FILE = path.join(PORTS_DIR, "vite-port");
 
@@ -180,8 +180,8 @@ async function waitForOwnServerPort(timeoutMs) {
 }
 
 function startEmbeddedServer() {
-  process.env.HARNESS_DESKTOP = "1";
-  process.env.HARNESS_SERVE_CLIENT = "1";
+  process.env.H_DESKTOP = "1";
+  process.env.H_SERVE_CLIENT = "1";
   if (process.resourcesPath && process.platform === "win32") {
     process.env.ESBUILD_BINARY_PATH = path.join(
       process.resourcesPath,
@@ -194,7 +194,7 @@ function startEmbeddedServer() {
   }
 
   const tsx = require("tsx/cjs/api");
-  const api = tsx.register({ namespace: "harness-electron" });
+  const api = tsx.register({ namespace: "h-electron" });
   api.require(path.join(__dirname, "..", "server", "index.ts"), __filename);
 }
 
@@ -210,7 +210,7 @@ function normalizeOrigin(rawUrl) {
 function emitBrowserOpenUrl(contents, targetUrl) {
   const ownerContents = contents.hostWebContents || contents;
   if (!ownerContents || ownerContents.isDestroyed()) return;
-  ownerContents.send("harness:browserOpenUrl", targetUrl);
+  ownerContents.send("h:browserOpenUrl", targetUrl);
 }
 
 function resolvePermissionOrigin(requestingOrigin, details) {
@@ -292,7 +292,7 @@ function attachPopupInterception(contents) {
 }
 
 function getBrowserSession() {
-  return session.fromPartition(HARNESS_BROWSER_PARTITION);
+  return session.fromPartition(H_BROWSER_PARTITION);
 }
 
 function isBrowserContents(contents) {
@@ -492,7 +492,7 @@ function closeSettingsWindow() {
 }
 
 function registerIpc() {
-  ipcMain.on("harness:getBrowserPreloadUrl", (event) => {
+  ipcMain.on("h:getBrowserPreloadUrl", (event) => {
     event.returnValue = `file:///${path.join(__dirname, "browser-preload.cjs").replace(/\\/g, "/")}`;
   });
 
@@ -513,7 +513,7 @@ function registerIpc() {
     } catch {}
   }
 
-  ipcMain.handle("harness:openFolder", async () => {
+  ipcMain.handle("h:openFolder", async () => {
     const lastFolder = loadLastFolder();
     const defaultPath = lastFolder ? path.dirname(lastFolder) : undefined;
     const result = await dialog.showOpenDialog({
@@ -526,7 +526,7 @@ function registerIpc() {
     return chosen;
   });
 
-  ipcMain.handle("harness:openFile", async () => {
+  ipcMain.handle("h:openFile", async () => {
     const result = await dialog.showOpenDialog({
       properties: ["openFile"],
     });
@@ -534,7 +534,7 @@ function registerIpc() {
     return result.filePaths?.[0] || "";
   });
 
-  ipcMain.handle("harness:setSitePermissions", async (_event, payload) => {
+  ipcMain.handle("h:setSitePermissions", async (_event, payload) => {
     const origin = normalizeOrigin(payload?.origin);
     if (!origin) return false;
 
@@ -550,7 +550,7 @@ function registerIpc() {
     return true;
   });
 
-  ipcMain.handle("harness:getNativeLocation", async (event, payload) => {
+  ipcMain.handle("h:getNativeLocation", async (event, payload) => {
     const senderUrl = event.sender?.getURL?.() || "";
     const senderOrigin = normalizeOrigin(senderUrl);
     const allowed = isPermissionEnabled(senderOrigin, "geolocation", {
@@ -571,29 +571,29 @@ function registerIpc() {
     return result;
   });
 
-  ipcMain.on("harness:openResourceMonitor", (event) => {
+  ipcMain.on("h:openResourceMonitor", (event) => {
     const parentWin = BrowserWindow.fromWebContents(event.sender);
     openResourceMonitorWindow(parentWin);
   });
 
-  ipcMain.on("harness:closeResourceMonitor", () => {
+  ipcMain.on("h:closeResourceMonitor", () => {
     closeResourceMonitorWindow();
   });
 
-  ipcMain.on("harness:openSettings", (event) => {
+  ipcMain.on("h:openSettings", (event) => {
     const parentWin = BrowserWindow.fromWebContents(event.sender);
     openSettingsWindow(parentWin);
   });
 
-  ipcMain.on("harness:closeSettings", () => {
+  ipcMain.on("h:closeSettings", () => {
     closeSettingsWindow();
   });
 
   // Window controls for frameless window
-  ipcMain.on("harness:minimize", (event) => {
+  ipcMain.on("h:minimize", (event) => {
     BrowserWindow.fromWebContents(event.sender)?.minimize();
   });
-  ipcMain.on("harness:maximize", (event) => {
+  ipcMain.on("h:maximize", (event) => {
     const win = BrowserWindow.fromWebContents(event.sender);
     if (win?.isMaximized()) {
       win.unmaximize();
@@ -601,15 +601,15 @@ function registerIpc() {
       win?.maximize();
     }
   });
-  ipcMain.on("harness:close", (event) => {
+  ipcMain.on("h:close", (event) => {
     BrowserWindow.fromWebContents(event.sender)?.close();
   });
-  ipcMain.handle("harness:isMaximized", (event) => {
+  ipcMain.handle("h:isMaximized", (event) => {
     return BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false;
   });
 
   // New Window
-  ipcMain.on("harness:newWindow", () => {
+  ipcMain.on("h:newWindow", () => {
     createMainWindow();
   });
 }
@@ -684,7 +684,7 @@ async function createMainWindow() {
   if (isDev) {
     const expressPort = await waitForOwnServerPort(30_000);
     if (!expressPort) {
-      const failHtml = loadingPageHtml("Harness", "Express server failed to start.");
+      const failHtml = loadingPageHtml("H", "Express server failed to start.");
       win.loadURL(`data:text/html;base64,${Buffer.from(failHtml, "utf8").toString("base64")}`);
       win.show();
       return;
@@ -694,7 +694,7 @@ async function createMainWindow() {
     // Express ready — find Vite dev server
     const vitePort = await waitForPortFile(VITE_PORT_FILE, 120_000);
     if (!vitePort) {
-      const failHtml = loadingPageHtml("Harness", "Vite dev server failed to start.");
+      const failHtml = loadingPageHtml("H", "Vite dev server failed to start.");
       win.loadURL(`data:text/html;base64,${Buffer.from(failHtml, "utf8").toString("base64")}`);
       win.show();
       return;
@@ -704,14 +704,14 @@ async function createMainWindow() {
       `http://localhost:${vitePort}`,
       `http://localhost:${vitePort}`,
       10_000,
-      "Harness"
+      "H"
     );
     win.show();
     win.webContents.openDevTools({ mode: "detach" });
   } else {
     const port = await waitForOwnServerPort(30_000);
     if (!port) {
-      const failHtml = loadingPageHtml("Harness", "Express server failed to start.");
+      const failHtml = loadingPageHtml("H", "Express server failed to start.");
       win.loadURL(`data:text/html;base64,${Buffer.from(failHtml, "utf8").toString("base64")}`);
       win.show();
       return;
@@ -722,19 +722,19 @@ async function createMainWindow() {
       `http://127.0.0.1:${port}`,
       `http://127.0.0.1:${port}/api/health`,
       2_000,
-      "Harness"
+      "H"
     );
     win.show();
   }
 }
 
 // Must be set before app.whenReady() on Windows to apply the taskbar icon
-app.setAppUserModelId("com.harness.ide.v1");
+app.setAppUserModelId("com.h.ide.v1");
 
 // ── Custom single-instance lock (PID-file based) ──
 // Electron's requestSingleInstanceLock() is unreliable on Windows (ACCESS_DENIED).
 // We use a PID file to track the running instance.
-const PID_FILE = path.join(require("os").tmpdir(), "harness-pid");
+const PID_FILE = path.join(require("os").tmpdir(), "h-pid");
 
 function isProcessAlive(pid) {
   try {

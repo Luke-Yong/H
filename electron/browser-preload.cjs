@@ -2,7 +2,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 function reportHost(msg, data) {
   try {
-    ipcRenderer.sendToHost("harness:browserPreloadDebug", {
+    ipcRenderer.sendToHost("h:browserPreloadDebug", {
       msg,
       data,
       ts: Date.now(),
@@ -14,7 +14,7 @@ async function fetchNativeLocation(options) {
   reportHost("fetchNativeLocation called", {
     options: options || {},
   });
-  return ipcRenderer.invoke("harness:getNativeLocation", {
+  return ipcRenderer.invoke("h:getNativeLocation", {
     options: options || {},
   });
 }
@@ -29,9 +29,9 @@ const bridge = {
 };
 
 try {
-  contextBridge.exposeInMainWorld("__harnessGeoBridge", bridge);
+  contextBridge.exposeInMainWorld("__hGeoBridge", bridge);
   reportHost("contextBridge exposed", {
-    key: "__harnessGeoBridge",
+    key: "__hGeoBridge",
   });
 } catch (err) {
   reportHost("contextBridge expose failed", {
@@ -52,7 +52,7 @@ window.addEventListener("click", (event) => {
     if (el.target === "_blank" && el.href && !String(el.href).startsWith("javascript:")) {
       event.preventDefault();
       event.stopPropagation();
-      ipcRenderer.sendToHost("harness:browserOpenUrl", el.href);
+      ipcRenderer.sendToHost("h:browserOpenUrl", el.href);
     }
   } catch {}
 }, true);

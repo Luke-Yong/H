@@ -1,7 +1,11 @@
 {
-  "name": "Harness",
+  "name": "h",
   "version": "0.0.1",
-  "description": "AI-powered coding workspace with Monaco Editor, DeepSeek agent loop, built-in browser, and sub-agent delegation",
+  "description": "AI coding agent — 27 tools, 11 sub-agent types, DeepSeek-powered, ~6x less memory than VS Code",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Luke-Yong/H"
+  },
   "private": true,
   "main": "electron/main.cjs",
   "author": {
@@ -32,8 +36,8 @@
     "ws": "^8.18.0"
   },
   "build": {
-    "appId": "com.harness.ide",
-    "productName": "Harness",
+    "appId": "com.h.ide",
+    "productName": "H",
     "icon": "build/icon.png",
     "npmRebuild": false,
     "asarUnpack": [

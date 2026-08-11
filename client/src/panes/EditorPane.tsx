@@ -248,8 +248,8 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   }, []);
 
   const handleOpenSettings = useCallback(() => {
-    if (window.harnessDesktop?.openSettings) {
-      window.harnessDesktop.openSettings();
+    if (window.hDesktop?.openSettings) {
+      window.hDesktop.openSettings();
     } else if (settingsOpenRef.current) {
       setSettingsOpen(false);
       setTimeout(() => setSettingsOpen(true), 0);
@@ -1177,7 +1177,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
 
   const openFsFile = useCallback(async (filePath: string, handle?: FileSystemFileHandle) => {
     // Resolve relative paths against the project root (search returns project-relative paths,
-    // but the server's CWD is the Harness directory, not the opened project).
+    // but the server's CWD is the H directory, not the opened project).
     let resolvedPath = filePath;
     if (!filePath.match(/^[a-zA-Z]:[\\/]/) && !filePath.startsWith("\\\\") && !filePath.startsWith("/") && fsBasePath) {
       resolvedPath = fsBasePath.replace(/[/\\]$/, "") + "/" + filePath;
@@ -2145,7 +2145,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
         )}
         {sidebarVisible && sidebarPanel === "scm" && <ScmPanel fsBasePath={fsBasePath} newFilePaths={newFilePaths} onOpenFile={openFileByFsPath} />}
         <div className="editor-welcome">
-          <div className="welcome-logo">Harness</div>
+          <div className="welcome-logo">H</div>
           <div className="welcome-subtitle">Powered by DeepSeek</div>
           <div className="welcome-actions">
             <button className="welcome-btn" onClick={() => handleWelcomeClick(onOpenFolder)}>
@@ -2338,7 +2338,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
           <div className="editor-container">
             {showWelcomeInEditor && (
               <div className="editor-welcome">
-                <div className="welcome-logo">Harness</div>
+                <div className="welcome-logo">H</div>
                 <div className="welcome-subtitle">Powered by DeepSeek</div>
                 <div className="welcome-actions">
                   <button className="welcome-btn" onClick={() => handleWelcomeClick(onOpenFolder)}>

@@ -12,8 +12,8 @@ type TabId = "model" | "about";
 function ModelApiTab() {
   const [apiKeyConfigured, setApiKeyConfigured] = useState(false);
   const [configChecked, setConfigChecked] = useState(false);
-  const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem("harness-model") || "deepseek-chat");
-  const [isThinking, setIsThinking] = useState(() => localStorage.getItem("harness-thinking") === "true");
+  const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem("h-model") || "deepseek-chat");
+  const [isThinking, setIsThinking] = useState(() => localStorage.getItem("h-thinking") === "true");
   const [apiKey, setApiKey] = useState("");
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState("");
@@ -74,14 +74,14 @@ function ModelApiTab() {
   }, [refreshConfig]);
 
   const handleModelSave = () => {
-    localStorage.setItem("harness-model", selectedModel.trim());
+    localStorage.setItem("h-model", selectedModel.trim());
     setStatus("Model saved.");
   };
 
   const handleThinkingToggle = () => {
     const next = !isThinking;
     setIsThinking(next);
-    localStorage.setItem("harness-thinking", String(next));
+    localStorage.setItem("h-thinking", String(next));
   };
 
   if (!configChecked) return <div className="settings-tab-loading">Loading configuration...</div>;
@@ -140,7 +140,7 @@ function AboutTab() {
         <svg className="settings-about-logo" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
           <rect x="3" y="2" width="5.5" height="20" rx="2.75" fill="#4D6BFE"/><rect x="15.5" y="2" width="5.5" height="20" rx="2.75" fill="#4D6BFE"/><rect x="3" y="9.5" width="18" height="5" rx="2.5" fill="#4D6BFE"/>
         </svg>
-        <h2 className="settings-about-title">Harness</h2>
+        <h2 className="settings-about-title">H</h2>
         <p className="settings-about-subtitle">AI-powered coding workspace<br />Powered by DeepSeek</p>
         <p className="settings-about-version">Version 0.0.1</p>
       </div>
@@ -153,7 +153,7 @@ function AboutTab() {
         {activeSection === "terms" && (
           <div className="settings-about-text">
             <p><strong>Last updated: July 2026</strong></p>
-            <p>By using Harness ("the Software"), you agree to these terms.</p>
+            <p>By using H ("the Software"), you agree to these terms.</p>
             <h4>1. License</h4>
             <p>The Software is provided for personal and commercial use. You may install, run, and use the Software on any number of devices you own or control.</p>
             <h4>2. AI Services</h4>
@@ -180,23 +180,23 @@ function AboutTab() {
           <div className="settings-about-text">
             <p><strong>Last updated: July 2026</strong></p>
             <h4>1. Data Collection</h4>
-            <p>Harness does <strong>not</strong> collect telemetry, analytics, or usage data. No data is sent to Harness developers or any third-party analytics services.</p>
+            <p>H does <strong>not</strong> collect telemetry, analytics, or usage data. No data is sent to H developers or any third-party analytics services.</p>
             <h4>2. Data Storage</h4>
             <p>All user data is stored locally on your machine:</p>
             <ul>
-              <li><strong>API keys</strong> — Encrypted with AES-256-GCM using a machine-specific key at <code>~/.harness/store/api-keys.enc</code>. Never stored in browser localStorage. Transmitted only to DeepSeek API as Bearer token.</li>
-              <li><strong>Chat history & preferences</strong> — Stored in browser localStorage, synced to <code>~/.harness/store/client-state.json</code> on disk.</li>
-              <li><strong>Agent memory</strong> — SQLite database at <code>~/.harness/store/memory.db</code> (WAL mode).</li>
-              <li><strong>File tracking metadata</strong> — <code>~/.harness/store/file-tracking.json</code> (file paths, sizes, checksums; no file contents).</li>
+              <li><strong>API keys</strong> — Encrypted with AES-256-GCM using a machine-specific key at <code>~/.h/store/api-keys.enc</code>. Never stored in browser localStorage. Transmitted only to DeepSeek API as Bearer token.</li>
+              <li><strong>Chat history & preferences</strong> — Stored in browser localStorage, synced to <code>~/.h/store/client-state.json</code> on disk.</li>
+              <li><strong>Agent memory</strong> — SQLite database at <code>~/.h/store/memory.db</code> (WAL mode).</li>
+              <li><strong>File tracking metadata</strong> — <code>~/.h/store/file-tracking.json</code> (file paths, sizes, checksums; no file contents).</li>
               <li><strong>Port discovery files</strong> — OS temp directory; runtime only, not persisted.</li>
             </ul>
-            <p>Deleting <code>~/.harness/</code> removes all Harness data.</p>
+            <p>Deleting <code>~/.h/</code> removes all H data.</p>
             <h4>3. External Data Transmission</h4>
             <p>Project source code (files, file tree, prompts) is transmitted to DeepSeek's API (<code>api.deepseek.com</code>) as part of agent operations. No code is transmitted anywhere else.</p>
             <h4>4. Debug Logging (Opt-in)</h4>
-            <p>Agent debug logs are stored locally at <code>&lt;project&gt;/.harness-debug/</code> and auto-deleted after 7 days. This directory is <code>.gitignore</code>'d.</p>
+            <p>Agent debug logs are stored locally at <code>&lt;project&gt;/.h-debug/</code> and auto-deleted after 7 days. This directory is <code>.gitignore</code>'d.</p>
             <h4>5. Your Rights</h4>
-            <p>All data resides on your machine. You can delete all data by removing the <code>~/.harness/</code> directory. API keys can be removed at any time via Settings.</p>
+            <p>All data resides on your machine. You can delete all data by removing the <code>~/.h/</code> directory. API keys can be removed at any time via Settings.</p>
           </div>
         )}
 

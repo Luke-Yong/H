@@ -11,7 +11,7 @@
 
 ## Reproduction Steps
 1. Run `npm run dev:server` (or equivalent) to start the server
-2. Open the Harness IDE client
+2. Open the H IDE client
 3. Send agent message: "run python app.py"
 4. Observe agent console state stuck at "Wait a moment..."
 

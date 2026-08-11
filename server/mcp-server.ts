@@ -1,4 +1,4 @@
-// ── Harness MCP Server Entry Point ──
+// ── H MCP Server Entry Point ──
 // Run this file directly to start the MCP server in stdio mode.
 //
 // Usage:
@@ -7,20 +7,20 @@
 // Or configure in an MCP client (Claude Desktop, Cursor, etc.):
 //   {
 //     "mcpServers": {
-//       "harness": {
+//       "h": {
 //         "command": "npx",
 //         "args": ["tsx", "server/mcp-server.ts"],
-//         "cwd": "/path/to/harness"
+//         "cwd": "/path/to/h"
 //       }
 //     }
 //   }
 
-import { HarnessMcpServer, runStdioServer } from "./mcp";
+import { HMcpServer, runStdioServer } from "./mcp";
 
 const projectRoot = process.argv[2] || process.cwd();
-const server = new HarnessMcpServer(projectRoot);
+const server = new HMcpServer(projectRoot);
 
 // Log to stderr so it doesn't interfere with the stdio JSON-RPC protocol
-console.error(`[Harness MCP] Starting stdio server for project: ${projectRoot}`);
+console.error(`[H MCP] Starting stdio server for project: ${projectRoot}`);
 
 runStdioServer(server);

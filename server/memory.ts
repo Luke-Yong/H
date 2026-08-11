@@ -3,13 +3,13 @@
 // conventions. Supports keyword search and (optionally) embedding-based
 // semantic search via DeepSeek embeddings API.
 //
-// Database file: ~/.harness/store/memory.db (global, not in project dir)
+// Database file: ~/.h/store/memory.db (global, not in project dir)
 
 import Database from "better-sqlite3";
 import path from "path";
 import fs from "fs";
 import os from "os";
-import { MEMORY_DB_FILE } from "./harnessPaths";
+import { MEMORY_DB_FILE } from "./hPaths";
 
 // ── Types ──
 
