@@ -50,9 +50,9 @@ export async function loadPersistedState(): Promise<void> {
     if (!state || Object.keys(state).length === 0) return;
 
     for (const [key, value] of Object.entries(state)) {
-      // Only restore if the key doesn't already exist in localStorage
-      // (localStorage takes precedence as it's the live session data)
-      if (localStorage.getItem(key) === null && key.startsWith(LOCALSTORAGE_PREFIX)) {
+      // Restore all persisted keys — overwrite any stale localStorage
+      // (e.g. from browser cache in Electron dev mode)
+      if (key.startsWith(LOCALSTORAGE_PREFIX)) {
         try {
           localStorage.setItem(key, value);
         } catch {}

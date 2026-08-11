@@ -168,6 +168,14 @@ export default function App() {
     triggerSave();
   }, [fsBasePath]);
 
+  // Update Electron window title to show open folder
+  useEffect(() => {
+    if (fsBasePath && window.hDesktop?.setTitle) {
+      const name = fsBasePath.split(/[\\/]/).pop() || fsBasePath;
+      window.hDesktop.setTitle(name);
+    }
+  }, [fsBasePath]);
+
   // Keep a ref to the latest saveOpenTabs so beforeunload never goes stale
   const saveOpenTabsRef = useRef(saveOpenTabs);
   saveOpenTabsRef.current = saveOpenTabs;
@@ -823,7 +831,7 @@ export default function App() {
         { label: "Kill Terminal", action: () => setTermVisible(false) },
       ],
     },
-    { label: "Help", items: [{ label: "About H", action: () => alert("H\nAI-powered coding workspace\nPowered by DeepSeek") }] },
+    { label: "Help", items: [{ label: "About", action: () => alert("AI-powered coding workspace\nPowered by DeepSeek") }] },
   ], [fsBasePath, statusBar.hasEditor, openFolderImmediate, openFileImmediate, createNewProject, createNewFile, handleBrowserClose, saveOpenTabs]);
 
   return (

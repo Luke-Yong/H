@@ -730,6 +730,19 @@ async function createMainWindow() {
 
 // Must be set before app.whenReady() on Windows to apply the taskbar icon
 app.setAppUserModelId("com.h.ide.v1");
+app.name = "H";
+
+// ── Dynamic window title ──
+ipcMain.on("h:setTitle", (event, title) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (win && title) {
+    win.setTitle(title);
+    // On Windows, setting the title also updates the taskbar entry label
+    if (process.platform === "win32") {
+      win.setAppDetails?.({ appId: "com.h.ide.v1" });
+    }
+  }
+});
 
 // ── Custom single-instance lock (PID-file based) ──
 // Electron's requestSingleInstanceLock() is unreliable on Windows (ACCESS_DENIED).

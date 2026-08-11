@@ -92,7 +92,6 @@ export default function MenuBar({ menus }: Props) {
     <div className="menu-bar" onDoubleClick={() => { window.hDesktop?.maximize?.(); syncMax(); }}>
       <div className="menu-bar-app-name">
         <img src="/icon.svg" className="menu-bar-app-icon" alt="" />
-        H
       </div>
       <div className="menu-bar-menus">
         {menus.map((menu, i) => (

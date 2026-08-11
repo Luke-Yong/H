@@ -15,11 +15,20 @@ async function main() {
     process.exit(1);
   }
 
-  await rcedit(exePath, { icon: icoPath });
-  console.log("Icon embedded into", exePath);
+  await rcedit(exePath, {
+    icon: icoPath,
+    "version-string": {
+      FileDescription: "H",
+      ProductName: "H",
+      CompanyName: "H",
+      InternalName: "H.exe",
+      OriginalFilename: "H.exe",
+    },
+  });
+  console.log("Icon & version info embedded into", exePath);
 }
 
 main().catch((err) => {
-  console.error("Icon embedding failed:", err);
+  console.error("Icon/version embedding failed:", err);
   process.exit(1);
 });

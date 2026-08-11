@@ -140,7 +140,7 @@ function AboutTab() {
         <svg className="settings-about-logo" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
           <rect x="3" y="2" width="5.5" height="20" rx="2.75" fill="#4D6BFE"/><rect x="15.5" y="2" width="5.5" height="20" rx="2.75" fill="#4D6BFE"/><rect x="3" y="9.5" width="18" height="5" rx="2.5" fill="#4D6BFE"/>
         </svg>
-        <h2 className="settings-about-title">H</h2>
+        <h2 className="settings-about-title"></h2>
         <p className="settings-about-subtitle">AI-powered coding workspace<br />Powered by DeepSeek</p>
         <p className="settings-about-version">Version 0.0.1</p>
       </div>

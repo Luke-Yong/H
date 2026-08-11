@@ -18,6 +18,7 @@ declare global {
       close?: () => void;
       isMaximized?: () => Promise<boolean>;
       newWindow?: () => void;
+      setTitle?: (title: string) => void;
     };
   }
 

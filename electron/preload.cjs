@@ -24,4 +24,5 @@ contextBridge.exposeInMainWorld("hDesktop", {
   close: () => ipcRenderer.send("h:close"),
   isMaximized: () => ipcRenderer.invoke("h:isMaximized"),
   newWindow: () => ipcRenderer.send("h:newWindow"),
+  setTitle: (title) => ipcRenderer.send("h:setTitle", title),
 });

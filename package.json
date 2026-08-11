@@ -44,11 +44,16 @@
       "node_modules/@esbuild/**/*"
     ],
     "win": {
-      "signAndEditExecutable": false
+      "signAndEditExecutable": false,
+      "artifactName": "h Setup ${version}.${ext}"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
+    },
+    "extraMetadata": {
+      "name": "H",
+      "description": "H - AI coding agent"
     }
   },
   "devDependencies": {
