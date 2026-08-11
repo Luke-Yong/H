@@ -1,4 +1,4 @@
-# H — Architecture
+﻿# H — Architecture
 
 AI-powered coding agent using DeepSeek.
 
@@ -55,9 +55,9 @@ H uses a **client-entered API key** model. Enter your DeepSeek API key once in t
 2. Enter your API key (starts with `sk-...`)
 3. Click Save
 
-The key is sent once to the server and stored persistently on disk (`~/.H/store/api-keys.enc`, AES-256-GCM encrypted) — it is never persisted in browser `localStorage`, survives app restarts and updates, and is never re-sent in agent request bodies. The key remains stored until explicitly removed via "Remove API Key" in the UI or the `~/.H/` directory is deleted.
+The key is sent once to the server and stored persistently on disk (`~/.h/store/api-keys.enc`, AES-256-GCM encrypted) — it is never persisted in browser `localStorage`, survives app restarts and updates, and is never re-sent in agent request bodies. The key remains stored until explicitly removed via "Remove API Key" in the UI or the `~/.h/` directory is deleted.
 
-All client-side state (selected model, chat history, recent folder paths, open editor tabs, model presets, terminal history) is stored in browser `localStorage` and **mirrored to `~/.H/store/client-state.json`** on every change and on app exit. This ensures data survives reinstalls, since `%USERPROFILE%\.H\` is outside the Electron installer's scope. On startup, the client fetches `GET /api/client/state` and restores any previously saved state.
+All client-side state (selected model, chat history, recent folder paths, open editor tabs, model presets, terminal history) is stored in browser `localStorage` and **mirrored to `~/.h/store/client-state.json`** on every change and on app exit. This ensures data survives reinstalls, since `%USERPROFILE%\.H\` is outside the Electron installer's scope. On startup, the client fetches `GET /api/client/state` and restores any previously saved state.
 
 Get a key at [platform.deepseek.com](https://platform.deepseek.com).
 
@@ -65,18 +65,18 @@ Get a key at [platform.deepseek.com](https://platform.deepseek.com).
 
 | Data | Location | Format |
 |------|----------|--------|
-| **API Key** | `~/.H/store/api-keys.enc` | AES-256-GCM encrypted |
-| **Encryption key** | `~/.H/.key` | Auto-generated, machine-specific |
+| **API Key** | `~/.h/store/api-keys.enc` | AES-256-GCM encrypted |
+| **Encryption key** | `~/.h/.key` | Auto-generated, machine-specific |
 | **Model & Thinking Mode** | `localStorage` keys `H-model`, `H-thinking` | Plain text |
 | **Model Presets** | `localStorage` keys `H-presets`, `H-active-preset` | JSON array |
-| **Chat History & Preferences** | `localStorage` → mirrored to `~/.H/store/client-state.json` | JSON on disk |
-| **Agent Memory** | `~/.H/store/memory.db` | SQLite (WAL mode) |
-| **File Tracking Metadata** | `~/.H/store/file-tracking.json` | JSON (paths, sizes, checksums; no file contents) |
-| **Knowledge Graph Snapshots** | `~/.H/snapshots/file-tree-snapshot-<hash>.kg` | Edge-list format |
-| **Port Discovery** | `%TEMP%/H-ports/express-port`, `vite-port` | Runtime only, not persisted |
+| **Chat History & Preferences** | `localStorage` → mirrored to `~/.h/store/client-state.json` | JSON on disk |
+| **Agent Memory** | `~/.h/store/memory.db` | SQLite (WAL mode) |
+| **File Tracking Metadata** | `~/.h/store/file-tracking.json` | JSON (paths, sizes, checksums; no file contents) |
+| **Knowledge Graph Snapshots** | `~/.h/snapshots/file-tree-snapshot-<hash>.kg` | Edge-list format |
+| **Port Discovery** | `%TEMP%/h-ports/express-port`, `vite-port` | Runtime only, not persisted |
 | **Single-instance Lock** | `%TEMP%/H-pid` | PID file |
 
-Deleting `~/.H/` removes all H persistent data. Temp files are cleaned on clean shutdown.
+Deleting `~/.h/` removes all H persistent data. Temp files are cleaned on clean shutdown.
 
 ## Start
 
@@ -88,25 +88,25 @@ This starts both the backend and frontend. The OS assigns both ports; check cons
 
 **Port discovery flow:**
 
-1. Express starts → `server.listen(0)` → OS assigns a free port → port written to `~/.H/ports/express-port`
-2. Vite starts immediately (no blocking) → proxies `/api`, `/ws`, `/_browser` via middleware that reads `~/.H/ports/express-port` on each request → returns `503 Service Unavailable` until Express is live, then forwards normally
-3. Vite binds → `port: 0` → OS assigns a free port → port written to `~/.H/ports/vite-port`
+1. Express starts → `server.listen(0)` → OS assigns a free port → port written to `~/.h/ports/express-port`
+2. Vite starts immediately (no blocking) → proxies `/api`, `/ws`, `/_browser` via middleware that reads `~/.h/ports/express-port` on each request → returns `503 Service Unavailable` until Express is live, then forwards normally
+3. Vite binds → `port: 0` → OS assigns a free port → port written to `~/.h/ports/vite-port`
 4. Electron (desktop mode) reads both files to connect to Express and load the Vite dev page
 
 Both servers let the OS decide — no hardcoded port numbers anywhere.
 
-**Stale port cleanup:** On shutdown (Ctrl+C, SIGTERM), Express deletes the port file. If Express crashes unexpectedly and the file lingers, the Vite proxy middleware detects the dead port (`ECONNREFUSED`), invalidates the cached port, and re-reads the file on the next request. Port files are stored in `%TEMP%/H-ports/` (platform temp directory) to avoid filesystem permission issues on sandboxed environments.
+**Stale port cleanup:** On shutdown (Ctrl+C, SIGTERM), Express deletes the port file. If Express crashes unexpectedly and the file lingers, the Vite proxy middleware detects the dead port (`ECONNREFUSED`), invalidates the cached port, and re-reads the file on the next request. Port files are stored in `%TEMP%/h-ports/` (platform temp directory) to avoid filesystem permission issues on sandboxed environments.
 
-**Single-instance lock:** The desktop app uses a custom PID-file lock instead of Electron's `app.requestSingleInstanceLock()` (which is unreliable on Windows sandboxed environments). On startup, it writes the current PID to `%TEMP%/H-pid`; if a PID file already exists with a live process, the new instance quits. On clean shutdown, the PID file is removed. This prevents port file trampling and shared-state (`~/.H/` files) corruption that would occur if two Express servers competed for the same resources.
+**Single-instance lock:** The desktop app uses a custom PID-file lock instead of Electron's `app.requestSingleInstanceLock()` (which is unreliable on Windows sandboxed environments). On startup, it writes the current PID to `%TEMP%/H-pid`; if a PID file already exists with a live process, the new instance quits. On clean shutdown, the PID file is removed. This prevents port file trampling and shared-state (`~/.h/` files) corruption that would occur if two Express servers competed for the same resources.
 
-**File integrity:** All `~/.H/` files are local to the user's machine. If modified by external actors, the effects are non-destructive — the app detects corruption and resets gracefully:
+**File integrity:** All `~/.h/` files are local to the user's machine. If modified by external actors, the effects are non-destructive — the app detects corruption and resets gracefully:
 
 | File | If tampered |
 |------|-------------|
 | `ports/express-port` | `waitForOwnServerPort` validates via `/api/health` + PID check. Wrong PID → timeout → app shows startup error. |
 | `ports/vite-port` | Electron loads wrong URL → connection refused → loading screen with timeout. |
 | `store/client-state.json` | `JSON.parse` failure → all state resets to defaults. Valid but wrong JSON → UI shows bad model/paths; model strings just fail API calls; paths are displayed, never auto-opened. |
-| `store/api-keys.enc` | AES-256-GCM auth tag mismatch on decrypt → API keys reset. File is unreadable without the machine key at `~/.H/.key`. |
+| `store/api-keys.enc` | AES-256-GCM auth tag mismatch on decrypt → API keys reset. File is unreadable without the machine key at `~/.h/.key`. |
 | `store/memory.db` | SQLite corruption → memory features reset. |
 | `.key` | Replaced or deleted → existing `api-keys.enc` becomes permanently unreadable (new key generated on next save). |
 
@@ -138,7 +138,7 @@ H is a client-server application with an optional Electron desktop shell.
 
 ### Server (`server/`)
 
-The Node.js Express server is the backbone. It owns all backend logic and never runs in the browser. The OS assigns a free port at startup, written to `~/.H/ports/express-port` for discovery.
+The Node.js Express server is the backbone. It owns all backend logic and never runs in the browser. The OS assigns a free port at startup, written to `~/.h/ports/express-port` for discovery.
 
 | Layer | File | Role |
 |---|---|---|
@@ -500,7 +500,7 @@ H uses a dynamic file tracking system that auto-detects Git availability — fol
 │       │                                                            │
 │       └── No Git ──────► Watcher mode                              │
 │           Uses fs.watch (built-in Node API) to monitor changes     │
-│           Metadata cache stored in ~/.H/store/file-tracking.json   │
+│           Metadata cache stored in ~/.h/store/file-tracking.json   │
 │           No dependencies needed                                   │
 │                                                                    │
 │  → Status bar shows spinner + "Scanning..." during init            │
@@ -543,8 +543,8 @@ When the agent runs, H sends the project file tree as part of the system prompt 
 ```
 ┌─ Folder open ───────────────────────────────────────────────────────┐
 │  → buildSnapshot() walks entire project (skips node_modules/.git)   │
-│  → Knowledge graph built (~/.H/snapshots/file-tree-snapshot-<hash>.kg) │
-│  → Visualization written to ~/.H/snapshots/file-tree-snapshot-<hash>.txt │
+│  → Knowledge graph built (~/.h/snapshots/file-tree-snapshot-<hash>.kg) │
+│  → Visualization written to ~/.h/snapshots/file-tree-snapshot-<hash>.txt │
 │  → Status bar: spinner + "Scanning..." during the walk              │
 └────────────────────────────────────────────────────────────────────┘
                               │
@@ -576,12 +576,12 @@ Each workspace gets a unique snapshot filename keyed by an MD5 hash of its resol
 
 ```
 d:\Work Projects\H   → MD5 → a1b2c3d4e5f6
-                             → ~/.H/snapshots/file-tree-snapshot-a1b2c3d4e5f6.kg
-                             → ~/.H/snapshots/file-tree-snapshot-a1b2c3d4e5f6.txt
+                             → ~/.h/snapshots/file-tree-snapshot-a1b2c3d4e5f6.kg
+                             → ~/.h/snapshots/file-tree-snapshot-a1b2c3d4e5f6.txt
 
 d:\Other Projects\app       → MD5 → f6e5d4c3b2a1
-                             → ~/.H/snapshots/file-tree-snapshot-f6e5d4c3b2a1.kg
-                             → ~/.H/snapshots/file-tree-snapshot-f6e5d4c3b2a1.txt
+                             → ~/.h/snapshots/file-tree-snapshot-f6e5d4c3b2a1.kg
+                             → ~/.h/snapshots/file-tree-snapshot-f6e5d4c3b2a1.txt
 ```
 
 - **Same folder, same hash** — reopening a project overwrites its existing snapshot (no stale duplicates).
@@ -607,11 +607,11 @@ d:\Other Projects\app       → MD5 → f6e5d4c3b2a1
 | File | Role |
 |------|------|
 | `server/fileTracking.ts` | `FileTrackingService` — singleton orchestrating Git or watcher mode, periodic Git detection, snapshot/patch logic |
-| `server/fileTrackingStore.ts` | `FileTrackingStore` — lightweight JSON-backed cache (`~/.H/store/file-tracking.json`) for file metadata |
+| `server/fileTrackingStore.ts` | `FileTrackingStore` — lightweight JSON-backed cache (`~/.h/store/file-tracking.json`) for file metadata |
 | `server/knowledgeGraph.ts` | `buildKnowledgeGraph()` — builds codebase graph with CONTAINS + IMPORTS edges, `.kg` serialization, `.txt` visualization |
-| `~/.H/store/file-tracking.json` | On-disk metadata cache for watcher mode |
-| `~/.H/snapshots/file-tree-snapshot-<hash>.kg` | Per-workspace Knowledge Graph — nodes (dirs/files) + CONTAINS edges + parsed IMPORTS |
-| `~/.H/snapshots/file-tree-snapshot-<hash>.txt` | Human-readable visualization sidecar (nested tree with import annotations) |
+| `~/.h/store/file-tracking.json` | On-disk metadata cache for watcher mode |
+| `~/.h/snapshots/file-tree-snapshot-<hash>.kg` | Per-workspace Knowledge Graph — nodes (dirs/files) + CONTAINS edges + parsed IMPORTS |
+| `~/.h/snapshots/file-tree-snapshot-<hash>.txt` | Human-readable visualization sidecar (nested tree with import annotations) |
 
 ## Knowledge Graph
 
@@ -652,7 +652,7 @@ Named imports (`import { foo, bar } from './module'`) are matched to target file
 
 ### .kg Format (on disk)
 
-A compact edge-list format in `~/.H/snapshots/file-tree-snapshot-<hash>.kg`:
+A compact edge-list format in `~/.h/snapshots/file-tree-snapshot-<hash>.kg`:
 
 ```
 # Knowledge Graph v2 — D:\Work Projects\H
@@ -742,7 +742,7 @@ H gives the AI agent access to your filesystem, terminal, and browser. The follo
 ### API & Transport
 
 - All DeepSeek API calls use **HTTPS** (`https://api.deepseek.com/v1`).
-- Client-entered DeepSeek API keys are stored persistently on disk at `~/.H/store/api-keys.enc` (AES-256-GCM encrypted), keyed by an HTTP-only session cookie. Keys are never written to browser `localStorage`.
+- Client-entered DeepSeek API keys are stored persistently on disk at `~/.h/store/api-keys.enc` (AES-256-GCM encrypted), keyed by an HTTP-only session cookie. Keys are never written to browser `localStorage`.
 - Agent requests and `/api/models` no longer include the raw key in request bodies or query strings after the initial credential submission.
 - The API key is never exposed to child processes (see Terminal Sandbox below).
 - `/api/chat/agent/config` exposes only configuration status (`apiKeyConfigured`, `source`), not the key value itself.
@@ -863,7 +863,7 @@ Agent calls run_in_terminal
 
 #### `read_graph` — Knowledge Graph Queries
 
-`read_graph` queries the codebase knowledge graph (see [Knowledge Graph](#knowledge-graph) for schema details). It reads the `.kg` file from `~/.H/snapshots/` and answers structural questions without scanning file contents. Use it for dependency analysis, symbol discovery, and project structure exploration.
+`read_graph` queries the codebase knowledge graph (see [Knowledge Graph](#knowledge-graph) for schema details). It reads the `.kg` file from `~/.h/snapshots/` and answers structural questions without scanning file contents. Use it for dependency analysis, symbol discovery, and project structure exploration.
 
 ##### Query Types
 
@@ -1178,7 +1178,7 @@ H includes a **cross-session memory system** backed by SQLite. The agent can sto
 Agent detects an important fact
   → calls remember(key, value, category, tags)
   → value is optionally embedded via DeepSeek embeddings API
-  → stored in ~/.H/store/memory.db (SQLite, global user store)
+  → stored in ~/.h/store/memory.db (SQLite, global user store)
 
 Next session:
   → Agent calls recall(query: "UI framework")
@@ -1199,9 +1199,9 @@ Next session:
 
 | Detail | Value |
 |--------|-------|
-| Database | SQLite (WAL mode) at `~/.H/store/memory.db` (global, not in project dir) |
-| API Keys | AES-256-GCM encrypted file at `~/.H/store/api-keys.enc` (persistent, survives restarts and app updates) |
-| Client State | JSON file at `~/.H/store/client-state.json` — mirrors all browser `localStorage` data (model, chat history, recent paths, open tabs, presets, terminal history) so it survives reinstalls |
+| Database | SQLite (WAL mode) at `~/.h/store/memory.db` (global, not in project dir) |
+| API Keys | AES-256-GCM encrypted file at `~/.h/store/api-keys.enc` (persistent, survives restarts and app updates) |
+| Client State | JSON file at `~/.h/store/client-state.json` — mirrors all browser `localStorage` data (model, chat history, recent paths, open tabs, presets, terminal history) so it survives reinstalls |
 | Schema | `id`, `key` (unique), `value`, `category`, `tags`, `embedding` (BLOB), `created_at`, `updated_at` |
 | Embeddings | Generated via DeepSeek `/v1/embeddings` endpoint (optional; graceful fallback to keyword search if unavailable) |
 | Retrieval | Embedding cosine similarity search → keyword `LIKE` fallback → list-all |
@@ -1495,7 +1495,7 @@ When running H from source (`npm run dev`), you have both options:
 
 #### Option A: SSE (simplest — no extra config)
 
-Start the server, then point any MCP client at the running endpoint (check the console output for the port, or read `~/.H/ports/express-port`):
+Start the server, then point any MCP client at the running endpoint (check the console output for the port, or read `~/.h/ports/express-port`):
 
 ```json
 {
@@ -1547,7 +1547,7 @@ Cursor config (`Settings > MCP > Add Server`):
 
 ### Electron desktop app (packaged)
 
-When H is installed as a desktop app, the server starts automatically. The port is written to `~/.H/ports/express-port`. Use SSE transport only — no `command`/`cwd` needed:
+When H is installed as a desktop app, the server starts automatically. The port is written to `~/.h/ports/express-port`. Use SSE transport only — no `command`/`cwd` needed:
 
 ```json
 {
@@ -1622,7 +1622,11 @@ H/
 ├── package-lock.json
 ├── tsconfig.json                    # TypeScript config for server (ES2022, strict, vitest globals)
 ├── vitest.config.ts                 # Vitest runner config (node env, 30s timeout)
-├── README.md                        # You're reading it
+├── README.md                        # Landing page with USP comparison
+├── README_CN.md                     # Chinese landing page
+├── ARCHITECTURE.md                  # Full architecture documentation
+├── ARCHITECTURE_CN.md               # Chinese architecture documentation
+├── LICENSE                          # AGPL-3.0
 │
 ├── build/
 │   └── icon assets (ico, png, svg)  # Electron app icons
@@ -1639,11 +1643,11 @@ H/
 │   ├── lsp.ts                       # LSP client: spawns language servers (pyright, gopls, etc.), SSE diagnostic streaming, 30+ languages
 │   ├── mcp.ts                       # MCP server: JSON-RPC handler, tool set for external AI clients, stdio + SSE transport
 │   ├── mcp-server.ts                # Standalone MCP server entry point (stdio mode)
-│   ├── memory.ts                    # SQLite persistent memory store (~/.H/store/memory.db): keyword + embedding search, used by agent remember/recall/forget tools
-│   ├── cryptoStore.ts               # AES-256-GCM encrypted API key storage (~/.H/store/api-keys.enc)
-│   ├── HPaths.ts              # Centralized path resolution for ~/.H/ directory structure
+│   ├── memory.ts                    # SQLite persistent memory store (~/.h/store/memory.db): keyword + embedding search, used by agent remember/recall/forget tools
+│   ├── cryptoStore.ts               # AES-256-GCM encrypted API key storage (~/.h/store/api-keys.enc)
+│   ├── hPaths.ts              # Centralized path resolution for ~/.h/ directory structure
 │   ├── fileTracking.ts              # Smart file tracking: auto-detects Git vs fs.watch watcher mode, mid-session Git detection, snapshot/patch file tree context
-│   ├── fileTrackingStore.ts         # JSON-backed file metadata cache (~/.H/store/file-tracking.json) for watcher mode
+│   ├── fileTrackingStore.ts         # JSON-backed file metadata cache (~/.h/store/file-tracking.json) for watcher mode
 │   ├── knowledgeGraph.ts            # Codebase knowledge graph builder: dir/file nodes, CONTAINS + IMPORTS edges, .kg serialization, visualization
 │   └── __tests__/
 │       ├── agent.tooldefs.test.ts    # Tool definition schema validation
@@ -1654,7 +1658,7 @@ H/
 │
 ├── client/
 │   ├── package.json                 # Client deps (React 18, Monaco, xterm.js), Vite + TypeScript
-│   ├── vite.config.ts               # Vite dev config: reads Express port from ~/.H/ports/express-port, proxies /api + /ws + /_browser
+│   ├── vite.config.ts               # Vite dev config: reads Express port from ~/.h/ports/express-port, proxies /api + /ws + /_browser
 │   ├── tsconfig.json                # Client TypeScript config (ES2020, DOM, react-jsx)
 │   ├── index.html                   # SPA entry: mounts React app in <div id="root">
 │   ├── public/
@@ -1663,9 +1667,9 @@ H/
 │       ├── main.tsx                 # React DOM entry: renders <App />
 │       ├── App.tsx                  # Root component: folder picker, session state, resizable layout (editor + agent console)
 │       ├── App.css                  # Global dark-theme styles: pane layout, editor chrome, agent cards, sub-agent color coding (11 agent types), welcome screen
-│       ├── electron.d.ts            # Type declarations for window.HDesktop bridge and <webview> JSX
+│       ├── electron.d.ts            # Type declarations for window.hDesktop bridge and <webview> JSX
 │       ├── vite-env.d.ts            # Vite client type declarations
-│       ├── stateSync.ts             # Client state persistence: mirrors all localStorage to ~/.H/store/client-state.json (survives reinstalls)
+│       ├── stateSync.ts             # Client state persistence: mirrors all localStorage to ~/.h/store/client-state.json (survives reinstalls)
 │       ├── panes/
 │       │   ├── EditorPane.tsx       # Main editor: Monaco tabs, file tree, browser tab strip, terminal, menu bar, status bar
 │       │   ├── AgentConsole.tsx     # Agent chat UI: streaming messages, diff previews, permission prompts, tool cards with agent color coding, markdown rendering
@@ -1685,7 +1689,7 @@ H/
 │
 └── electron/
     ├── main.cjs                      # Electron main process: BrowserWindow, server lifecycle, IPC (folder/file picker, geo, permissions), browser session
-    ├── preload.cjs                   # Preload bridge: exposes window.HDesktop (openFolder, openFile, onBrowserOpenUrl, setSitePermissions)
+    ├── preload.cjs                   # Preload bridge: exposes window.hDesktop (openFolder, openFile, onBrowserOpenUrl, setSitePermissions)
     ├── browser-preload.cjs           # Browser webview preload: geolocation bridge, _blank link interception
     └── native-location.cjs           # Windows geolocation via PowerShell GeoCoordinateWatcher
 ```

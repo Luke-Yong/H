@@ -1,4 +1,4 @@
-# H — 架构
+﻿# H — 架构
 
 基于 DeepSeek 的 AI 编程助手。
 
@@ -55,9 +55,9 @@ H 使用**客户端输入 API Key** 的模式。在 H UI 的模型选择器中�
 2. 输入你的 API Key（以 `sk-...` 开头）
 3. 点击保存
 
-Key 会一次性发送到服务器并持久化存储在磁盘上（`~/.H/store/api-keys.enc`，AES-256-GCM 加密）——它永远不会存储在浏览器的 `localStorage` 中，在应用重启和更新后仍然有效，并且永远不会在 Agent 请求体中重新发送。Key 会一直保留，直到通过 UI 中的"移除 API Key"或删除 `~/.H/` 目录来显式移除。
+Key 会一次性发送到服务器并持久化存储在磁盘上（`~/.h/store/api-keys.enc`，AES-256-GCM 加密）——它永远不会存储在浏览器的 `localStorage` 中，在应用重启和更新后仍然有效，并且永远不会在 Agent 请求体中重新发送。Key 会一直保留，直到通过 UI 中的"移除 API Key"或删除 `~/.h/` 目录来显式移除。
 
-所有客户端状态（选中的模型、聊天记录、最近文件夹路径、打开的编辑器标签页、模型预设、终端历史）都存储在浏览器的 `localStorage` 中，并在每次变更和应用退出时**同步镜像到 `~/.H/store/client-state.json`**。这确保数据在重装后仍然存在，因为 `%USERPROFILE%\.H\` 位于 Electron 安装程序的作用域之外。启动时，客户端会获取 `GET /api/client/state` 并恢复之前保存的所有状态。
+所有客户端状态（选中的模型、聊天记录、最近文件夹路径、打开的编辑器标签页、模型预设、终端历史）都存储在浏览器的 `localStorage` 中，并在每次变更和应用退出时**同步镜像到 `~/.h/store/client-state.json`**。这确保数据在重装后仍然存在，因为 `%USERPROFILE%\.H\` 位于 Electron 安装程序的作用域之外。启动时，客户端会获取 `GET /api/client/state` 并恢复之前保存的所有状态。
 
 在 [platform.deepseek.com](https://platform.deepseek.com) 获取 API Key。
 
@@ -71,25 +71,25 @@ npm run dev
 
 **端口发现流程：**
 
-1. Express 启动 → `server.listen(0)` → 操作系统分配空闲端口 → 端口写入 `%TEMP%/H-ports/express-port`
-2. Vite 立即启动（不阻塞）→ 通过中间件代理 `/api`、`/ws`、`/_browser`，该中间件在每次请求时读取 `%TEMP%/H-ports/express-port` → 在 Express 可用之前返回 `503 Service Unavailable`，之后就正常转发
-3. Vite 绑定 → `port: 0` → 操作系统分配空闲端口 → 端口写入 `%TEMP%/H-ports/vite-port`
+1. Express 启动 → `server.listen(0)` → 操作系统分配空闲端口 → 端口写入 `%TEMP%/h-ports/express-port`
+2. Vite 立即启动（不阻塞）→ 通过中间件代理 `/api`、`/ws`、`/_browser`，该中间件在每次请求时读取 `%TEMP%/h-ports/express-port` → 在 Express 可用之前返回 `503 Service Unavailable`，之后就正常转发
+3. Vite 绑定 → `port: 0` → 操作系统分配空闲端口 → 端口写入 `%TEMP%/h-ports/vite-port`
 4. Electron（桌面模式）读取这两个文件以连接 Express 并加载 Vite 开发页面
 
 两个服务器都让操作系统自主决定端口 — 没有任何硬编码的端口号。
 
-**过期端口清理：** 在关闭时（Ctrl+C、SIGTERM），Express 会删除端口文件。如果 Express 意外崩溃导致文件残留，Vite 代理中间件会检测到死端口（`ECONNREFUSED`），使缓存的端口失效，并在下次请求时重新读取文件。端口文件存储在 `%TEMP%/H-ports/`（系统临时目录）以避免沙箱环境的文件系统权限问题。
+**过期端口清理：** 在关闭时（Ctrl+C、SIGTERM），Express 会删除端口文件。如果 Express 意外崩溃导致文件残留，Vite 代理中间件会检测到死端口（`ECONNREFUSED`），使缓存的端口失效，并在下次请求时重新读取文件。端口文件存储在 `%TEMP%/h-ports/`（系统临时目录）以避免沙箱环境的文件系统权限问题。
 
-**单实例锁：** 桌面应用使用自定义 PID 文件锁替代 Electron 的 `app.requestSingleInstanceLock()`（Windows 沙箱环境下不可靠）。启动时将当前 PID 写入 `%TEMP%/H-pid`；如果 PID 文件已存在且对应进程仍存活，新实例将退出。正常关闭时删除 PID 文件。这避免了端口文件冲突和共享状态（`~/.H/` 文件）损坏的问题。
+**单实例锁：** 桌面应用使用自定义 PID 文件锁替代 Electron 的 `app.requestSingleInstanceLock()`（Windows 沙箱环境下不可靠）。启动时将当前 PID 写入 `%TEMP%/H-pid`；如果 PID 文件已存在且对应进程仍存活，新实例将退出。正常关闭时删除 PID 文件。这避免了端口文件冲突和共享状态（`~/.h/` 文件）损坏的问题。
 
-**文件完整性：** 所有 `~/.H/` 文件仅存储在用户本机。如被外部修改，影响为非破坏性的——应用会检测损坏并优雅重置：
+**文件完整性：** 所有 `~/.h/` 文件仅存储在用户本机。如被外部修改，影响为非破坏性的——应用会检测损坏并优雅重置：
 
 | 文件 | 如被篡改 |
 |------|----------|
 | `ports/express-port` | `waitForOwnServerPort` 通过 `/api/health` + PID 校验验证端口。PID 不匹配 → 超时 → 应用显示启动错误。 |
 | `ports/vite-port` | Electron 加载错误 URL → 连接被拒绝 → 加载页面超时。 |
 | `store/client-state.json` | `JSON.parse` 失败 → 所有状态重置为默认值。有效但错误的 JSON → UI 显示错误的模型/路径；模型字符串仅导致 API 调用失败；路径仅显示，不会自动打开。 |
-| `store/api-keys.enc` | AES-256-GCM 认证标签解密不匹配 → API 密钥重置。文件在没有 `~/.H/.key` 机器密钥的情况下不可读。 |
+| `store/api-keys.enc` | AES-256-GCM 认证标签解密不匹配 → API 密钥重置。文件在没有 `~/.h/.key` 机器密钥的情况下不可读。 |
 | `store/memory.db` | SQLite 损坏 → 记忆功能重置。 |
 | `.key` | 被替换或删除 → 现有 `api-keys.enc` 永久不可读（下次保存时生成新密钥）。 |
 
@@ -121,7 +121,7 @@ H 是一个客户端-服务器应用，可选配 Electron 桌面壳。
 
 ### 服务端（`server/`）
 
-Node.js Express 服务器是骨干。它拥有所有后端逻辑，从不在浏览器中运行。操作系统在启动时分配空闲端口，并写入 `%TEMP%/H-ports/express-port` 以供发现。
+Node.js Express 服务器是骨干。它拥有所有后端逻辑，从不在浏览器中运行。操作系统在启动时分配空闲端口，并写入 `%TEMP%/h-ports/express-port` 以供发现。
 
 | 层 | 文件 | 职责 |
 |---|---|---|
@@ -483,7 +483,7 @@ H 使用动态文件追踪系统，自动检测 Git 可用性 — 遵循现代 I
 │       │                                                            │
 │       └── 无 Git ────► 监视器模式                                   │
 │           使用 fs.watch（Node 内置 API）监视变更                    │
-│           元数据缓存存储在 ~/.H/store/file-tracking.json      │
+│           元数据缓存存储在 ~/.h/store/file-tracking.json      │
 │           无需依赖                                                  │
 │                                                                    │
 │  → 状态栏在初始化期间显示旋转器 + "扫描中..."                        │
@@ -526,8 +526,8 @@ H 使用动态文件追踪系统，自动检测 Git 可用性 — 遵循现代 I
 ```
 ┌─ 打开文件夹 ────────────────────────────────────────────────────────┐
 │  → buildSnapshot() 遍历整个项目（跳过 node_modules/.git）           │
-│  → 构建知识图谱 (~/.H/snapshots/file-tree-snapshot-<hash>.kg)  │
-│  → 可视化写入 ~/.H/snapshots/file-tree-snapshot-<hash>.txt    │
+│  → 构建知识图谱 (~/.h/snapshots/file-tree-snapshot-<hash>.kg)  │
+│  → 可视化写入 ~/.h/snapshots/file-tree-snapshot-<hash>.txt    │
 │  → 状态栏：遍历期间显示旋转器 + "扫描中..."                         │
 └────────────────────────────────────────────────────────────────────┘
                               │
@@ -559,12 +559,12 @@ H 使用动态文件追踪系统，自动检测 Git 可用性 — 遵循现代 I
 
 ```
 d:\Work Projects\H   → MD5 → a1b2c3d4e5f6
-                             → ~/.H/snapshots/file-tree-snapshot-a1b2c3d4e5f6.kg
-                             → ~/.H/snapshots/file-tree-snapshot-a1b2c3d4e5f6.txt
+                             → ~/.h/snapshots/file-tree-snapshot-a1b2c3d4e5f6.kg
+                             → ~/.h/snapshots/file-tree-snapshot-a1b2c3d4e5f6.txt
 
 d:\Other Projects\app       → MD5 → f6e5d4c3b2a1
-                             → ~/.H/snapshots/file-tree-snapshot-f6e5d4c3b2a1.kg
-                             → ~/.H/snapshots/file-tree-snapshot-f6e5d4c3b2a1.txt
+                             → ~/.h/snapshots/file-tree-snapshot-f6e5d4c3b2a1.kg
+                             → ~/.h/snapshots/file-tree-snapshot-f6e5d4c3b2a1.txt
 ```
 
 - **同一文件夹，同一哈希** — 重新打开项目会覆盖其现有快照（无过期重复）。
@@ -590,11 +590,11 @@ d:\Other Projects\app       → MD5 → f6e5d4c3b2a1
 | 文件 | 职责 |
 |------|------|
 | `server/fileTracking.ts` | `FileTrackingService` — 单例，编排 Git 或监视器模式、定期 Git 检测、快照/补丁逻辑 |
-| `server/fileTrackingStore.ts` | `FileTrackingStore` — 轻量级 JSON 缓存（`~/.H/store/file-tracking.json`）用于文件元数据 |
+| `server/fileTrackingStore.ts` | `FileTrackingStore` — 轻量级 JSON 缓存（`~/.h/store/file-tracking.json`）用于文件元数据 |
 | `server/knowledgeGraph.ts` | `buildKnowledgeGraph()` — 构建代码库图谱，包含 CONTAINS + IMPORTS 边、`.kg` 序列化、`.txt` 可视化 |
-| `~/.H/store/file-tracking.json` | 监视器模式的磁盘元数据缓存 |
-| `~/.H/snapshots/file-tree-snapshot-<hash>.kg` | 每工作区知识图谱 — 节点（目录/文件）+ CONTAINS 边 + 解析的 IMPORTS |
-| `~/.H/snapshots/file-tree-snapshot-<hash>.txt` | 人类可读的可视化副文件（带导入注释的嵌套树） |
+| `~/.h/store/file-tracking.json` | 监视器模式的磁盘元数据缓存 |
+| `~/.h/snapshots/file-tree-snapshot-<hash>.kg` | 每工作区知识图谱 — 节点（目录/文件）+ CONTAINS 边 + 解析的 IMPORTS |
+| `~/.h/snapshots/file-tree-snapshot-<hash>.txt` | 人类可读的可视化副文件（带导入注释的嵌套树） |
 
 ## 知识图谱
 
@@ -635,7 +635,7 @@ H 在打开文件夹时构建**代码库知识图谱** — 这是每个文件、
 
 ### .kg 格式（磁盘上）
 
-紧凑的边列表格式，位于 `~/.H/snapshots/file-tree-snapshot-<hash>.kg`：
+紧凑的边列表格式，位于 `~/.h/snapshots/file-tree-snapshot-<hash>.kg`：
 
 ```
 # Knowledge Graph v2 — D:\Work Projects\H
@@ -725,7 +725,7 @@ H 向 AI agent 授予对文件系统、终端和浏览器的访问权限。以�
 ### API 与传输
 
 - 所有 DeepSeek API 调用使用 **HTTPS**（`https://api.deepseek.com/v1`）。
-- 客户端输入的 DeepSeek API Key 持久化存储在磁盘 `~/.H/store/api-keys.enc`（AES-256-GCM 加密），由 HTTP-only 会话 cookie 作为密钥。Key 永远不会写入浏览器的 `localStorage`。
+- 客户端输入的 DeepSeek API Key 持久化存储在磁盘 `~/.h/store/api-keys.enc`（AES-256-GCM 加密），由 HTTP-only 会话 cookie 作为密钥。Key 永远不会写入浏览器的 `localStorage`。
 - Agent 请求和 `/api/models` 在初始凭据提交后不再在请求体或查询字符串中包含原始 Key。
 - API Key 永远不会暴露给子进程（参见下方终端沙箱）。
 - `/api/chat/agent/config` 仅暴露配置状态（`apiKeyConfigured`、`source`），而不是 Key 值本身。
@@ -846,7 +846,7 @@ Agent 调用 run_in_terminal
 
 #### `read_graph` — 知识图谱查询
 
-`read_graph` 查询代码库知识图谱（Schema 详情参见[知识图谱](#知识图谱)）。它从 `~/.H/snapshots/` 读取 `.kg` 文件并在不扫描文件内容的情况下回答结构性问题。用于依赖分析、符号发现和项目结构探索。
+`read_graph` 查询代码库知识图谱（Schema 详情参见[知识图谱](#知识图谱)）。它从 `~/.h/snapshots/` 读取 `.kg` 文件并在不扫描文件内容的情况下回答结构性问题。用于依赖分析、符号发现和项目结构探索。
 
 ##### 查询类型
 
@@ -1161,7 +1161,7 @@ H 包含一个基于 SQLite 的**跨会话记忆系统**。Agent 可以存储关
 Agent 检测到重要事实
   → 调用 remember(key, value, category, tags)
   → 值可选择性地通过 DeepSeek embeddings API 进行嵌入
-  → 存储在 ~/.H/store/memory.db（SQLite，全局用户存储）
+  → 存储在 ~/.h/store/memory.db（SQLite，全局用户存储）
 
 下一会话：
   → Agent 调用 recall(query: "UI framework")
@@ -1182,9 +1182,9 @@ Agent 检测到重要事实
 
 | 详情 | 值 |
 |--------|------|
-| 数据库 | SQLite（WAL 模式）位于 `~/.H/store/memory.db`（全局，不在项目目录中） |
-| API Keys | AES-256-GCM 加密文件位于 `~/.H/store/api-keys.enc`（持久化，在重启和应用更新后仍然存在） |
-| 客户端状态 | JSON 文件位于 `~/.H/store/client-state.json` — 镜像所有浏览器 `localStorage` 数据（模型、聊天历史、最近路径、打开标签页、预设、终端历史），以便在重装后仍然存在 |
+| 数据库 | SQLite（WAL 模式）位于 `~/.h/store/memory.db`（全局，不在项目目录中） |
+| API Keys | AES-256-GCM 加密文件位于 `~/.h/store/api-keys.enc`（持久化，在重启和应用更新后仍然存在） |
+| 客户端状态 | JSON 文件位于 `~/.h/store/client-state.json` — 镜像所有浏览器 `localStorage` 数据（模型、聊天历史、最近路径、打开标签页、预设、终端历史），以便在重装后仍然存在 |
 | Schema | `id`、`key`（唯一）、`value`、`category`、`tags`、`embedding`（BLOB）、`created_at`、`updated_at` |
 | 嵌入 | 通过 DeepSeek `/v1/embeddings` 端点生成（可选；如果不可用则优雅回退到关键词搜索） |
 | 检索 | 嵌入余弦相似度搜索 → 关键词 `LIKE` 回退 → 列出全部 |
@@ -1478,7 +1478,7 @@ H 可以作为 **MCP 服务器**，将其文件系统、终端、git 和系统�
 
 #### 选项 A：SSE（最简单 — 无需额外配置）
 
-启动服务器，然后将任何 MCP 客户端指向运行的端点（查看控制台输出获取端口，或读取 `%TEMP%/H-ports/express-port`）：
+启动服务器，然后将任何 MCP 客户端指向运行的端点（查看控制台输出获取端口，或读取 `%TEMP%/h-ports/express-port`）：
 
 ```json
 {
@@ -1530,7 +1530,7 @@ Cursor 配置（`Settings > MCP > Add Server`）：
 
 ### Electron 桌面应用（已打包）
 
-当 H 作为桌面应用安装时，服务器自动启动。端口写入 `%TEMP%/H-ports/express-port`。仅使用 SSE 传输 — 无需 `command`/`cwd`：
+当 H 作为桌面应用安装时，服务器自动启动。端口写入 `%TEMP%/h-ports/express-port`。仅使用 SSE 传输 — 无需 `command`/`cwd`：
 
 ```json
 {
@@ -1605,7 +1605,11 @@ H/
 ├── package-lock.json
 ├── tsconfig.json                    # 服务器 TypeScript 配置（ES2022、strict、vitest globals）
 ├── vitest.config.ts                 # Vitest 运行器配置（node env、30s 超时）
-├── README.md                        # 你正在阅读的文档
+├── README.md                        # 英文首页（USP 对比）
+├── README_CN.md                     # 中文首页
+├── ARCHITECTURE.md                  # 完整架构文档（英文）
+├── ARCHITECTURE_CN.md               # 完整架构文档（中文）
+├── LICENSE                          # AGPL-3.0
 │
 ├── build/
 │   └── 图标资源 (ico, png, svg)      # Electron 应用图标
@@ -1622,11 +1626,11 @@ H/
 │   ├── lsp.ts                       # LSP 客户端：启动语言服务器（pyright、gopls 等）、SSE 诊断流式传输、30+ 语言
 │   ├── mcp.ts                       # MCP 服务器：JSON-RPC 处理程序、外部 AI 客户端的工具集、stdio + SSE 传输
 │   ├── mcp-server.ts                # 独立 MCP 服务器入口点（stdio 模式）
-│   ├── memory.ts                    # SQLite 持久化记忆存储（~/.H/store/memory.db）：关键词 + embedding 搜索，供 agent remember/recall/forget 工具使用
-│   ├── cryptoStore.ts               # AES-256-GCM 加密的 API Key 存储（~/.H/store/api-keys.enc）
-│   ├── HPaths.ts              # ~/.H/ 目录结构的集中路径解析
+│   ├── memory.ts                    # SQLite 持久化记忆存储（~/.h/store/memory.db）：关键词 + embedding 搜索，供 agent remember/recall/forget 工具使用
+│   ├── cryptoStore.ts               # AES-256-GCM 加密的 API Key 存储（~/.h/store/api-keys.enc）
+│   ├── hPaths.ts              # ~/.h/ 目录结构的集中路径解析
 │   ├── fileTracking.ts              # 智能文件追踪：自动检测 Git vs fs.watch 监视器模式、会话中期 Git 检测、快照/补丁文件树上下文
-│   ├── fileTrackingStore.ts         # JSON 支持的文件元数据缓存（~/.H/store/file-tracking.json），供监视器模式使用
+│   ├── fileTrackingStore.ts         # JSON 支持的文件元数据缓存（~/.h/store/file-tracking.json），供监视器模式使用
 │   ├── knowledgeGraph.ts            # 代码库知识图谱构建器：目录/文件节点、CONTAINS + IMPORTS 边、.kg 序列化、可视化
 │   └── __tests__/
 │       ├── agent.tooldefs.test.ts    # 工具定义 Schema 验证
@@ -1637,7 +1641,7 @@ H/
 │
 ├── client/
 │   ├── package.json                 # 客户端依赖（React 18、Monaco、xterm.js）、Vite + TypeScript
-│   ├── vite.config.ts               # Vite 开发配置：从 %TEMP%/H-ports/express-port 读取 Express 端口，代理 /api + /ws + /_browser
+│   ├── vite.config.ts               # Vite 开发配置：从 %TEMP%/h-ports/express-port 读取 Express 端口，代理 /api + /ws + /_browser
 │   ├── tsconfig.json                # 客户端 TypeScript 配置（ES2020、DOM、react-jsx）
 │   ├── index.html                   # SPA 入口：在 <div id="root"> 中挂载 React 应用
 │   ├── public/
@@ -1646,9 +1650,9 @@ H/
 │       ├── main.tsx                 # React DOM 入口：渲染 <App />
 │       ├── App.tsx                  # 根组件：文件夹选择器、会话状态、可调整大小的布局（编辑器 + agent 控制台）
 │       ├── App.css                  # 全局暗色主题样式：面板布局、编辑器 chrome、agent 卡片、子 agent 颜色编码（11 种 agent 类型）、欢迎屏幕
-│       ├── electron.d.ts            # window.HDesktop 桥接和 <webview> JSX 的类型声明
+│       ├── electron.d.ts            # window.hDesktop 桥接和 <webview> JSX 的类型声明
 │       ├── vite-env.d.ts            # Vite 客户端类型声明
-│       ├── stateSync.ts             # 客户端状态持久化：将所有 localStorage 镜像到 ~/.H/store/client-state.json（重装后仍存在）
+│       ├── stateSync.ts             # 客户端状态持久化：将所有 localStorage 镜像到 ~/.h/store/client-state.json（重装后仍存在）
 │       ├── panes/
 │       │   ├── EditorPane.tsx       # 主编辑器：Monaco 标签页、文件树、浏览器标签页条、终端、菜单栏、状态栏
 │       │   ├── AgentConsole.tsx     # Agent 聊天 UI：流式消息、diff 预览、授权提示、带 agent 颜色编码的工具卡片、markdown 渲染
@@ -1668,7 +1672,7 @@ H/
 │
 └── electron/
     ├── main.cjs                      # Electron 主进程：BrowserWindow、服务器生命周期、IPC（文件夹/文件选择器、地理位置、权限）、浏览器会话
-    ├── preload.cjs                   # 预加载桥接：暴露 window.HDesktop（openFolder、openFile、onBrowserOpenUrl、setSitePermissions）
+    ├── preload.cjs                   # 预加载桥接：暴露 window.hDesktop（openFolder、openFile、onBrowserOpenUrl、setSitePermissions）
     ├── browser-preload.cjs           # 浏览器 webview 预加载：地理位置桥接、_blank 链接拦截
     └── native-location.cjs           # 通过 PowerShell GeoCoordinateWatcher 实现 Windows 地理位置
 ```

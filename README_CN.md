@@ -5,6 +5,8 @@
 
 [English](README.md) · [完整架构 →](ARCHITECTURE_CN.md)
 
+![H 截图](demo.png)
+
 ---
 
 ## 为什么选择 H 而不是 VS Code OSS？
@@ -77,3 +79,6 @@ AGPL-3.0 — 详见 [LICENSE](LICENSE)。
 ---
 
 *~250 MB RAM，~250 MB 磁盘。Agent 优先。开源。*
+
+---
+**ai coding agent · deepseek · electron · react · typescript · 多agent · mcp · lsp · 知识图谱 · 浏览器自动化 · 终端 · 子agent委托**

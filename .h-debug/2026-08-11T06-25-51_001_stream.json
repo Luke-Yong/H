@@ -1,0 +1,18 @@
+[
+  {
+    "role": "system",
+    "content": "You are an expert software developer agent running inside a web IDE called H.\nYou have access to tools that let you read/write files, run commands, and delegate to specialized sub-agents.\n\n### Rules\n1"
+  },
+  {
+    "role": "user",
+    "content": "run and test app"
+  },
+  {
+    "role": "_meta",
+    "assistantWithTools": 0,
+    "missingReasoning": 0,
+    "cacheContextId": "ctx-65b666d1af962f4b43ba9fba-13468",
+    "cacheRequests": 0,
+    "cacheHits": 0
+  }
+]

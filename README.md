@@ -5,6 +5,8 @@
 
 [中文文档](README_CN.md) · [Full Architecture →](ARCHITECTURE.md)
 
+![H screenshot](demo.png)
+
 ---
 
 ## Why H over VS Code OSS?
@@ -77,3 +79,6 @@ Copyright (c) 2026 Luke Yong.
 ---
 
 *~250 MB RAM, ~250 MB disk. Agent-first. Open source.*
+
+---
+**ai coding agent · deepseek · electron · react · typescript · multi-agent · mcp · lsp · knowledge graph · browser automation · terminal · sub-agent delegation**
