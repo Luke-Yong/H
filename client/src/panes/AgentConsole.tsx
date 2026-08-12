@@ -1,6 +1,7 @@
 import { useRef, useEffect, useState, useCallback, useMemo, memo, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import type { AgentTerminalBridge } from "./AgentTerminalBridge";
+import { saveStateNow } from "../stateSync";
 
 // ── Rich message types for the unified agent chat ──
 
@@ -799,10 +800,20 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
     return () => { if (threadSaveTimerRef.current) clearTimeout(threadSaveTimerRef.current); };
   }, [messages, activeThreadId]);
 
-  // Persist threads
+  // Persist threads — also flush to server so history survives crashes / reinstalls.
+  // Gate saves until loadThreads has completed after a threadKey change, to avoid
+  // saving empty [] over restored localStorage data during initial mount.
+  const [threadsSaveGen, setThreadsSaveGen] = useState(0);
   useEffect(() => {
+    setThreadsSaveGen(0); // reset gate on key change
+    const timer = setTimeout(() => { setThreadsSaveGen(1); }, 50);
+    return () => clearTimeout(timer);
+  }, [threadKey]);
+  useEffect(() => {
+    if (threadsSaveGen < 1) return;
     saveThreads(threadKey, threads);
-  }, [threads, threadKey]);
+    saveStateNow();
+  }, [threads, threadKey, threadsSaveGen]);
 
   const ensureThread = useCallback(() => {
     if (activeThreadId && threads.some((t) => t.id === activeThreadId)) return activeThreadId;
@@ -852,6 +863,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
       const next = prev.filter((t) => t.id !== id);
       // Immediately flush to localStorage to prevent stale-data races
       saveThreads(threadKey, next);
+      saveStateNow();
       return next;
     });
     if (activeThreadId === id) {
@@ -2490,10 +2502,18 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
       contentLen += (m.content?.length || 0) + (m.thought?.length || 0);
     }
     if (contentLen > 0) {
-      setAgentUsage({
+      const usage = {
         estimatedTokens: Math.round(contentLen / 4),
-        contextLimit: agentUsage?.contextLimit ?? 128_000,
+        contextLimit: agentUsage?.contextLimit ?? 1_000_000,
         turns: totalTurnsRef.current,
+      };
+      setAgentUsage(usage);
+      // Persist to thread and immediately sync to server so usage survives reload
+      setThreads((prev) => {
+        const next = prev.map((t) => t.id === activeThreadId ? { ...t, usage } : t);
+        saveThreads(threadKey, next);
+        saveStateNow();
+        return next;
       });
     }
 

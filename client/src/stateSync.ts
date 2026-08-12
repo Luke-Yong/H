@@ -30,6 +30,26 @@ function saveState() {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(state),
+  }).catch(() => {});
+}
+
+// Exported for callers that need an immediate server sync (e.g. after critical
+// state changes like stop/save) without the 30-second triggerSave delay.
+export function saveStateNow(): void {
+  saveState();
+}
+
+function saveStateKeepalive() {
+  const state = gatherState();
+  pendingSave = state;
+
+  // keepalive allows the request to complete after page unload (beforeunload),
+  // but limits the body to 64KB. Large histories may be truncated — the periodic
+  // save (without keepalive) handles those.
+  fetch("/api/client/state", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(state),
     keepalive: true,
   }).catch(() => {});
 }
@@ -62,10 +82,10 @@ export async function loadPersistedState(): Promise<void> {
 }
 
 export function startAutoSave(): () => void {
-  const onBeforeUnload = () => saveState();
+  const onBeforeUnload = () => saveStateKeepalive();
   window.addEventListener("beforeunload", onBeforeUnload);
 
-  // Periodic save (in case of crashes)
+  // Periodic save (in case of crashes) — uses non-keepalive to avoid 64KB body limit
   const intervalId = setInterval(() => saveState(), SAVE_INTERVAL_MS);
 
   return () => {

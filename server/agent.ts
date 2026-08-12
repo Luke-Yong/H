@@ -2697,6 +2697,21 @@ async function* runSubAgentStream(
       }
       yield { type: "tool_start", toolName: fnName, toolParams: params, toolCallId: tc.id, agentMarker, ...(subOriginalContent !== null ? { originalContent: subOriginalContent } : {}) } as SubAgentStreamEvent;
 
+      // write_todos is not an FS tool — handle it before the runFsTool check
+      if (fnName === "write_todos") {
+        if (Array.isArray(params.todos)) {
+          subState.latestTodos = (params.todos as any[]).map((t: any) => ({
+            id: String(t.id || ""), text: String(t.text || ""), status: String(t.status || "pending"), agentMarker,
+          }));
+        }
+        const doneCount = (subState.latestTodos || []).filter((t) => t.status === "completed" || t.status === "cancelled").length;
+        const totalCount = (subState.latestTodos || []).length;
+        const resultMsg = `Todo list updated. ${doneCount}/${totalCount} tasks done.`;
+        subState.messages.push({ role: "tool", content: resultMsg, tool_call_id: tc.id });
+        yield { type: "tool_end", toolName: fnName, toolCallId: tc.id, toolResult: resultMsg, agentMarker } as SubAgentStreamEvent;
+        continue;
+      }
+
       const fsResult = await runFsTool(fnName, params, subState.projectRoot);
       if (fsResult !== null) {
         const stored = fnName === "run_command" ? summarizeCommandResult(fsResult, "Sub-agent command") : fsResult;
@@ -2816,6 +2831,20 @@ async function runSubAgent(
         ...rc(reasoningContent),
       });
 
+      // write_todos is not an FS tool — handle it before the runFsTool check
+      if (fnName === "write_todos") {
+        if (Array.isArray(params.todos)) {
+          subState.latestTodos = (params.todos as any[]).map((t: any) => ({
+            id: String(t.id || ""), text: String(t.text || ""), status: String(t.status || "pending"), agentMarker: agentType || config.name,
+          }));
+        }
+        const doneCount = (subState.latestTodos || []).filter((t) => t.status === "completed" || t.status === "cancelled").length;
+        const totalCount = (subState.latestTodos || []).length;
+        const resultMsg = `Todo list updated. ${doneCount}/${totalCount} tasks done.`;
+        subState.messages.push({ role: "tool", content: resultMsg, tool_call_id: tc.id });
+        continue;
+      }
+
       const fsResult = await runFsTool(fnName, params, subState.projectRoot);
       if (fsResult !== null) {
         const stored = fnName === "run_command" ? summarizeCommandResult(fsResult, "Sub-agent command") : fsResult;
@@ -2921,6 +2950,20 @@ export async function resumeSubAgent(
         name: fnName,
         ...rc(reasoningContent),
       });
+
+      // write_todos is not an FS tool — handle it before the runFsTool check
+      if (fnName === "write_todos") {
+        if (Array.isArray(params.todos)) {
+          subState.latestTodos = (params.todos as any[]).map((t: any) => ({
+            id: String(t.id || ""), text: String(t.text || ""), status: String(t.status || "pending"), agentMarker: config.name,
+          }));
+        }
+        const doneCount = (subState.latestTodos || []).filter((t) => t.status === "completed" || t.status === "cancelled").length;
+        const totalCount = (subState.latestTodos || []).length;
+        const resultMsg = `Todo list updated. ${doneCount}/${totalCount} tasks done.`;
+        subState.messages.push({ role: "tool", content: resultMsg, tool_call_id: tc.id });
+        continue;
+      }
 
       const fsResult = await runFsTool(fnName, params, subState.projectRoot);
       if (fsResult !== null) {
@@ -3439,6 +3482,21 @@ export async function agentLoop(
       }
 
       // Check if this is a filesystem tool the server can execute directly.
+      // write_todos is not an FS tool — handle it first
+      if (fnName === "write_todos") {
+        if (Array.isArray(params.todos)) {
+          state.latestTodos = (params.todos as any[]).map((t: any) => ({
+            id: String(t.id || ""), text: String(t.text || ""), status: String(t.status || "pending"), agentMarker: "main",
+          }));
+        }
+        const doneCount = (state.latestTodos || []).filter((t) => t.status === "completed" || t.status === "cancelled").length;
+        const totalCount = (state.latestTodos || []).length;
+        const resultMsg = `Todo list updated. ${doneCount}/${totalCount} tasks done.`;
+        state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc2(reasoningContent) });
+        state.messages.push({ role: "tool", content: resultMsg, tool_call_id: tc.id });
+        executedTools.push({ name: fnName, result: resultMsg });
+        continue;
+      }
       const fsResult = await runFsTool(fnName, params, projectRoot);
       if (fsResult !== null) {
         const storedResult = getStoredToolResult(fnName, fsResult);
@@ -3929,6 +3987,29 @@ export async function* agentLoopStream(
           type: "tool_start", toolName: fnName, toolParams: params,
           ...(originalContent !== null ? { originalContent } : {}),
         };
+        // write_todos is not an FS tool — handle it before the runFsTool check
+        if (fnName === "write_todos") {
+          if (Array.isArray(params.todos)) {
+            state.latestTodos = (params.todos as any[]).map((t: any) => ({
+              id: String(t.id || ""), text: String(t.text || ""), status: String(t.status || "pending"), agentMarker: "main",
+            }));
+          }
+          turnsSinceTodoUpdate = 0;
+          const doneCount = (state.latestTodos || []).filter((t) => t.status === "completed" || t.status === "cancelled").length;
+          const totalCount = (state.latestTodos || []).length;
+          const resultMsg = `Todo list updated. ${doneCount}/${totalCount} tasks done.`;
+          state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
+          state.messages.push({ role: "tool", content: resultMsg, tool_call_id: tc.id });
+          yield {
+            type: "tool_end",
+            toolName: fnName,
+            toolResult: resultMsg,
+            toolParams: params,
+            executedTools: [{ name: fnName, result: resultMsg }],
+          };
+          executedTools.push({ name: fnName, result: resultMsg });
+          continue;
+        }
         const fsResult = await runFsTool(fnName, params, projectRoot);
         if (fsResult !== null) {
           const storedResult = getStoredToolResult(fnName, fsResult);

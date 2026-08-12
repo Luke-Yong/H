@@ -157,7 +157,6 @@ async function waitForPortFile(filePath, timeoutMs) {
 }
 
 async function waitForOwnServerPort(timeoutMs) {
-  const myPid = process.pid;
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const port = readPortFile(EXPRESS_PORT_FILE);
@@ -175,7 +174,7 @@ async function waitForOwnServerPort(timeoutMs) {
           req.on("error", () => resolve(null));
           req.setTimeout(800, () => { req.destroy(); resolve(null); });
         });
-        if (resp && resp.status >= 200 && resp.status < 500 && resp.body.pid === myPid) {
+        if (resp && resp.status >= 200 && resp.status < 500 && resp.body && resp.body.pid > 0) {
           return port;
         }
       } catch {}
@@ -185,11 +184,17 @@ async function waitForOwnServerPort(timeoutMs) {
   return 0;
 }
 
+let serverChildProcess = null;
+
 function startEmbeddedServer() {
+  const { spawn } = require("child_process");
   process.env.H_DESKTOP = "1";
   process.env.H_SERVE_CLIENT = "1";
+
+  // Only set ESBUILD_BINARY_PATH in packaged builds where app.asar.unpacked exists.
+  // In dev mode, esbuild finds its own binary in node_modules.
   if (process.resourcesPath && process.platform === "win32") {
-    process.env.ESBUILD_BINARY_PATH = path.join(
+    const esbuildPath = path.join(
       process.resourcesPath,
       "app.asar.unpacked",
       "node_modules",
@@ -197,11 +202,35 @@ function startEmbeddedServer() {
       "win32-x64",
       "esbuild.exe"
     );
+    if (fs.existsSync(esbuildPath)) {
+      process.env.ESBUILD_BINARY_PATH = esbuildPath;
+    }
   }
 
-  const tsx = require("tsx/cjs/api");
-  const api = tsx.register({ namespace: "h-electron" });
-  api.require(path.join(__dirname, "..", "server", "index.ts"), __filename);
+  // Spawn server as a child process so the Electron main thread stays responsive.
+  // tsx transpilation of the 126KB server/index.ts can take minutes on slow machines;
+  // running it in-process via tsx/cjs/api blocks the UI entirely.
+  const serverPath = path.join(__dirname, "..", "server", "index.ts");
+  // Quote the path for Windows paths containing spaces (e.g. "D:\Work Projects\...")
+  const quotedPath = process.platform === "win32" ? `"${serverPath}"` : serverPath;
+  serverChildProcess = spawn(
+    "npx",
+    ["tsx", quotedPath],
+    {
+      env: process.env,
+      stdio: "inherit",
+      shell: true,
+    }
+  );
+
+  serverChildProcess.on("error", (err) => {
+    console.error("[h-startup] Server process error:", err.message);
+  });
+
+  serverChildProcess.on("exit", (code) => {
+    console.log("[h-startup] Server process exited with code", code);
+    serverChildProcess = null;
+  });
 }
 
 function normalizeOrigin(rawUrl) {
@@ -796,17 +825,9 @@ function releasePidLock() {
   } catch {}
 }
 
-// Clean up stale files from previous runs
+// Clean up stale Express port file from previous runs.
+// Do NOT delete vite-port — Vite starts before Electron and writes it once.
 try { fs.unlinkSync(EXPRESS_PORT_FILE); } catch {}
-try { fs.unlinkSync(VITE_PORT_FILE); } catch {}
-try {
-  const portsDir = path.dirname(EXPRESS_PORT_FILE);
-  if (fs.existsSync(portsDir)) {
-    for (const f of fs.readdirSync(portsDir)) {
-      try { fs.unlinkSync(path.join(portsDir, f)); } catch {}
-    }
-  }
-} catch {}
 
 const gotTheLock = acquirePidLock();
 if (!gotTheLock) {
@@ -822,14 +843,16 @@ if (!gotTheLock) {
   });
 }
 
-// Clean up port files and PID lock on exit
+// Clean up port files, PID lock, and server process on exit
 app.on("before-quit", () => {
   releasePidLock();
+  if (serverChildProcess) { try { serverChildProcess.kill(); } catch {} }
   try { fs.unlinkSync(EXPRESS_PORT_FILE); } catch {}
   try { fs.unlinkSync(VITE_PORT_FILE); } catch {}
 });
 process.on("exit", () => {
   releasePidLock();
+  if (serverChildProcess) { try { serverChildProcess.kill(); } catch {} }
   try { fs.unlinkSync(EXPRESS_PORT_FILE); } catch {}
   try { fs.unlinkSync(VITE_PORT_FILE); } catch {}
 });
