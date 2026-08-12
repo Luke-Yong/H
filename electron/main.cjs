@@ -44,8 +44,9 @@ function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
-function loadingPageHtml(title, message) {
+function loadingPageHtml(title, message, detail) {
   // Show a branded loading screen with animated "Loading..."
+  const detailBlock = detail ? `<div class="loader-detail">${escapeHtml(detail)}</div>` : "";
   return `<!doctype html>
 <html>
   <head>
@@ -80,6 +81,26 @@ function loadingPageHtml(title, message) {
         font-size: 16px;
         color: #9aa0a6;
         letter-spacing: 0.5px;
+        white-space: pre-wrap;
+        text-align: center;
+        max-width: 720px;
+        line-height: 1.5;
+      }
+      .loader-detail {
+        margin-top: 8px;
+        font-size: 13px;
+        color: #7a7f85;
+        white-space: pre-wrap;
+        text-align: left;
+        max-width: 720px;
+        line-height: 1.55;
+        background: #262626;
+        border: 1px solid #3a3a3a;
+        padding: 12px 16px;
+        border-radius: 6px;
+        max-height: 320px;
+        overflow-y: auto;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
       }
       .loader-dots::after {
         content: "";
@@ -98,11 +119,40 @@ function loadingPageHtml(title, message) {
       <svg class="loader-icon" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
         <rect x="3" y="2" width="5.5" height="20" rx="2.75" fill="#4D6BFE"/><rect x="15.5" y="2" width="5.5" height="20" rx="2.75" fill="#4D6BFE"/><rect x="3" y="9.5" width="18" height="5" rx="2.5" fill="#4D6BFE"/>
       </svg>
-      <div class="loader-text">Loading<span class="loader-dots"></span></div>
+      <div class="loader-text">${escapeHtml(message)}</div>
+      ${detailBlock}
     </div>
   </body>
 </html>`;
 }
+
+const net = require("net");
+const EXPRESS_DEFAULT_PORT = 51734;
+const EXPRESS_PORT_RANGE = 20;
+
+function probePort(host, port, timeoutMs) {
+  return new Promise((resolve) => {
+    const sock = new net.Socket();
+    sock.setTimeout(timeoutMs ?? 200);
+    let resolved = false;
+    const done = (open) => {
+      if (resolved) return;
+      resolved = true;
+      try { sock.destroy(); } catch {}
+      resolve(open);
+    };
+    sock.on("connect", () => done(true));
+    sock.on("timeout", () => done(false));
+    sock.on("error", () => done(false));
+    sock.on("close", () => done(false));
+    try { sock.connect(port, host); } catch { done(false); }
+  });
+}
+
+let parsedServerPort = 0;
+let serverLastExit = null;          // { code, signal } if child has exited
+let serverTailLog = "";             // rolling 8KB tail of child stdout+stderr for diagnostics
+const SERVER_TAIL_MAX = 8192;
 
 function requestOk(url) {
   return new Promise((resolve) => {
@@ -132,9 +182,76 @@ async function waitForUrl(url, timeoutMs) {
   return false;
 }
 
-// Use tmpdir for port files to avoid sandbox permission issues
+// ── Fixed port discovery (no files) ──
+// Primary: parse stdout for "H server running on http://localhost:PORT"
+// Secondary: probe the fixed port range
+
+async function findLiveServerPort(timeoutMs) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    // Early exit: server process crashed; no point probing for 60s.
+    if (serverLastExit && !serverChildProcess) {
+      const code = serverLastExit.code;
+      const tail = serverTailLog.trim();
+      const hint = tail ? `\n\nServer output tail:\n${tail}` : "";
+      throw new Error(
+        `Server process exited prematurely with code ${code ?? "<null>"}${hint}`
+      );
+    }
+    // 1. Prefer stdout-parsed port if we got it
+    if (parsedServerPort > 0) {
+      const alive = await probePort("127.0.0.1", parsedServerPort, 200);
+      if (alive) {
+        // Also verify the health endpoint responds
+        try {
+          const resp = await new Promise((resolve) => {
+            const req = http.get(`http://127.0.0.1:${parsedServerPort}/api/health`, (res) => {
+              let body = "";
+              res.on("data", (chunk) => { body += chunk; });
+              res.on("end", () => {
+                try { resolve({ status: res.statusCode, body: JSON.parse(body) }); }
+                catch { resolve(null); }
+              });
+            });
+            req.on("error", () => resolve(null));
+            req.setTimeout(800, () => { req.destroy(); resolve(null); });
+          });
+          if (resp && resp.status >= 200 && resp.status < 500 && resp.body && resp.body.pid > 0) {
+            return parsedServerPort;
+          }
+        } catch {}
+      }
+    }
+    // 2. Probe port range sequentially
+    for (let i = 0; i < EXPRESS_PORT_RANGE; i++) {
+      const p = EXPRESS_DEFAULT_PORT + i;
+      const open = await probePort("127.0.0.1", p, 150);
+      if (!open) continue;
+      try {
+        const resp = await new Promise((resolve) => {
+          const req = http.get(`http://127.0.0.1:${p}/api/health`, (res) => {
+            let body = "";
+            res.on("data", (chunk) => { body += chunk; });
+            res.on("end", () => {
+              try { resolve({ status: res.statusCode, body: JSON.parse(body) }); }
+              catch { resolve(null); }
+            });
+          });
+          req.on("error", () => resolve(null));
+          req.setTimeout(500, () => { req.destroy(); resolve(null); });
+        });
+        if (resp && resp.status >= 200 && resp.status < 500 && resp.body && resp.body.pid > 0) {
+          return p;
+        }
+      } catch {}
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  return 0;
+}
+
+// Use tmpdir for port file only for VITE dev server port (written by vite plugin)
 const PORTS_DIR = path.join(require("os").tmpdir(), "h-ports");
-const EXPRESS_PORT_FILE = path.join(PORTS_DIR, "express-port");
 const VITE_PORT_FILE = path.join(PORTS_DIR, "vite-port");
 
 function readPortFile(filePath) {
@@ -146,50 +263,18 @@ function readPortFile(filePath) {
   }
 }
 
-async function waitForPortFile(filePath, timeoutMs) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const port = readPortFile(filePath);
-    if (port) return port;
-    await new Promise((r) => setTimeout(r, 250));
-  }
-  return 0;
-}
-
-async function waitForOwnServerPort(timeoutMs) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const port = readPortFile(EXPRESS_PORT_FILE);
-    if (port) {
-      try {
-        const resp = await new Promise((resolve, reject) => {
-          const req = http.get(`http://127.0.0.1:${port}/api/health`, (res) => {
-            let body = "";
-            res.on("data", (chunk) => { body += chunk; });
-            res.on("end", () => {
-              try { resolve({ status: res.statusCode, body: JSON.parse(body) }); }
-              catch { resolve(null); }
-            });
-          });
-          req.on("error", () => resolve(null));
-          req.setTimeout(800, () => { req.destroy(); resolve(null); });
-        });
-        if (resp && resp.status >= 200 && resp.status < 500 && resp.body && resp.body.pid > 0) {
-          return port;
-        }
-      } catch {}
-    }
-    await new Promise((r) => setTimeout(r, 250));
-  }
-  return 0;
-}
-
 let serverChildProcess = null;
+
+function resolveProjectRoot() {
+  // main.cjs lives at <root>/electron/main.cjs; project root is one level up
+  return path.resolve(__dirname, "..");
+}
 
 function startEmbeddedServer() {
   const { spawn } = require("child_process");
   process.env.H_DESKTOP = "1";
   process.env.H_SERVE_CLIENT = "1";
+  parsedServerPort = 0;
 
   // Only set ESBUILD_BINARY_PATH in packaged builds where app.asar.unpacked exists.
   // In dev mode, esbuild finds its own binary in node_modules.
@@ -207,28 +292,151 @@ function startEmbeddedServer() {
     }
   }
 
-  // Spawn server as a child process so the Electron main thread stays responsive.
-  // tsx transpilation of the 126KB server/index.ts can take minutes on slow machines;
-  // running it in-process via tsx/cjs/api blocks the UI entirely.
-  const serverPath = path.join(__dirname, "..", "server", "index.ts");
-  // Quote the path for Windows paths containing spaces (e.g. "D:\Work Projects\...")
-  const quotedPath = process.platform === "win32" ? `"${serverPath}"` : serverPath;
-  serverChildProcess = spawn(
-    "npx",
-    ["tsx", quotedPath],
-    {
-      env: process.env,
-      stdio: "inherit",
-      shell: true,
+  const isDev = !app.isPackaged;
+  const projectRoot = resolveProjectRoot();
+
+  let cmd;
+  let args = [];
+  const serverEnv = { ...process.env };
+
+  if (isDev) {
+    // Dev mode: run tsx via node loader, avoiding any shell (which would split
+    // arguments at spaces in project paths like "D:\Work Projects\Harness").
+    //
+    // process.execPath here is electron.exe (desktop:dev invokes the Electron binary).
+    // Set ELECTRON_RUN_AS_NODE=1 so the child initialises as a plain Node interpreter
+    // (not a Chromium renderer host) and can run the generic tsx CLI .mjs entrypoint.
+    //
+    // Invoking <exe> <tsx-cli.mjs> <target.ts> with all absolute paths means the
+    // argv array is passed straight through to the child — no quoting / tokenization.
+    serverEnv.ELECTRON_RUN_AS_NODE = "1";
+    const serverPath = path.join(projectRoot, "server", "index.ts");
+    const tsxCli = path.join(projectRoot, "node_modules", "tsx", "dist", "cli.mjs");
+    cmd = process.execPath;
+    args = [tsxCli, serverPath];
+  } else {
+    // Packaged mode: MUST run the pre-compiled CommonJS server
+    // (desktop:build-server step produces dist/server/index.js). tsx has been moved
+    // to devDependencies and is not bundled in the installer, so there is no
+    // fallback transpile path — the build step must have run.
+    const compiledServer = path.join(projectRoot, "dist", "server", "index.js");
+    if (!fs.existsSync(compiledServer)) {
+      const errMsg =
+        `[h-startup] FATAL: compiled server not found at ${compiledServer}.\n` +
+        `  Run 'npm run desktop:build-server' before packaging, or re-run 'npm run desktop:pack'.`;
+      console.error(errMsg);
+      if (typeof dialog !== "undefined") {
+        dialog.showErrorBox("H could not start", errMsg);
+      }
+      throw new Error(errMsg);
     }
-  );
+    serverEnv.ELECTRON_RUN_AS_NODE = "1";
+    cmd = process.execPath;
+    args = [compiledServer];
+
+    // Ensure native modules (better-sqlite3, node-pty, @esbuild/win32-x64) are
+    // resolved from the *unpacked* folder inside the installer. Electron asar's
+    // patched require walks asar first by default; if the package.json/main lands
+    // in asar and the package's `build/Release/*.node` is in asar.unpacked,
+    // relative requires from within asar resolve incorrectly on Windows.
+    // Prepending NODE_PATH forces `require("better-sqlite3")` to check
+    // app.asar.unpacked/node_modules before any asar-relative resolution.
+    if (process.resourcesPath) {
+      const unpackedNodeModules = path.join(
+        process.resourcesPath,
+        "app.asar.unpacked",
+        "node_modules"
+      );
+      if (fs.existsSync(unpackedNodeModules)) {
+        serverEnv.NODE_PATH = serverEnv.NODE_PATH
+          ? `${unpackedNodeModules}${path.delimiter}${serverEnv.NODE_PATH}`
+          : unpackedNodeModules;
+      }
+    }
+  }
+
+  // CRITICAL: never enable shell — it re-tokenizes arguments at spaces which breaks
+  // project paths containing spaces ("D:\Work Projects\..."). All argument arrays
+  // above are already resolved to absolute paths and pass directly to the child.
+  //
+  // Also explicitly set the child CWD to the app root. On fresh installations the
+  // inherited CWD can be the user's home, the desktop, or the installer exe dir,
+  // which changes what relative require()/readFile() inside the server resolve to.
+  const spawnOpts = {
+    env: serverEnv,
+    stdio: ["ignore", "pipe", "pipe"],
+    shell: false,
+    windowsHide: true,
+    cwd: app.getAppPath ? app.getAppPath() : projectRoot,
+  };
+
+  console.log(`[h-startup] spawning: cmd=${cmd}`);
+  console.log(`[h-startup] args: ${args.map((a) => `"${a}"`).join(" ")}`);
+  console.log(`[h-startup] cwd:  ${spawnOpts.cwd}`);
+  if (spawnOpts.env && spawnOpts.env.NODE_PATH) {
+    console.log(`[h-startup] NODE_PATH: ${spawnOpts.env.NODE_PATH}`);
+  }
+
+  // Reset state from previous runs.
+  serverLastExit = null;
+  serverTailLog = "";
+  serverChildProcess = spawn(cmd, args, spawnOpts);
+
+  // ── Parse port from server stdout + forward logs ──
+  // Regex matches: H server running on http://localhost:<PORT>
+  const portRegex = /H server running on http:\/\/(?:localhost|127\.0\.0\.1):(\d+)/;
+  const _origLog = console.log.bind(console);
+  const _origErr = console.error.bind(console);
+
+  const appendTail = (text) => {
+    serverTailLog = (serverTailLog + text).slice(-SERVER_TAIL_MAX);
+  };
+
+  const onStdout = (chunk) => {
+    const text = chunk.toString ? chunk.toString("utf8") : String(chunk);
+    appendTail(text);
+    if (!parsedServerPort) {
+      const m = portRegex.exec(text);
+      if (m && m[1]) {
+        const p = parseInt(m[1], 10);
+        if (p > 0) { parsedServerPort = p; }
+      }
+    }
+    try { process.stdout.write(chunk); } catch {}
+    if (isDev) {
+      try { _origLog(String(text).replace(/\r?\n$/, "")); } catch {}
+    }
+  };
+  const onStderr = (chunk) => {
+    const text = chunk.toString ? chunk.toString("utf8") : String(chunk);
+    appendTail(text);
+    if (!parsedServerPort) {
+      const m = portRegex.exec(text);
+      if (m && m[1]) {
+        const p = parseInt(m[1], 10);
+        if (p > 0) { parsedServerPort = p; }
+      }
+    }
+    try { process.stderr.write(chunk); } catch {}
+    if (isDev) {
+      try { _origErr(String(text).replace(/\r?\n$/, "")); } catch {}
+    }
+  };
+
+  serverChildProcess.stdout?.on("data", onStdout);
+  serverChildProcess.stderr?.on("data", onStderr);
 
   serverChildProcess.on("error", (err) => {
+    appendTail(`[electron] spawn error: ${err && err.message ? err.message : String(err)}\n`);
     console.error("[h-startup] Server process error:", err.message);
   });
 
-  serverChildProcess.on("exit", (code) => {
-    console.log("[h-startup] Server process exited with code", code);
+  serverChildProcess.on("exit", (code, signal) => {
+    serverLastExit = { code, signal };
+    console.log("[h-startup] Server process exited with code", code, signal ? `signal ${signal}` : "");
+    if (code !== 0 && code !== null) {
+      console.error("[h-startup] Server stderr/stdout tail:\n" + serverTailLog);
+    }
     serverChildProcess = null;
   });
 }
@@ -667,6 +875,25 @@ async function loadUrlWhenReady(win, targetUrl, healthUrl, timeoutMs, title) {
   return true;
 }
 
+async function waitForVitePort(timeoutMs) {
+  // Vite plugin writes VITE_PORT_FILE — prefer that, fall back to probing common Vite range
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const p = readPortFile(VITE_PORT_FILE);
+    if (p > 0) {
+      const ok = await requestOk(`http://localhost:${p}/`);
+      if (ok) return p;
+    }
+    // Fallback: probe default Vite ports 5173..5180
+    for (let i = 5173; i < 5181; i++) {
+      const alive = await probePort("127.0.0.1", i, 100);
+      if (alive) return i;
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return 0;
+}
+
 async function createMainWindow() {
   const isDev = process.env.ELECTRON_DEV === "1";
 
@@ -717,9 +944,24 @@ async function createMainWindow() {
   }
 
   if (isDev) {
-    const expressPort = await waitForOwnServerPort(30_000);
+    // Use longer timeout because tsx watch + tsc typechecking can be slow on cold start
+    let expressPort = 0;
+    try {
+      expressPort = await findLiveServerPort(60_000);
+    } catch (startupErr) {
+      const reason = startupErr instanceof Error ? startupErr.message : String(startupErr);
+      console.error("[h-startup] Dev server startup failed:", reason);
+      const failHtml = loadingPageHtml(
+        "H",
+        `Dev server failed to start.\n\n${reason}`,
+        serverTailLog || "Check the terminal for more details."
+      );
+      win.loadURL(`data:text/html;base64,${Buffer.from(failHtml, "utf8").toString("base64")}`);
+      win.show();
+      return;
+    }
     if (!expressPort) {
-      const failHtml = loadingPageHtml("H", "Express server failed to start.");
+      const failHtml = loadingPageHtml("H", "Express server failed to start. Check logs for errors.", serverTailLog);
       win.loadURL(`data:text/html;base64,${Buffer.from(failHtml, "utf8").toString("base64")}`);
       win.show();
       return;
@@ -727,9 +969,9 @@ async function createMainWindow() {
     serverPort = expressPort;
 
     // Express ready — find Vite dev server
-    const vitePort = await waitForPortFile(VITE_PORT_FILE, 120_000);
+    const vitePort = await waitForVitePort(120_000);
     if (!vitePort) {
-      const failHtml = loadingPageHtml("H", "Vite dev server failed to start.");
+      const failHtml = loadingPageHtml("H", "Vite dev server failed to start. Check logs for errors.");
       win.loadURL(`data:text/html;base64,${Buffer.from(failHtml, "utf8").toString("base64")}`);
       win.show();
       return;
@@ -738,15 +980,38 @@ async function createMainWindow() {
       win,
       `http://localhost:${vitePort}`,
       `http://localhost:${vitePort}`,
-      10_000,
+      15_000,
       "H"
     );
     win.show();
     win.webContents.openDevTools({ mode: "detach" });
   } else {
-    const port = await waitForOwnServerPort(30_000);
+    // Packaged: find server via fixed range + stdout parsed port.
+    // Use generous timeout because compiled JS should start fast, but on
+    // slower machines antivirus scans can delay the process.
+    let port = 0;
+    try {
+      port = await findLiveServerPort(60_000);
+    } catch (startupErr) {
+      const reason = startupErr instanceof Error ? startupErr.message : String(startupErr);
+      console.error("[h-startup] Packaged server startup failed:", reason);
+      try {
+        dialog.showErrorBox(
+          "H could not start",
+          reason + (serverTailLog ? `\n\nDiagnostic log:\n${serverTailLog}` : "")
+        );
+      } catch {}
+      const failHtml = loadingPageHtml(
+        "H",
+        `H could not start:\n\n${reason}`,
+        serverTailLog || "No server logs captured."
+      );
+      win.loadURL(`data:text/html;base64,${Buffer.from(failHtml, "utf8").toString("base64")}`);
+      win.show();
+      return;
+    }
     if (!port) {
-      const failHtml = loadingPageHtml("H", "Express server failed to start.");
+      const failHtml = loadingPageHtml("H", "H server failed to start. Please try launching again.");
       win.loadURL(`data:text/html;base64,${Buffer.from(failHtml, "utf8").toString("base64")}`);
       win.show();
       return;
@@ -756,7 +1021,7 @@ async function createMainWindow() {
       win,
       `http://127.0.0.1:${port}`,
       `http://127.0.0.1:${port}/api/health`,
-      2_000,
+      10_000,
       "H"
     );
     win.show();
@@ -825,9 +1090,8 @@ function releasePidLock() {
   } catch {}
 }
 
-// Clean up stale Express port file from previous runs.
-// Do NOT delete vite-port — Vite starts before Electron and writes it once.
-try { fs.unlinkSync(EXPRESS_PORT_FILE); } catch {}
+// NOTE: No stale express port file to clean — server uses fixed port range now.
+// vite-port is written by Vite plugin (which starts before Electron) — keep it for dev mode.
 
 const gotTheLock = acquirePidLock();
 if (!gotTheLock) {
@@ -843,19 +1107,14 @@ if (!gotTheLock) {
   });
 }
 
-// Clean up port files, PID lock, and server process on exit
-app.on("before-quit", () => {
+// Clean up PID lock, server process, and Vite port file on exit
+function cleanup() {
   releasePidLock();
   if (serverChildProcess) { try { serverChildProcess.kill(); } catch {} }
-  try { fs.unlinkSync(EXPRESS_PORT_FILE); } catch {}
   try { fs.unlinkSync(VITE_PORT_FILE); } catch {}
-});
-process.on("exit", () => {
-  releasePidLock();
-  if (serverChildProcess) { try { serverChildProcess.kill(); } catch {} }
-  try { fs.unlinkSync(EXPRESS_PORT_FILE); } catch {}
-  try { fs.unlinkSync(VITE_PORT_FILE); } catch {}
-});
+}
+app.on("before-quit", cleanup);
+process.on("exit", cleanup);
 
 app.whenReady().then(async () => {
   registerIpc();

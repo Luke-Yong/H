@@ -17,9 +17,10 @@
     "dev:client": "cd client && vite --config vite.config.ts",
     "desktop:patch-electron": "node scripts/patch-electron-name.js",
     "desktop:start-electron": "npm run desktop:patch-electron && electron electron/main.cjs",
-    "desktop:dev": "set ELECTRON_DEV=1&& concurrently \"cd client && vite --config vite.config.ts\" \"npm run desktop:start-electron\"",
+    "desktop:dev": "set ELECTRON_DEV=1&& concurrently \"cd client && npx vite --config vite.config.ts\" \"npm run desktop:start-electron\"",
     "desktop:build": "cd client && npm run build",
-    "desktop:pack": "npm run icon:generate && npm run desktop:build && electron-builder --win --dir && node scripts/embed-icon.js && electron-builder --win --prepackaged dist/win-unpacked",
+    "desktop:build-server": "tsc -p tsconfig.json",
+    "desktop:pack": "npm run icon:generate && npm run desktop:build-server && npm run desktop:build && electron-builder --win --dir && node scripts/embed-icon.js && electron-builder --win --prepackaged dist/win-unpacked",
     "icon:generate": "node scripts/generate-icon.js",
     "install:all": "npm install && cd client && npm install",
     "rebuild:electron": "electron-rebuild --only better-sqlite3",
@@ -33,7 +34,6 @@
     "dotenv": "^16.4.0",
     "express": "^4.21.0",
     "node-pty": "^1.1.0-beta33",
-    "tsx": "^4.19.0",
     "typescript": "^5.6.0",
     "ws": "^8.18.0"
   },
@@ -43,13 +43,49 @@
     "icon": "build/icon.png",
     "copyright": "Copyright © 2026 H",
     "npmRebuild": false,
+    "asar": true,
     "asarUnpack": [
-      "node_modules/@esbuild/**/*"
+      "node_modules/@esbuild/**/*",
+      "node_modules/better-sqlite3/build/**/*",
+      "node_modules/better-sqlite3/**/*.node",
+      "node_modules/node-pty/build/**/*",
+      "node_modules/node-pty/**/*.node"
+    ],
+    "files": [
+      "package.json",
+      "electron/**/*",
+      "server/**/*",
+      "build/**/*",
+      "scripts/**/*",
+      "dist/**/*",
+      "client/dist/**/*",
+      "!server/__tests__/**",
+      "!README.md",
+      "!README_CN.md",
+      "!ARCHITECTURE*.md",
+      "!PROFILE_README.md",
+      "!demo.png",
+      "!*.txt",
+      "!client/node_modules/**",
+      "!client/src/**",
+      "!client/public/**",
+      "!client/*.ts",
+      "!client/*.json",
+      "!client/*.js",
+      "!client/*.md",
+      "!client/*.html",
+      "!client/.vite/**"
     ],
     "win": {
       "signAndEditExecutable": false,
       "artifactName": "h Setup ${version}.${ext}",
-      "legalTrademarks": ""
+      "legalTrademarks": "",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ]
     },
     "nsis": {
       "oneClick": false,
@@ -74,6 +110,7 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
     "@types/express": "^5.0.0",
+    "@types/node": "^22.0.0",
     "@types/supertest": "^7.2.0",
     "@types/ws": "^8.5.13",
     "concurrently": "^9.1.0",
@@ -85,6 +122,7 @@
     "sharp": "^0.35.3",
     "supertest": "^7.2.2",
     "to-ico": "^1.1.5",
+    "tsx": "^4.19.0",
     "vitest": "^4.1.9"
   }
 }

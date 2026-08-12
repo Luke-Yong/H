@@ -1,16 +1,21 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
     "esModuleInterop": true,
-    "strict": true,
+    "allowSyntheticDefaultImports": true,
+    "strict": false,
     "outDir": "dist",
     "rootDir": ".",
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "types": ["vitest/globals"]
+    "declaration": false,
+    "sourceMap": false,
+    "types": ["node", "vitest/globals"],
+    "resolveJsonModule": true,
+    "isolatedModules": false
   },
   "include": ["server/**/*.ts"],
-  "exclude": ["node_modules", "client"]
+  "exclude": ["node_modules", "client", "server/__tests__"]
 }

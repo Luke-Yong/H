@@ -4121,18 +4121,20 @@ export async function* agentLoopStream(
         let subResult: SubAgentResult;
         // Forward all sub-agent events to the frontend
         while (true) {
-          const { value, done } = await streamResult.next();
-          if (done) {
-            subResult = value as SubAgentResult;
+          const iter = await streamResult.next();
+          if (iter.done) {
+            subResult = iter.value as SubAgentResult;
             break;
           }
+          // Not done -> value is guaranteed SubAgentStreamEvent (has .type)
+          const evt = iter.value as SubAgentStreamEvent;
           // Forward sub-agent tool events — agentMarker is already set.
           // Skip text events from sub-agents to avoid polluting the parent's message flow.
-          if (value.type === "tool_start" || value.type === "tool_end") {
-            yield value;
-          } else if (value.type === "browser_tool") {
+          if (evt.type === "tool_start" || evt.type === "tool_end") {
+            yield evt;
+          } else if (evt.type === "browser_tool") {
             // browser_tool from sub-agent: treat same as parent browser_tool
-            yield value;
+            yield evt;
           }
         }
         

@@ -15,7 +15,7 @@ import os from "os";
 import crypto from "crypto";
 import { execSync } from "child_process";
 import { getFileTrackingService } from "./fileTracking";
-import { EXPRESS_PORT_FILE, API_KEYS_FILE, CLIENT_STATE_FILE } from "./hPaths";
+import { API_KEYS_FILE, CLIENT_STATE_FILE } from "./hPaths";
 import { encryptApiKeys, decryptApiKeys } from "./cryptoStore";
 
 const app = express();
@@ -1574,7 +1574,7 @@ app.get("/api/lsp/watch", (req, res) => {
   res.write(":\n\n"); // SSE comment to flush headers
 
   const result = watchDiagnostics(rootPath, language, res);
-  if (!result.ok) {
+  if (result.ok === false) {
     res.write(`event: error\ndata: ${JSON.stringify({ error: result.error })}\n\n`);
     res.end();
     return;
@@ -2167,8 +2167,19 @@ app.get("/api/mcp/sse", (req, res) => {
   });
 });
 
+// ── Resolve project root ──
+// Works both from source (server/index.ts, rootDir=".") and compiled JS (dist/server/index.js, outDir="dist").
+function resolveProjectRoot(): string {
+  // If running from compiled dist/server/, go up twice to reach project root
+  const compiledRoot = path.resolve(__dirname, "..", "..");
+  if (fs.existsSync(path.join(compiledRoot, "package.json"))) return compiledRoot;
+  // Otherwise assume running from source server/ inside project root
+  return path.resolve(__dirname, "..");
+}
+const PROJECT_ROOT = resolveProjectRoot();
+
 // ── Serve client (desktop / production) ──
-const clientDist = path.resolve(__dirname, "..", "client", "dist");
+const clientDist = path.join(PROJECT_ROOT, "client", "dist");
 if (process.env.H_SERVE_CLIENT === "1" && fs.existsSync(path.join(clientDist, "index.html"))) {
   app.use(express.static(clientDist));
   app.get(/^\/(?!api\/|ws\/?|_browser\/?).*/, (_req, res) => {
@@ -2424,27 +2435,54 @@ wss.on("connection", (ws) => {
   });
 });
 
+// ── Fixed port binding ──
+// Default port with fallback range; avoids port-file writes/reads and race conditions.
+// The client (Vite dev proxy + Electron packaged) should try ports in this range.
+const EXPRESS_DEFAULT_PORT = 51734;
+const EXPRESS_PORT_RANGE = 20; // try 51734..51753
+
+function listenInRange(startPort: number, range: number, cb: (port: number) => void) {
+  let attempts = 0;
+  const tryPort = (p: number) => {
+    attempts++;
+    server.once("error", (err: any) => {
+      if (err?.code === "EADDRINUSE" && attempts < range) {
+        tryPort(p + 1);
+      } else {
+        console.error(`[h:server] Server error on port ${p}:`, err);
+      }
+    });
+    server.listen(p, "127.0.0.1", () => {
+      server.removeAllListeners("error");
+      cb(p);
+    });
+  };
+  tryPort(startPort);
+}
+
+export function getListenPortStart(): number { return EXPRESS_DEFAULT_PORT; }
+export function getListenPortRange(): number { return EXPRESS_PORT_RANGE; }
+
 if (process.env.NODE_ENV !== "test") {
-  server.listen(0, () => {
-    const addr = server.address();
-    const port = typeof addr === "object" && addr ? addr.port : 0;
-    console.log(`H server running on http://localhost:${port}`);
-    // Write port for Vite proxy + Electron discovery
-    try {
-      fs.mkdirSync(path.dirname(EXPRESS_PORT_FILE), { recursive: true });
-      fs.writeFileSync(EXPRESS_PORT_FILE, String(port));
-    } catch {}
-  });
-  server.on("error", (err) => {
-    console.error(`[h:server] Server error:`, err);
-  });
+  // Env override for explicit port (useful for deployments)
+  const explicitPort = process.env.H_PORT ? parseInt(process.env.H_PORT, 10) : 0;
+  if (explicitPort > 0) {
+    server.listen(explicitPort, "127.0.0.1", () => {
+      console.log(`H server running on http://localhost:${explicitPort}`);
+    });
+    server.on("error", (err) => {
+      console.error(`[h:server] Server error:`, err);
+    });
+  } else {
+    listenInRange(EXPRESS_DEFAULT_PORT, EXPRESS_PORT_RANGE, (port) => {
+      console.log(`H server running on http://localhost:${port}`);
+    });
+  }
 }
 
 process.on("SIGINT", async () => {
-  try { fs.unlinkSync(EXPRESS_PORT_FILE); } catch {}
   process.exit();
 });
 process.on("SIGTERM", async () => {
-  try { fs.unlinkSync(EXPRESS_PORT_FILE); } catch {}
   process.exit();
 });
