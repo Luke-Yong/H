@@ -1,9 +1,15 @@
+process.title = "H";
+
 const { app, BrowserWindow, ipcMain, dialog, session, webContents, nativeImage } = require("electron");
 const http = require("http");
 const path = require("path");
 const fs = require("fs");
 const { getBestAvailableLocation } = require("./native-location.cjs");
 require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
+
+// Must be set before any Chromium initialization so child processes inherit the name on Windows
+app.setAppUserModelId("com.h.ide.v1");
+app.name = "H";
 
 const H_BROWSER_PARTITION = "h-browser";
 const sitePermissions = new Map();
@@ -727,10 +733,6 @@ async function createMainWindow() {
     win.show();
   }
 }
-
-// Must be set before app.whenReady() on Windows to apply the taskbar icon
-app.setAppUserModelId("com.h.ide.v1");
-app.name = "H";
 
 // ── Dynamic window title ──
 ipcMain.on("h:setTitle", (event, title) => {

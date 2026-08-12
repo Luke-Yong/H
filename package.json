@@ -15,13 +15,14 @@
     "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
     "dev:server": "npx tsx watch server/index.ts",
     "dev:client": "cd client && vite --config vite.config.ts",
-    "desktop:dev": "set ELECTRON_DEV=1&& concurrently \"cd client && vite --config vite.config.ts\" \"electron electron/main.cjs\"",
+    "desktop:patch-electron": "node scripts/patch-electron-name.js",
+    "desktop:dev": "set ELECTRON_DEV=1&& concurrently \"cd client && vite --config vite.config.ts\" \"npm run desktop:patch-electron && electron electron/main.cjs\"",
     "desktop:build": "cd client && npm run build",
     "desktop:pack": "npm run icon:generate && npm run desktop:build && electron-builder --win --dir && node scripts/embed-icon.js && electron-builder --win --prepackaged dist/win-unpacked",
     "icon:generate": "node scripts/generate-icon.js",
     "install:all": "npm install && cd client && npm install",
     "rebuild:electron": "electron-rebuild --only better-sqlite3 && electron-rebuild --only node-pty",
-    "postinstall": "node -e \"try { const { spawnSync } = require('child_process'); const r1 = spawnSync('npx', ['electron-rebuild','--only','better-sqlite3'], { stdio: 'inherit', shell: true }); const r2 = spawnSync('npx', ['electron-rebuild','--only','node-pty'], { stdio: 'inherit', shell: true }); if (r2.status !== 0) { console.warn('node-pty rebuild failed; terminal will fall back to pipe mode.'); } } catch(e) { console.warn('electron-rebuild skipped; terminal will fall back to pipe mode.'); }\"",
+    "postinstall": "node -e \"try { const { spawnSync } = require('child_process'); const r1 = spawnSync('npx', ['electron-rebuild','--only','better-sqlite3'], { stdio: 'inherit', shell: true }); const r2 = spawnSync('npx', ['electron-rebuild','--only','node-pty'], { stdio: 'inherit', shell: true }); if (r2.status !== 0) { console.warn('node-pty rebuild failed; terminal will fall back to pipe mode.'); } } catch(e) { console.warn('electron-rebuild skipped; terminal will fall back to pipe mode.'); }\" && node scripts/patch-electron-name.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage"
@@ -39,21 +40,34 @@
     "appId": "com.h.ide",
     "productName": "H",
     "icon": "build/icon.png",
+    "copyright": "Copyright © 2026 H",
     "npmRebuild": false,
     "asarUnpack": [
       "node_modules/@esbuild/**/*"
     ],
     "win": {
       "signAndEditExecutable": false,
-      "artifactName": "h Setup ${version}.${ext}"
+      "artifactName": "h Setup ${version}.${ext}",
+      "legalTrademarks": ""
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "H",
+      "deleteAppDataOnUninstall": false,
+      "differentialPackage": true,
+      "include": "build/installer-hooks.nsh"
     },
     "extraMetadata": {
       "name": "H",
-      "description": "H - AI coding agent"
+      "author": "H",
+      "description": "H - AI coding agent",
+      "version": "0.0.1"
     }
   },
   "devDependencies": {
