@@ -1277,6 +1277,7 @@ export async function runFsTool(name: string, params: Record<string, unknown>, r
   if (name === "write_file") {
     const filePath = resolve(String(params.path || ""));
     if (isSecretPath(filePath)) return `Blocked: ${params.path} may contain secrets.`;
+    if (fs.existsSync(filePath) && fs.statSync(filePath).isDirectory()) return `Cannot write: ${params.path} is an existing directory, not a file. Use a file path instead.`;
     const dir = path.dirname(filePath);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     let content = String(params.content || "");
@@ -1295,6 +1296,7 @@ export async function runFsTool(name: string, params: Record<string, unknown>, r
     const filePath = resolve(String(params.path || ""));
     if (isSecretPath(filePath)) return `Blocked: ${params.path} may contain secrets.`;
     if (!fs.existsSync(filePath)) return `File not found: ${params.path}`;
+    if (fs.statSync(filePath).isDirectory()) return `Cannot edit: ${params.path} is a directory, not a file.`;
     const oldStr = String(params.old_string || "");
     const newStr = String(params.new_string || "");
     const replaceAll = Boolean(params.replace_all);

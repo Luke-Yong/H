@@ -323,6 +323,7 @@ export class HMcpServer extends EventEmitter {
       case "write_file": {
         const filePath = resolve(String(args.path || ""));
         if (isSecretPath(filePath)) return `Blocked: ${args.path} may contain secrets.`;
+        if (fs.existsSync(filePath) && fs.statSync(filePath).isDirectory()) return `Cannot write: ${args.path} is an existing directory, not a file. Use a file path instead.`;
         const dir = path.dirname(filePath);
         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
         let content = String(args.content || "");

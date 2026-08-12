@@ -1383,11 +1383,10 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
               activeDelegationMarkerRef.current = marker;
             }
             });
-          // Yield a frame so the browser paints the tool card (spinner, styling)
-          // before tool_end arrives in the next SSE event. Without this, fast
-          // tools (write_file, edit_file, etc.) complete before the card is ever
-          // shown in its "waiting" state.
-          await new Promise<void>(r => { requestAnimationFrame(() => r()); });
+          // Yield two frames so the browser paints the tool card (spinner, styling)
+          // before tool_end arrives in the next SSE event. Single rAF fires before
+          // the paint; double rAF guarantees at least one paint cycle completes.
+          await new Promise<void>(r => { requestAnimationFrame(() => requestAnimationFrame(() => r())); });
           // Deferred: open the file in editor now that the tool card is painted
           if (deferredOpenPath) openEditorFile?.(deferredOpenPath);
         } else if (evt.type === "tool_end") {
@@ -1819,9 +1818,10 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
             agentTermMsgIdRef.current = id;
             agentTermOutputRef.current = "";
           }
-          // Yield a frame so the browser paints the tool card (spinner, styling)
-          // before tool_end arrives in the next SSE event.
-          await new Promise<void>(r => { requestAnimationFrame(() => r()); });
+          // Yield two frames so the browser paints the tool card (spinner, styling)
+          // before tool_end arrives in the next SSE event. Single rAF fires before
+          // the paint; double rAF guarantees at least one paint cycle completes.
+          await new Promise<void>(r => { requestAnimationFrame(() => requestAnimationFrame(() => r())); });
           // Deferred: open the file in editor now that the tool card is painted
           if (deferredOpenPath2) openEditorFile?.(deferredOpenPath2);
           return true;
@@ -3095,6 +3095,14 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
     return groups;
   }, [safeMessages]);
 
+  // Only the last "thinking..." message should show the spinner; previous ones are stale
+  const lastThinkingId = useMemo(() => {
+    for (let i = safeMessages.length - 1; i >= 0; i--) {
+      if (safeMessages[i].state === "thinking") return safeMessages[i].id;
+    }
+    return null;
+  }, [safeMessages]);
+
   const lastGroupIsUserOnly = messageGroups.length > 0
     && messageGroups[messageGroups.length - 1].items.every((m) => m.role === "user");
 
@@ -3158,7 +3166,7 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
                 <div key={msg.id} className={`agent-msg agent-msg-${msg.role}${msg.isWarning ? " agent-msg-warning" : ""}`}>
             {msg.state && (
               <div key={`${msg.id}-state`} className="agent-state">
-                {msg.state === "thinking" && <span className="agent-spinner" />}
+                {msg.state === "thinking" && lastThinkingId === msg.id && <span className="agent-spinner" />}
                 {stateLabel(msg.state)}
               </div>
             )}
@@ -3547,26 +3555,12 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
               <i className="codicon codicon-check" /> Response complete
             </div>
             {(() => {
-              const ctx = effectiveUsage?.contextLimit ?? 128_000;
               const turnChars = group.items.reduce((sum, m) => sum + (m.content?.length || 0), 0);
               const est = Math.round(turnChars / 4);
-              const pct = Math.min(100, (est / ctx) * 100);
-              const radius = 8;
-              const circumference = 2 * Math.PI * radius;
-              const offset = circumference - (pct / 100) * circumference;
               return (
-                <div className="agent-footer-usage" title={`~${est} estimated tokens of ${ctx.toLocaleString()} context limit`}>
-                  <svg className="agent-footer-usage-ring" width="20" height="20" viewBox="0 0 20 20">
-                    <circle className="agent-footer-usage-ring-bg" cx="10" cy="10" r={radius} />
-                    <circle
-                      className={`agent-footer-usage-ring-fill${est > ctx * 0.8 ? " high" : ""}`}
-                      cx="10" cy="10" r={radius}
-                      strokeDasharray={circumference}
-                      strokeDashoffset={offset}
-                    />
-                  </svg>
+                <div className="agent-footer-usage" title={`~${est.toLocaleString()} estimated tokens this turn`}>
                   <span className="agent-footer-usage-text">
-                    {Math.round(pct)}%
+                    ~{est >= 1000 ? `${(est / 1000).toFixed(1)}k` : est} tokens
                   </span>
                 </div>
               );
@@ -3638,7 +3632,7 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
             </div>
             {(() => {
               const est = effectiveUsage?.estimatedTokens ?? 0;
-              const ctx = effectiveUsage?.contextLimit ?? 128_000;
+              const ctx = effectiveUsage?.contextLimit ?? 1_000_000;
               const pct = Math.min(100, (est / ctx) * 100);
               const cache = getCacheSummary(effectiveUsage);
               const radius = 8;
