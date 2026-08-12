@@ -301,9 +301,21 @@ app.post("/api/chat/agent/stream", async (req, res) => {
       res.write(`data: ${data}\n\n`);
     };
 
+    // After tool_start, yield to the event loop so the response buffer flushes
+    // before the tool executes (which may use sync I/O and block the event loop).
+    // Without this, tool_start and tool_end arrive in the same TCP packet and
+    // the client renders the tool card only after the tool completes.
+    const sendAndMaybeYeld = async (event: AgentSseEvent): Promise<boolean> => {
+      sendEvent(event);
+      if (event.type === "tool_start") {
+        await new Promise<void>((r) => setImmediate(r));
+      }
+      return false;
+    };
+
     const modelOpts = { model, apiKey };
     for await (const event of agentLoopStream(root, state, context || "", sessionId, modelOpts)) {
-      sendEvent(event);
+      await sendAndMaybeYeld(event);
       if (event.type === "browser_tool" || event.type === "permission_required" || event.type === "done" || event.type === "error") break;
     }
 
@@ -350,9 +362,17 @@ app.post("/api/chat/agent/stream/stepbystep", async (req, res) => {
       res.write(`data: ${data}\n\n`);
     };
 
+    const sendAndMaybeYeld = async (event: AgentSseEvent): Promise<boolean> => {
+      sendEvent(event);
+      if (event.type === "tool_start") {
+        await new Promise<void>((r) => setImmediate(r));
+      }
+      return false;
+    };
+
     const modelOpts = { model, apiKey };
     for await (const event of agentLoopStepByStep(root, state, context || "", sessionId, modelOpts)) {
-      sendEvent(event);
+      await sendAndMaybeYeld(event);
       if (event.type === "done" || event.type === "error") break;
     }
 
@@ -437,6 +457,13 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
       const sendEvent = (event: AgentSseEvent) => {
         res.write(`data: ${JSON.stringify({ ...event, sessionId })}\n\n`);
       };
+      const sendAndMaybeYeld = async (event: AgentSseEvent): Promise<boolean> => {
+        sendEvent(event);
+        if (event.type === "tool_start") {
+          await new Promise<void>((r) => setImmediate(r));
+        }
+        return false;
+      };
       sendEvent({ type: "tool_end", toolName: "delegate_task", toolResult: resultText, toolParams: {},
         subAgentName: psa.config.name,
         subAgentMessages: subResult.subState.messages.map((m: any) => ({
@@ -445,7 +472,7 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
       } as AgentSseEvent);
       const continueContext = typeof consoleContext === "string" ? consoleContext : "";
       for await (const event of agentLoopStream(state.projectRoot, state, continueContext, sessionId, { model, apiKey })) {
-        sendEvent(event);
+        await sendAndMaybeYeld(event);
         if (event.type === "browser_tool" || event.type === "done" || event.type === "error") break;
       }
       return res.end();
@@ -518,9 +545,17 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
       } as AgentSseEvent);
     }
 
+    const sendAndMaybeYeld = async (event: AgentSseEvent): Promise<boolean> => {
+      sendEvent(event);
+      if (event.type === "tool_start") {
+        await new Promise<void>((r) => setImmediate(r));
+      }
+      return false;
+    };
+
     const continueContext = typeof consoleContext === "string" ? consoleContext : "";
     for await (const event of agentLoopStream(state.projectRoot, state, continueContext, sessionId, { model, apiKey })) {
-      sendEvent(event);
+      await sendAndMaybeYeld(event);
       if (event.type === "browser_tool" || event.type === "done" || event.type === "error") break;
     }
 

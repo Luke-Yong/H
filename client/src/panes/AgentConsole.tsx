@@ -1463,7 +1463,20 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
             // Auto-apply file changes to editor so the open file gets updated content
             // Uses pendingFileChangesRef (saved from tool_start before ref was cleared)
             if (pendingFileChangesRef.current.length > 0) {
-              applyEditorFiles([...pendingFileChangesRef.current]);
+              const changes = [...pendingFileChangesRef.current];
+              applyEditorFiles(changes);
+              // Explicitly focus the modified file tab in the editor
+              const root = (getFsBasePath?.() || "").replace(/[/\\]$/, "");
+              for (const fc of changes) {
+                if (fc.changeType === "write" || fc.changeType === "create") {
+                  let p = fc.path;
+                  if (root && !/^[a-zA-Z]:/.test(p) && !p.startsWith("/")) {
+                    p = root + "/" + p.replace(/\\/g, "/");
+                  }
+                  openEditorFile?.(p);
+                  break; // Focus the first modified file
+                }
+              }
               pendingFileChangesRef.current = [];
             }
             // Refresh file tree — write_file already wrote to disk in the agent loop.
@@ -1865,7 +1878,20 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
               }
             }
             if (pendingFileChangesRef.current.length > 0) {
-              applyEditorFiles([...pendingFileChangesRef.current]);
+              const changes = [...pendingFileChangesRef.current];
+              applyEditorFiles(changes);
+              // Explicitly focus the modified file tab in the editor
+              const root2 = (getFsBasePath?.() || "").replace(/[/\\]$/, "");
+              for (const fc of changes) {
+                if (fc.changeType === "write" || fc.changeType === "create") {
+                  let p = fc.path;
+                  if (root2 && !/^[a-zA-Z]:/.test(p) && !p.startsWith("/")) {
+                    p = root2 + "/" + p.replace(/\\/g, "/");
+                  }
+                  openEditorFile?.(p);
+                  break; // Focus the first modified file
+                }
+              }
               pendingFileChangesRef.current = [];
             }
             onRefreshFs?.();
@@ -2851,6 +2877,13 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
       const nFc = norm(fc.path);
       if (nFc === nDt || nDt.endsWith("/" + fc.name) || nDt.endsWith("\\" + fc.name)) {
         acceptEditorChange?.(resolvePath(dt.filePath));
+        // Switch to the modified file tab so user sees changes immediately on accept.
+        // For rename: switch to the NEW path (stored in fc.content).
+        if (fc.changeType === "rename" && fc.content) {
+          openEditorFile?.(resolvePath(fc.content));
+        } else if (fc.changeType === "write" && fc.content) {
+          openEditorFile?.(resolvePath(dt.filePath));
+        }
         onRefreshFs?.();
         if (fc.changeType === "rename" && fc.content) {
           renameEditorFile?.(resolvePath(fc.path), resolvePath(fc.content));
@@ -2873,6 +2906,8 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
     }
     if (fc.changeType === "write" && fc.content) {
       applyEditorFiles([fc]);
+      // Switch to the modified file tab so user sees changes immediately on accept
+      openEditorFile?.(resolvePath(fc.path));
     } else if (fc.changeType === "delete") {
       const root = (getFsBasePath?.() || "").replace(/[/\\]$/, "");
       let resolved = fc.path;
@@ -2889,6 +2924,8 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
     } else if (fc.changeType === "rename" && fc.content) {
       onRefreshFs?.();
       renameEditorFile?.(resolvePath(fc.path), resolvePath(fc.content));
+      // Switch to the renamed file tab immediately after rename
+      openEditorFile?.(resolvePath(fc.content));
     }
     if (fc.changeType !== "delete") onRefreshFs?.();
     acceptEditorChange?.(resolvePath(fc.path));
@@ -2900,7 +2937,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
       }
       return next;
     });
-  }, [acceptEditorChange, applyEditorFiles, onRefreshFs, getFsBasePath, resolvePath, closeEditorFile, renameEditorFile]);
+  }, [acceptEditorChange, applyEditorFiles, onRefreshFs, getFsBasePath, resolvePath, closeEditorFile, renameEditorFile, openEditorFile]);
 
   const rejectFile = useCallback((fc: FileChange, msgId: string) => {
     // If this is a deferred tool, skip local revert and just resume agent stream
@@ -3479,20 +3516,62 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
                     )}
                   </div>
                 )}
-                {/* ── Sandbox output for run_command and other tools ── */}
-                {msg.toolName !== "run_in_terminal" && msg.sandboxOutput && (
+                {/* ── Sandbox terminal block for run_command ── */}
+                {msg.toolName === "run_command" && (
                   <div className="agent-terminal">
                     <div className="agent-terminal-header">
                       <i className="codicon codicon-terminal" />
                       <span className="agent-terminal-cwd" title={projectPath}>{projectPath || "~"}</span>
-                      <i className="codicon codicon-check agent-terminal-done" />
+                      {msg.state === "waiting" ? (
+                        <span className="agent-spinner agent-terminal-spinner" />
+                      ) : (
+                        <i className="codicon codicon-check agent-terminal-done" />
+                      )}
                     </div>
-                    {msg.toolName === "run_command" && msg.toolParams && "command" in msg.toolParams && (
+                    {msg.toolParams && "command" in msg.toolParams && (
                       <div className="agent-terminal-cmdline">
                         <span className="agent-terminal-prompt">$</span>
                         <span className="agent-terminal-cmd">{String(msg.toolParams.command ?? "")}</span>
                       </div>
                     )}
+                    {msg.sandboxOutput != null && (
+                      <>
+                        {!collapsedOutputs.has(msg.id) ? (
+                          <div className="agent-output-expanded">
+                            <div
+                              className="agent-output-collapse-bar"
+                              onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.add(msg.id); return next; })}
+                            >
+                              <span>Output ({msg.sandboxOutput.split("\n").length} lines)</span>
+                              <i className="codicon codicon-chevron-up" />
+                            </div>
+                            <pre className="agent-terminal-out">{msg.sandboxOutput}</pre>
+                          </div>
+                        ) : (
+                          <div
+                            className="agent-terminal-out-collapsed"
+                            onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.delete(msg.id); return next; })}
+                          >
+                            <i className="codicon codicon-chevron-right" />
+                            <span>Output ({msg.sandboxOutput.split("\n").length} lines)</span>
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                )}
+                {/* ── Sandbox output for other non-terminal tools ── */}
+                {msg.toolName !== "run_in_terminal" && msg.toolName !== "run_command" && msg.sandboxOutput && (
+                  <div className="agent-terminal">
+                    <div className="agent-terminal-header">
+                      <i className="codicon codicon-terminal" />
+                      <span className="agent-terminal-cwd" title={projectPath}>{projectPath || "~"}</span>
+                      {msg.state === "waiting" ? (
+                        <span className="agent-spinner agent-terminal-spinner" />
+                      ) : (
+                        <i className="codicon codicon-check agent-terminal-done" />
+                      )}
+                    </div>
                     {!collapsedOutputs.has(msg.id) ? (
                       <div className="agent-output-expanded">
                         <div
@@ -3611,23 +3690,6 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
                 <i className="codicon codicon-refresh" />
               </button>
             </div>
-            {expandedGroupDiffKey === group.key && (
-              <div className="agent-group-diff-panel">
-                {getGroupDiffFiles(group.items).map((f, fi) => (
-                  <div key={`${f.path}-${fi}`} className="agent-group-diff-file">
-                    <div className="agent-group-diff-file-header" onClick={() => setExpandedDiffPath(expandedDiffPath === f.path + "-" + fi ? null : f.path + "-" + fi)}>
-                      <i className={`codicon codicon-${expandedDiffPath === f.path + "-" + fi ? "chevron-down" : "chevron-right"}`} />
-                      {f.path}
-                    </div>
-                    {expandedDiffPath === f.path + "-" + fi && (
-                      <div className="agent-diff-content">
-                        {renderDiffLines(f.diff, f.startLine)}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
           </div>
         )}
         {isLast && !hasAssistant && lastGroupIsUserOnly && (
@@ -3919,6 +3981,41 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
           </div>
         </div>
       )}
+      {/* ── Per-turn diff popup (non-last turns) ── */}
+      {expandedGroupDiffKey != null && (() => {
+        const group = messageGroups.find((g) => g.key === expandedGroupDiffKey);
+        const gFiles = group ? getGroupDiffFiles(group.items) : [];
+        if (gFiles.length === 0) return null;
+        return (
+          <div className="dialog-overlay" onClick={(e) => { if (e.target === e.currentTarget) setExpandedGroupDiffKey(null); }}>
+            <div className="dialog-box" style={{ width: "min(720px, 90vw)", maxHeight: "80vh", display: "flex", flexDirection: "column" }}>
+              <div className="dialog-title" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span>Changes ({gFiles.length} file{gFiles.length > 1 ? "s" : ""})</span>
+                <button className="agent-footer-btn" onClick={() => setExpandedGroupDiffKey(null)} title="Close">
+                  <i className="codicon codicon-close" />
+                </button>
+              </div>
+              <div style={{ overflow: "auto", flex: 1 }}>
+                <div className="agent-group-diff-panel">
+                  {gFiles.map((f, fi) => (
+                    <div key={`${f.path}-${fi}`} className="agent-group-diff-file">
+                      <div className="agent-group-diff-file-header" onClick={() => setExpandedDiffPath(expandedDiffPath === f.path + "-" + fi ? null : f.path + "-" + fi)}>
+                        <i className={`codicon codicon-${expandedDiffPath === f.path + "-" + fi ? "chevron-down" : "chevron-right"}`} />
+                        {f.path}
+                      </div>
+                      {expandedDiffPath === f.path + "-" + fi && (
+                        <div className="agent-diff-content">
+                          {renderDiffLines(f.diff, f.startLine)}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

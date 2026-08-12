@@ -1,4 +1,5 @@
 import { useState, forwardRef, useImperativeHandle, useCallback, useEffect, useRef, useMemo } from "react";
+import { flushSync } from "react-dom";
 import Editor from "@monaco-editor/react";
 import FilesPanel from "./FilesPanel";
 import BrowserView from "./BrowserView";
@@ -1267,72 +1268,63 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     } catch { /* */ }
   }, [files, activeFileId]);
 
+  const applyAiFiles_activeRef = useRef<string>("");
   const applyAiFiles = useCallback((aiFiles: { name: string; content: string; fsPath?: string; isNew?: boolean }[]) => {
-    setFiles((prev) => {
-      const updated = [...prev];
-      let newFileId = "";
-      let modifiedFileId = "";
-      for (const af of aiFiles) {
-        // Dedup: match by _fsPath first, then by name.
-        const target = af.fsPath ? normPath(af.fsPath) : "";
-        const existing = target
-          ? updated.find((f) => normPath(f._fsPath) === target)
-          : undefined;
-        // Fallback: match by name. If found, fix stale relative _fsPath.
-        const byName = !existing && target
-          ? updated.find((f) => f.name === af.name)
-          : undefined;
-        const match = existing || byName;
-        if (match) {
-          match.content = af.content;
-          // Fix stale relative path with the resolved absolute one.
-          if (byName && af.fsPath) {
-            const fp = normPath(af.fsPath);
-            match._fsPath = /^[A-Z]:/i.test(fp) || fp.startsWith("/") ? fp : normPath(fsBasePath + "/" + fp);
+    applyAiFiles_activeRef.current = "";
+    flushSync(() => {
+      setFiles((prev) => {
+        const updated = [...prev];
+        let newFileId = "";
+        let modifiedFileId = "";
+        for (const af of aiFiles) {
+          const target = af.fsPath ? normPath(af.fsPath) : "";
+          const existing = target
+            ? updated.find((f) => normPath(f._fsPath) === target)
+            : undefined;
+          const byName = !existing && target
+            ? updated.find((f) => f.name === af.name)
+            : undefined;
+          const match = existing || byName;
+          if (match) {
+            match.content = af.content;
+            if (byName && af.fsPath) {
+              const fp = normPath(af.fsPath);
+              match._fsPath = /^[A-Z]:/i.test(fp) || fp.startsWith("/") ? fp : normPath(fsBasePath + "/" + fp);
+            }
+            if (match._fsPath) {
+              fetch("/api/fs/write", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ path: match._fsPath, content: af.content }),
+              }).catch(() => {});
+            }
+            const editor = editorByFileIdRef.current[match.id];
+            if (editor) {
+              try {
+                const model = (editor as any).getModel?.();
+                if (model && model.getValue() !== af.content) {
+                  model.setValue(af.content);
+                }
+              } catch { /* editor not fully initialized yet */ }
+            }
+            clearLspMarkersForFile(match.id);
+            modifiedFileId = modifiedFileId || match.id;
+          } else {
+            const f = createFile(af.name, af.content);
+            if (af.fsPath) {
+              const fp = normPath(af.fsPath);
+              f._fsPath = /^[A-Z]:/i.test(fp) || fp.startsWith("/") ? fp : normPath(fsBasePath + "/" + fp);
+            }
+            if (af.isNew) f._isNew = true;
+            updated.push(f);
+            newFileId = newFileId || f.id;
           }
-          if (match._fsPath) {
-            fetch("/api/fs/write", {
-              method: "POST", headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ path: match._fsPath, content: af.content }),
-            }).catch(() => {});
-          }
-          // Push content directly to Monaco so the editor reflects the change
-          // immediately, even if React's re-render / @monaco-editor/react value
-          // sync hasn't caught up yet (e.g. file is open but not the active tab).
-          const editor = editorByFileIdRef.current[match.id];
-          if (editor) {
-            try {
-              const model = (editor as any).getModel?.();
-              if (model && model.getValue() !== af.content) {
-                model.setValue(af.content);
-              }
-            } catch { /* editor not fully initialized yet */ }
-          }
-          // Clear stale LSP markers so old errors don't linger after agent fixes.
-          // The SSE-based diagnostics will repopulate with fresh results shortly.
-          clearLspMarkersForFile(match.id);
-          modifiedFileId = modifiedFileId || match.id;
-        } else {
-          const f = createFile(af.name, af.content);
-          if (af.fsPath) {
-            // Resolve relative paths (from agent) against project root.
-            const fp = normPath(af.fsPath);
-            f._fsPath = /^[A-Z]:/i.test(fp) || fp.startsWith("/") ? fp : normPath(fsBasePath + "/" + fp);
-          }
-          // Note: _isNew is NOT set here. It's the caller's responsibility
-          // (e.g. agent applies it, user menu does not).
-          if (af.isNew) f._isNew = true;
-          updated.push(f);
-          newFileId = newFileId || f.id;
         }
-      }
-      // Must set activeFileId inside the updater — React 18 defers functional
-      // updater execution, so reading newFileId/modifiedFileId outside would
-      // always be "" (the tab would open but never become active).
-      if (newFileId) setActiveFileId(newFileId);
-      else if (modifiedFileId) setActiveFileId(modifiedFileId);
-      return updated;
+        applyAiFiles_activeRef.current = newFileId || modifiedFileId;
+        return updated;
+      });
     });
+    const activeId = applyAiFiles_activeRef.current;
+    if (activeId) setActiveFileId(activeId);
   }, [fsBasePath, clearLspMarkersForFile]);
 
   const agentDiffsPendingRef = useRef<Record<string, { originalContent: string; newContent: string }>>({});
@@ -1509,9 +1501,10 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     if (f) rejectAgentChanges(f.id);
   }, [files, rejectAgentChanges]);
 
-  // Switch to file by fsPath, optionally scroll to line and highlight query
+  // Switch to file by fsPath, optionally scroll to line and highlight query.
+  // Uses filesRef instead of the closure `files` so calls immediately following
+  // applyAiFiles / applyAgentFileChanges see the just-opened tab.
   const openFileByFsPath = useCallback((fsPath: string, line?: number, query?: string) => {
-    // Resolve relative paths against project root
     let resolvedFsPath = fsPath;
     if (!fsPath.match(/^[a-zA-Z]:[\\/]/) && !fsPath.startsWith("\\\\") && !fsPath.startsWith("/") && fsBasePath) {
       resolvedFsPath = fsBasePath.replace(/[/\\]$/, "") + "/" + fsPath;
@@ -1519,15 +1512,14 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     if (line && query) {
       pendingSearchNavRef.current = { filePath: resolvedFsPath, line, query };
     }
-    const f = files.find((x) => x._fsPath && normPath(x._fsPath) === normPath(resolvedFsPath));
+    const f = filesRef.current.find((x) => x._fsPath && normPath(x._fsPath) === normPath(resolvedFsPath));
     if (f) {
       setActiveFileId(f.id);
       if (line && query) pendingSearchNavRef.current!.fileId = f.id;
       return;
     }
-    // File not open yet — open it from disk
     openFsFile(fsPath);
-  }, [files, fsBasePath, openFsFile]);
+  }, [fsBasePath, openFsFile]);
 
   // Apply agent diff decorations when agent changes or active file changes
   useEffect(() => {
