@@ -9,25 +9,38 @@
 
 ---
 
-## Why H over VS Code OSS?
+## Tier 1 — vs VS Code OSS (Efficiency)
+
+The lightweight baseline. H cuts the overhead of a general-purpose editor platform by focusing strictly on what an agent needs.
 
 | | H | VS Code OSS |
 |---|---|---|
 | **RAM (idle)** | ~200–300 MB | ~1–2 GB |
 | **Disk size** | ~200–300 MB | ~1–2 GB |
-| **AI-native** | Built-in agent loop with 27 tools | Extensions only (Copilot, Continue) |
-| **Agent types** | 11 specialized sub-agents (browser, code-writer, researcher, planner, security-auditor, architect…) | None built-in |
-| **Browser** | Built-in Electron webview + DOM indexing | None |
-| **Terminal** | PTY-backed (node-pty) with agent access | Integrated terminal (no agent access) |
-| **Knowledge graph** | Auto-built codebase graph (.kg) with symbol-level imports | None |
-| **Multi-agent** | `delegate_task` with live streaming + color-coded UI | None |
-| **MCP** | Built-in MCP server (stdio + SSE) | Extensions only |
-| **Persistent memory** | SQLite-backed cross-session memory | None |
-| **File tracking** | Auto-detects Git vs watcher mode | Git only |
-| **Step-by-step** | IDE-locked todo progression with isolated sub-agents | None |
+| **Startup** | ~2–3 s (cold) | ~5–10 s (cold) |
+| **Process model** | 3–5 processes (Electron + Node server) | 15–30+ processes (extension hosts, LSPs, watchers, shared workers) |
+| **Focus** | Agent-first workspace | Extensible editor platform |
 | **License** | AGPL-3.0 | MIT |
 
-H is not an editor platform — it's an **agent-first workspace**. Every feature is designed for the AI to use directly: filesystem tools, sandboxed commands, browser automation, terminal PTY, and structured delegation across 11 agent profiles.
+## Tier 2 — vs VS Code OSS + Copilot (Scope)
+
+Copilot is a code **assistant** — autocomplete, chat, and inline suggestions. H is **agent-native**: it plans, delegates, remembers, and operates the browser and terminal directly.
+
+| | H | VS Code OSS + Copilot |
+|---|---|---|
+| **Model** | **Agent** — plans, executes end-to-end tasks, iterates on its own errors | **Assistant** — responds to prompts, suggests snippets, requires the user to drive |
+| **Delegation** | `delegate_task` — spawns 11 specialized sub-agents (browser, code-writer, researcher, security-auditor, architect…) with isolated context windows | None — single chat thread |
+| **Live sub-agent UI** | Per-agent color-coded streaming, progress cards, nested todos | None |
+| **Persistent memory** | SQLite-backed cross-session memory (`remember` / `recall` / `forget`) | Per-session chat only |
+| **Browser automation** | Built-in Electron webview + 16 browser tools (click, type, upload, console, network, DOM) | None |
+| **Terminal control** | `run_in_terminal` — real PTY with agent read/write/kill access | Integrated terminal, no agent access |
+| **Knowledge graph** | Auto-built codebase graph (.kg), symbol-level imports, `read_graph` tool | None |
+| **Multi-agent orchestration** | Parent → child agent handoff with streaming summaries | None |
+| **Step-by-step locking** | IDE-enforced todo progression — sub-agents can't skip ahead | None |
+| **Tool count** | 27 built-in primitives | Copilot-only feature set (no browser/terminal/graph) |
+| **MCP** | Built-in MCP server (stdio + SSE) | Extensions only |
+
+H is not an editor and not a chat panel — it's a **self-driving workspace**. The agent owns the task loop: it reads and writes files, runs commands, opens web pages, spawns specialist sub-agents for subtasks, and tracks progress on a locked todo list that the user can follow but the agent can't shortcut.
 
 ---
 
