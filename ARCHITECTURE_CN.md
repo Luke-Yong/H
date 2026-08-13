@@ -238,15 +238,28 @@ Agent 状态跟踪三种消息角色，每种在对话中都有特定目的：
 
 | 功能 | Web（浏览器） | 桌面（Electron） |
 |---|---|---|
-| 服务器 | 外部进程（`npm run dev:server`） | 通过 Electron 主进程中的 `tsx` require 嵌入 |
-| 客户端 | Vite 开发服务器（OS 分配端口）或 Express 提供（生产模式） | 开发模式下用 Vite 开发服务器，生产模式下由 Express 提供 |
-| 终端 | WebSocket 到服务器，管道回退 PTY | WebSocket 到服务器，Windows 上 `node-pty` 配合 ConPTY |
-| 文件访问 | 浏览器 File System Access API 或服务器 FS API | 服务器 FS API + 原生 Electron `dialog` 用于文件夹/文件选择器 |
-| 内置浏览器 | iframe + 反向代理（`/_browser`） | Electron `webview`，支持地理位置、权限、弹出窗口拦截 |
+| 服务器进程 | 外部进程（`npm run dev:server`，随机端口或 `H_PORT`） | 嵌入式子进程：复用同一 `H.exe` 并设置 `ELECTRON_RUN_AS_NODE=1`，打包版运行 **预编译** 的 CommonJS 服务器，开发版运行 tsx |
+| 客户端 | Vite 开发服务器（OS 分配端口）或 Express 静态中间件 | 开发版用 Vite 开发服务器（端口 5173–5180）；打包版由 Express 从 app.asar 中提供构建好的 `client/dist` |
+| 终端 | 连接到 Express 的 WebSocket，管道回退 PTY | 连接到 Express 的 WebSocket，Windows 上使用 `node-pty` + ConPTY |
+| 文件访问 | 浏览器 File System Access API 或服务器 FS API | 服务器 `fs` + 原生 Electron `dialog` 文件夹/文件选择器 |
+| 内置浏览器 | 通过 Express 代理的 iframe（`/_browser`） | Electron `webview`，支持地理位置、权限、弹窗拦截 |
+| 端口分配 | 任意（服务器绑定 `H_PORT`，或回退到 51734–51753） | Express 固定范围 51734–51753（写入 stdout 横幅由主进程解析），Vite 开发服务器 5173–5180 |
+| 启动诊断 | 终端 stdout/stderr | 持久化滚动日志，位于 `~/.h/logs/startup-<时间戳>-<pid>.log`（在安装程序关闭控制台窗口后仍保留） |
 
 ## 桌面版 (Electron)
 
-H 也可以作为桌面应用运行（更接近 VS Code），带有嵌入式服务器和 PTY 支持的终端。
+H 也可以作为桌面应用运行（更接近 VS Code），带有嵌入式服务器和 PTY 支持的终端。为了避免 Windows 加载器在处理归档路径时出现问题，桌面版打包输出会 **附带两份关键运行时资源副本**：
+
+- **`app.asar` 归档**（默认，压缩后）：所有纯 JS npm 包（`express`、`ws`、`dotenv`、`typescript`）、Vite 客户端生产构建（`client/dist`）、服务器 TS 源码、Electron 脚本。
+- **`app.asar.unpacked/` 目录**（真实 NTFS 路径，始终位于 `<安装目录>/resources/app.asar.unpacked/`）：
+  - 通过 `dlopen` / `LoadLibraryExW` 加载、**不能** 从归档内部读取的原生模块：`better-sqlite3/build/Release/*.node`、`node-pty/build/Release/*.node`、`@esbuild/win32-x64/esbuild.exe`
+  - **编译后的 Express 服务器**（`dist/server/index.js`，由 `tsc -p tsconfig.json` 输出的 CommonJS）
+  - 预加载启动程序（`dist/server/bootstrap-packaged.cjs`）—— 详见下文
+  - `client/dist` 和 `package.json` 的副本（这样编译服务器中的 `resolveProjectRoot()` 可以定位项目根目录，而无需触碰 asar 归档的虚拟路径）
+
+因为纯 JS 包（占 node_modules 体积的 74%）保留在压缩归档中，而只有约 3% 需要真实文件系统路径的内容被解包，安装包大小尽管有重复的 dist/ 目录仍能保持在约 90–105 MB。
+
+### 脚本
 
 ```powershell
 # 桌面开发模式（运行 Vite + Electron）
@@ -254,16 +267,59 @@ npm run desktop:dev
 ```
 
 ```powershell
-# 构建桌面打包用的客户端
-npm run desktop:build
+# 桌面打包的构建管线（也通过 desktop:pack 自动运行）
+npm run desktop:build-server   # tsc -p tsconfig.json -> dist/server/index.js; 复制 bootstrap-packaged.cjs -> dist/server/
+npm run desktop:build          # Vite 客户端生产构建 -> client/dist/
 
-# 打包 Windows 构建（electron-builder）
-npm run desktop:pack
+# 完整 Windows 打包流程（electron-builder）
+npm run desktop:pack           # dist:clean -> icon:generate -> desktop:build-server -> desktop:build
+                               #   -> electron-builder --win --dir (win-unpacked 阶段)
+                               #   -> scripts/embed-icon.js -> electron-builder --win --prepackaged dist/win-unpacked（NSIS 安装程序）
 ```
 
 注意事项：
-- `npm install` 会自动运行 `electron-rebuild` 以支持 `node-pty`（通过 `postinstall`）。
-- 终端优先使用 `node-pty`（Windows 上使用 ConPTY），并在 PTY 不可用时回退到管道模式。
+- `npm install` 会通过 `postinstall` 自动运行 `electron-rebuild` 以支持 `node-pty`。
+- 终端优先使用 `node-pty`（Windows 上使用 ConPTY），PTY 不可用时回退到管道模式。
+- `dist:clean` **仅** 清理「安装工件」（`dist/win-*/`、`*.exe`、`*.blockmap` 等），**从不** 删除 `dist/server/`（编译服务器）或 `client/dist`（Vite 构建结果），因此重复执行 `desktop:pack` 时不会重新编译未变更的 TS/React 代码。
+
+### 服务器启动（打包版）详解
+
+1. **Spawn** — `electron/main.cjs` 以子进程形式重启同一个 `H.exe`（`process.execPath`），并在子进程环境中设置 `ELECTRON_RUN_AS_NODE=1`。在 AS_NODE 模式下，Electron 只初始化 Node.js 运行时（无 Chromium、无 BrowserWindow、无多余 UI）。`spawn` 的关键参数：
+   - `shell: false`（Windows：避免 CMD 分词 bug — 像 `D:\Work Projects\Harness\` 这种含空格的路径否则会被空格断开、误拆成两个参数）
+   - `windowsHide: true`（防止可见 conhost）
+   - `cwd: process.resourcesPath`（`<安装>/resources`，真实目录 — 之前版本错误地把 `app.getAppPath()` 作为 CWD，它返回的是 **`app.asar` 这个文件的路径**，Windows 的 `CreateProcessW` 会因此返回 `ENOENT`）
+   - `stdio: [ignore, pipe, pipe]`（主进程解析服务器 stdout 横幅中的端口）
+2. **启动 Bootstrap** — argv 为 `["--require", "<unpacked>/dist/server/bootstrap-packaged.cjs", "<unpacked>/dist/server/index.js"]`。Node 会在打开 index.js 之前、同步地先运行 `--require` 模块。Bootstrap 的工作：
+   - 用 `require('module').Module.globalPaths.push()` 注册两个 CJS 搜索根目录：`<resources>/app.asar.unpacked/node_modules`（原生模块）**和** `<resources>/app.asar/node_modules`（通过 Electron 的 asar 感知 `require` 访问所有纯 JS 包）
+   - 调用 `Module._initPaths()` 刷新 Node 缓存的路径，并重新读取任何继承的 `NODE_PATH` 环境变量
+   - 若缺少此步骤，index.js 的第 1 行（`require("dotenv/config")`）会失败，因为从 `app.asar.unpacked/dist/server/` 出发的标准逐层查找永远碰不到同级虚拟路径 `app.asar/node_modules/`
+3. **端口发现** — 服务器在 `127.0.0.1` 上用 `listenInRange(51734, 20)` 监听：先尝试 51734，遇到 `EADDRINUSE` 就向 51735…51753 递增。成功时向 stdout 打印 `H server running on http://localhost:<port>`。Electron 主进程读取管道输出、用正则匹配该横幅（快速路径），必要时并行执行 51734–51753 的 TCP 范围扫描 + HTTP `GET /api/health` 探测 — 健康端点返回 `{ pid, ok }`，因此扫描能准确区分 H 服务器与占用同端口的其他程序。
+4. **加载 UI** — 等待时主进程显示一个无外框的闪屏窗口，内容为 HTML data URL（不依赖服务器）。失败时闪屏会直接展示错误原因、完整的启动日志路径，以及以可滚动 monospace 面板呈现的、子进程 stdout/stderr 的 8 KB 滚动尾部。
+5. **诊断日志** — 所有 spawn 参数、CWD、NODE_PATH、解包布局合理性检查、服务器 stdout/stderr 分块、端口解析事件、扫描结果、子进程退出码、未捕获错误等，都会在创建任何 BrowserWindow **之前** 原子写入 `$HOME/.h/logs/startup-<YYYYMMDD>-<HHMMSS>-<父 pid>.log`。因为它是磁盘文件，即便 NSIS 安装程序的「启动 H」复选框导致安装 UI 关闭时销毁控制台，日志也会保留 — 早期版本在那种情况下会丢失全部控制台输出。
+
+### 构建输出布局
+
+```
+<安装目录>/
+└── resources/
+    ├── H.exe (主可执行文件：process.execPath)
+    ├── app.asar                       ← 压缩归档：纯 JS node_modules、服务器 TS 源码、client/dist、package.json、electron/
+    └── app.asar.unpacked/             ← 真实 NTFS 目录，由 asar 感知加载器 + NODE_PATH 优先级加载
+        ├── package.json               ← package.json 锚点（resolveProjectRoot() 在 asar.unpacked 分支用它判断）
+        ├── dist/server/
+        │   ├── bootstrap-packaged.cjs ← --require 模块，在 index.js 运行前注册两个 CJS 搜索根
+        │   └── index.js               ← Express 服务器（CommonJS，由 tsc 输出）
+        ├── client/dist/               ← Vite 生产构建副本（resolveProjectRoot() + Express 静态中间件使用）
+        └── node_modules/
+            ├── @esbuild/win32-x64/    ← 原生 esbuild.exe
+            ├── better-sqlite3/        ← 原生绑定 + package.json
+            └── node-pty/              ← 原生绑定 + package.json
+```
+
+### 开发服务器启动差异
+
+- 服务器：开发 spawn 同样用 H.exe + AS_NODE 技巧，但传入 `node_modules/tsx/dist/cli.mjs server/index.ts` — TS 源文件由 tsx 转译。`findLiveServerPort` 仍使用 stdout 横幅 + 51734–51753 范围扫描。
+- 客户端：开发模式单独 spawn 一个 `vite` 进程（Vite 在 5173–5180 范围选一个空闲端口，写入 `$TMP/h-ports/` 下的一个微型 Vite 端口文件 — 仅在开发模式下使用，由主进程读取）。Vite 开发服务器将 `/api`、`/ws`、`/_browser`、`/settings`、`/resources` 代理到固定的 Express 端口范围 — `client/vite.config.ts` 中的代理插件使用相同的 TCP 扫描模式 + 3 秒缓存，不再通过任何文件系统的端口握手。
 
 ## 内置浏览器（桌面版）
 
@@ -1601,9 +1657,9 @@ H 实现 **MCP 协议版本 `2024-11-05`**，采用 JSON-RPC 2.0：
 ```
 H/
 ├── .env.example                     # 环境变量模板（DeepSeek API Key）
-├── package.json                     # 根依赖（Express、better-sqlite3、node-pty）、脚本（dev、test、desktop:build）
+├── package.json                     # 根依赖（Express、better-sqlite3、node-pty）、脚本（dev、test、desktop:build、desktop:pack）
 ├── package-lock.json
-├── tsconfig.json                    # 服务器 TypeScript 配置（ES2022、strict、vitest globals）
+├── tsconfig.json                    # 服务器 TypeScript 配置（CommonJS 输出、Node moduleResolution、strict=false、vitest globals、@types/node）
 ├── vitest.config.ts                 # Vitest 运行器配置（node env、30s 超时）
 ├── README.md                        # 英文首页（USP 对比）
 ├── README_CN.md                     # 中文首页
@@ -1615,11 +1671,19 @@ H/
 │   └── 图标资源 (ico, png, svg)      # Electron 应用图标
 │
 ├── scripts/
-│   ├── embed-icon.js                # 将图标嵌入 Electron 可执行文件
-│   └── generate-icon.js             # 从 SVG 源生成图标
+│   ├── embed-icon.js                # 将图标嵌入 Electron 可执行文件（electron-builder --dir 阶段后执行）
+│   ├── generate-icon.js             # 从 SVG 源生成图标
+│   └── patch-electron-name.js       # 在桌面运行前，将 electron.exe 重命名为 H.exe 并设置 AppUserModelID
+│
+├── dist/                            # 构建输出（自动生成，不提交）
+│   └── server/                      #   编译后的服务器（由 `tsc -p tsconfig.json` + bootstrap 复制生成）
+│       ├── bootstrap-packaged.cjs   #     --require 前置加载：在 index.js 运行前注册两个 node_modules 根
+│       └── index.js                 #     Express 服务器（CommonJS），打包版 H.exe 的入口
 │
 ├── server/
 │   ├── index.ts                     # Express 服务器入口：API 路由、WebSocket 终端、agent SSE 流式传输、MCP、浏览器代理、系统状态
+│   │                                #   listenInRange(51734, 20) => 固定端口范围；由主进程解析 stdout 横幅获取端口
+│   ├── bootstrap-packaged.cjs       #   dist/server/bootstrap-packaged.cjs 的源文件（由 desktop:build-server 复制）
 │   ├── agent.ts                     # Agent 核心：27 个工具定义、11 个子 agent 配置、delegate_task、agentLoop/Stream/StepByStep、权限控制、ITR 系统提示构建器、历史压缩
 │   ├── deepseek.ts                  # DeepSeek API 客户端：阻塞 + 流式聊天（带工具调用）、嵌入、KV 缓存追踪、用量报告
 │   ├── terminalManager.ts           # 终端会话管理器：PTY（node-pty）和管道回退、WebSocket I/O、venv 自动激活、localhost URL 检测
@@ -1628,7 +1692,7 @@ H/
 │   ├── mcp-server.ts                # 独立 MCP 服务器入口点（stdio 模式）
 │   ├── memory.ts                    # SQLite 持久化记忆存储（~/.h/store/memory.db）：关键词 + embedding 搜索，供 agent remember/recall/forget 工具使用
 │   ├── cryptoStore.ts               # AES-256-GCM 加密的 API Key 存储（~/.h/store/api-keys.enc）
-│   ├── hPaths.ts              # ~/.h/ 目录结构的集中路径解析
+│   ├── hPaths.ts                    # ~/.h/ 目录结构的集中路径解析
 │   ├── fileTracking.ts              # 智能文件追踪：自动检测 Git vs fs.watch 监视器模式、会话中期 Git 检测、快照/补丁文件树上下文
 │   ├── fileTrackingStore.ts         # JSON 支持的文件元数据缓存（~/.h/store/file-tracking.json），供监视器模式使用
 │   ├── knowledgeGraph.ts            # 代码库知识图谱构建器：目录/文件节点、CONTAINS + IMPORTS 边、.kg 序列化、可视化
@@ -1641,7 +1705,8 @@ H/
 │
 ├── client/
 │   ├── package.json                 # 客户端依赖（React 18、Monaco、xterm.js）、Vite + TypeScript
-│   ├── vite.config.ts               # Vite 开发配置：从 %TEMP%/h-ports/express-port 读取 Express 端口，代理 /api + /ws + /_browser
+│   ├── vite.config.ts               # Vite 开发配置：hProxyPlugin 通过 TCP 探测扫描 Express 端口 51734–51753
+│   │                                #   + 代理 /api /ws /_browser /settings /resources；writeVitePortPlugin 将开发 Vite 端口写入 $TMP/h-ports/
 │   ├── tsconfig.json                # 客户端 TypeScript 配置（ES2020、DOM、react-jsx）
 │   ├── index.html                   # SPA 入口：在 <div id="root"> 中挂载 React 应用
 │   ├── public/
@@ -1671,7 +1736,10 @@ H/
 │           └── useResizable.tsx     # 拖拽调整面板大小的分割器钩子
 │
 └── electron/
-    ├── main.cjs                      # Electron 主进程：BrowserWindow、服务器生命周期、IPC（文件夹/文件选择器、地理位置、权限）、浏览器会话
+    ├── main.cjs                      # Electron 主进程：启动闪屏、嵌入式服务器 spawn（ELECTRON_RUN_AS_NODE=1、windowsHide、shell:false、将 cwd 设为 resources 目录）、
+    │                                 #   findLiveServerPort：stdout 横幅正则 + TCP 51734..51753 + /api/health 的 PID 验证、
+    │                                 #   BrowserWindow + IPC（文件夹/文件选择器、地理位置、权限）、浏览器会话、
+    │                                 #   启动日志 -> ~/.h/logs/startup-*.log（在 NSIS 安装程序关闭控制台后仍保留）
     ├── preload.cjs                   # 预加载桥接：暴露 window.hDesktop（openFolder、openFile、onBrowserOpenUrl、setSitePermissions）
     ├── browser-preload.cjs           # 浏览器 webview 预加载：地理位置桥接、_blank 链接拦截
     └── native-location.cjs           # 通过 PowerShell GeoCoordinateWatcher 实现 Windows 地理位置

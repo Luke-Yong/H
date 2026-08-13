@@ -255,15 +255,28 @@ Each tool call is always a matched pair: an `assistant` message with `name` cont
 
 | Feature | Web (browser) | Desktop (Electron) |
 |---|---|---|
-| Server | External process (`npm run dev:server`) | Embedded via `tsx` require in the Electron main process |
-| Client | Vite dev server (OS-assigned port) or served by Express (production) | Vite dev server in dev, served by Express in production |
-| Terminal | WebSocket to server, pipe-fallback PTY | WebSocket to server, `node-pty` with ConPTY on Windows |
-| File access | Browser File System Access API or server FS APIs | Server FS APIs + native Electron `dialog` for folder/file pickers |
-| Built-in browser | iframe + reverse proxy (`/_browser`) | Electron `webview` with geolocation, permissions, popup interception |
+| Server process | External (`npm run dev:server` on random or `H_PORT` port) | Embedded child process: spawns same `H.exe` with `ELECTRON_RUN_AS_NODE=1`, runs **pre-compiled** CommonJS server in packaged builds, tsx in dev |
+| Client | Vite dev server (OS-assigned port) or Express static middleware | Vite dev server (port 5173–5180) dev; packaged, Express serves the pre-built `client/dist/` from inside app.asar |
+| Terminal | WebSocket to Express, pipe-fallback PTY | WebSocket to Express, `node-pty` + ConPTY on Windows |
+| File access | Browser File System Access API or server FS APIs | Server `fs` + native Electron `dialog` folder/file pickers |
+| Built-in browser | iframe proxied through Express (`/_browser`) | Electron `webview` with geolocation, permissions, popup interception |
+| Port allocation | Any (server binds `H_PORT` or falls back to 51734–51753) | Fixed range 51734–51753 for Express (written to stdout banner, parsed by main process), Vite dev server 5173–5180 |
+| Startup diagnostic | Terminal stdout/stderr | Persistent rolling log at `~/.h/logs/startup-<timestamp>-<pid>.log` (survives installer console teardown) |
 
 ## Desktop (Electron)
 
-H can also run as a desktop app (closer to VS Code) with an embedded server and a PTY-backed terminal.
+H can also run as a desktop app (closer to VS Code) with an embedded server and a PTY-backed terminal. The desktop build ships **two copies of the critical runtime assets** to avoid Windows loader issues with archive paths:
+
+- **`app.asar` archive** (compressed, default): all pure-JS npm packages (`express`, `ws`, `dotenv`, `typescript`), Vite client production build (`client/dist`), server TS source, Electron scripts.
+- **`app.asar.unpacked/` directory** (real NTFS paths, always at `<install>/resources/app.asar.unpacked/`):
+  - Native modules that load via `dlopen`/`LoadLibraryExW` and **cannot** be read from inside an archive: `better-sqlite3/build/Release/*.node`, `node-pty/build/Release/*.node`, `@esbuild/win32-x64/esbuild.exe`
+  - The **compiled Express server** (`dist/server/index.js`, CJS output of `tsc -p tsconfig.json`)
+  - The pre-require bootstrap (`dist/server/bootstrap-packaged.cjs`) — see below
+  - A copy of `client/dist` and `package.json` (so `resolveProjectRoot()` in the compiled server can locate the project root without touching the asar archive virtual path)
+
+Because the pure-JS packages (74% of installed node_modules weight) live in the compressed archive while only the ~3% that need real filesystem paths are unpacked, installer size stays near ~90–105 MB despite the duplicated dist/ folders.
+
+### Scripts
 
 ```powershell
 # Desktop dev (runs Vite + Electron)
@@ -271,16 +284,59 @@ npm run desktop:dev
 ```
 
 ```powershell
-# Build the client for desktop packaging
-npm run desktop:build
+# Build pipeline for desktop packaging (also runs via desktop:pack)
+npm run desktop:build-server   # tsc -p tsconfig.json -> dist/server/index.js; copies bootstrap-packaged.cjs -> dist/server/
+npm run desktop:build          # Vite client production build -> client/dist/
 
-# Package a Windows build (electron-builder)
-npm run desktop:pack
+# Full Windows packaging (electron-builder)
+npm run desktop:pack           # dist:clean -> icon:generate -> desktop:build-server -> desktop:build
+                               #   -> electron-builder --win --dir (win-unpacked stage)
+                               #   -> scripts/embed-icon.js -> electron-builder --win --prepackaged dist/win-unpacked (NSIS installer)
 ```
 
 Notes:
 - `npm install` runs `electron-rebuild` for `node-pty` automatically (via `postinstall`).
 - The terminal prefers `node-pty` (ConPTY on Windows) and falls back to pipe mode if PTY isn't available.
+- `dist:clean` removes only **installer artifacts** (`dist/win-*/`, `*.exe`, `*.blockmap`, etc.). It **never** deletes `dist/server/` (compiled server) or `client/dist` (Vite build), so repeated `desktop:pack` runs avoid re-compiling unchanged TypeScript/React sources.
+
+### Server startup (packaged build) in detail
+
+1. **Spawn** — `electron/main.cjs` starts an embedded server by re-spawning the same `H.exe` (`process.execPath`) with `ELECTRON_RUN_AS_NODE=1` set in the child env. In AS_NODE mode Electron boots only the Node.js runtime (no Chromium, no BrowserWindow, no extra UI). Critical `spawn` options:
+   - `shell: false` (Windows: avoids CMD tokenization bugs — project paths with spaces like `D:\Work Projects\Harness\` would otherwise be split at spaces and mis-interpreted as two arguments)
+   - `windowsHide: true` (prevents any visible conhost)
+   - `cwd: process.resourcesPath` (`<install>/resources`, real directory — older builds wrongly passed `app.getAppPath()` as CWD which returns the **path to `app.asar` (a FILE)**, which Windows `CreateProcessW` rejects with `ENOENT`)
+   - `stdio: [ignore, pipe, pipe]` (main process parses the server stdout banner for the port)
+2. **Bootstrap** — argv is `["--require", "<unpacked>/dist/server/bootstrap-packaged.cjs", "<unpacked>/dist/server/index.js"]`. Node runs `--require` modules synchronously before touching index.js. The bootstrap:
+   - Uses `require('module').Module.globalPaths.push()` to register two CJS search roots: `<resources>/app.asar.unpacked/node_modules` (natives) **and** `<resources>/app.asar/node_modules` (all pure-JS packages via Electron's asar-aware `require`)
+   - Calls `Module._initPaths()` to refresh Node's cached paths, also re-reading any inherited `NODE_PATH` env var
+   - Without this step, line 1 of index.js (`require("dotenv/config")`) fails because the standard walk-up from `app.asar.unpacked/dist/server/` never reaches sibling virtual path `app.asar/node_modules/`.
+3. **Port discovery** — Server listens on `127.0.0.1` using `listenInRange(51734, 20)`: tries 51734 first, walks 51735…51753 on `EADDRINUSE`. On success it prints `H server running on http://localhost:<port>` to stdout. The Electron main process reads the piped stdout, regex-matches this banner (fast path), and/or falls back to a parallel TCP range scan of 51734–51753 + HTTP `GET /api/health` probe — health endpoint returns `{ pid, ok }` so the scan correctly distinguishes the H server from any other program on the same port.
+4. **Loader UI** — While waiting, main shows a frameless splash window with a HTML data URL (doesn't need a server). On failure the splash updates itself with the error reason AND the full path to the startup log, plus the rolling 8 KB tail of the child's stdout/stderr rendered in a monospace scrollable panel.
+5. **Diagnostic log** — All spawn args, CWD, NODE_PATH, unpacked layout sanity checks, server stdout/stderr chunks, port parse event, scan result, child exit code, and any uncaught errors are written atomically to `$HOME/.h/logs/startup-<YYYYMMDD>-<HHMMSS>-<parent pid>.log` **before** any BrowserWindow is created. Because the file is on disk, it survives the NSIS installer's "Launch H" case where the installer kills its console the second the installer UI closes — the earlier builds lost all console output in that case.
+
+### Build output layout
+
+```
+<install>/
+└── resources/
+    ├── H.exe (main executable: process.execPath)
+    ├── app.asar                       ← compressed archive: pure-JS node_modules, server TS source, client/dist, package.json, electron/
+    └── app.asar.unpacked/             ← real NTFS directory, loaded by asar-aware loader + NODE_PATH preference
+        ├── package.json               ← package.json sentinel (resolveProjectRoot() uses this for asar.unpacked branch)
+        ├── dist/server/
+        │   ├── bootstrap-packaged.cjs ← --require module that registers dual CJS search roots
+        │   └── index.js               ← Express server (CommonJS, tsc output)
+        ├── client/dist/               ← Vite production build (copy: resolveProjectRoot() + Express static middleware)
+        └── node_modules/
+            ├── @esbuild/win32-x64/    ← native esbuild.exe
+            ├── better-sqlite3/        ← native bindings + package.json
+            └── node-pty/              ← native bindings + package.json
+```
+
+### Dev server startup differences
+
+- Server: dev spawn uses the same H.exe + AS_NODE trick, but passes `node_modules/tsx/dist/cli.mjs server/index.ts` — TS source is transpiled by tsx. `findLiveServerPort` still uses the stdout banner + 51734–51753 range scan.
+- Client: dev spawns a separate `vite` process (Vite picks a free port in the 5173–5180 range, writes it to a tiny Vite port file under `$TMP/h-ports/` that's only used in dev, main process reads it). Vite dev server proxies `/api`, `/ws`, `/_browser`, `/settings`, `/resources` up to the fixed Express port range — proxy plugin in `client/vite.config.ts` uses the same TCP scan pattern with a 3-second cache, not any filesystem port handshake.
 
 ## Built-in Browser (Desktop)
 
@@ -1618,9 +1674,9 @@ The server only exposes **tools** capability — no resources or prompts.
 ```
 H/
 ├── .env.example                     # Template for environment variables (DeepSeek API key)
-├── package.json                     # Root deps (Express, better-sqlite3, node-pty), scripts (dev, test, desktop:build)
+├── package.json                     # Root deps (Express, better-sqlite3, node-pty), scripts (dev, test, desktop:build, desktop:pack)
 ├── package-lock.json
-├── tsconfig.json                    # TypeScript config for server (ES2022, strict, vitest globals)
+├── tsconfig.json                    # TypeScript config for server (CommonJS output, Node moduleResolution, strict=false, vitest globals, @types/node)
 ├── vitest.config.ts                 # Vitest runner config (node env, 30s timeout)
 ├── README.md                        # Landing page with USP comparison
 ├── README_CN.md                     # Chinese landing page
@@ -1632,11 +1688,19 @@ H/
 │   └── icon assets (ico, png, svg)  # Electron app icons
 │
 ├── scripts/
-│   ├── embed-icon.js                # Embeds icon into the Electron executable
-│   └── generate-icon.js             # Generates icon from SVG source
+│   ├── embed-icon.js                # Embeds icon into the Electron executable (post electron-builder --dir stage)
+│   ├── generate-icon.js             # Generates icon from SVG source
+│   └── patch-electron-name.js       # Patches electron.exe -> H.exe + AppUserModelID before desktop runs
+│
+├── dist/                            # Build output (generated, NOT committed)
+│   └── server/                      #   Compiled server (output of `tsc -p tsconfig.json` + bootstrap copy)
+│       ├── bootstrap-packaged.cjs   #     --require preamble: registers both node_modules roots before index.js runs
+│       └── index.js                 #     Express server (CommonJS). Entry used by packaged H.exe.
 │
 ├── server/
 │   ├── index.ts                     # Express server entry: API routes, WebSocket terminal, agent SSE streaming, MCP, browser proxy, system stats
+│   │                                #   listenInRange(51734, 20) => fixed port range; stdout banner parsed by main process
+│   ├── bootstrap-packaged.cjs       #   SOURCE of dist/server/bootstrap-packaged.cjs (copied by desktop:build-server)
 │   ├── agent.ts                     # Agent core: 27 tool definitions, 11 sub-agent profiles, delegate_task, agentLoop/Stream/StepByStep, permission gating, ITR system prompt builder, history compaction
 │   ├── deepseek.ts                  # DeepSeek API client: blocking + streaming chat w/ tool-calling, embeddings, KV cache tracking, usage reporting
 │   ├── terminalManager.ts           # Terminal session manager: PTY (node-pty) and pipe fallback, WebSocket I/O, venv auto-activation, localhost URL detection
@@ -1645,7 +1709,7 @@ H/
 │   ├── mcp-server.ts                # Standalone MCP server entry point (stdio mode)
 │   ├── memory.ts                    # SQLite persistent memory store (~/.h/store/memory.db): keyword + embedding search, used by agent remember/recall/forget tools
 │   ├── cryptoStore.ts               # AES-256-GCM encrypted API key storage (~/.h/store/api-keys.enc)
-│   ├── hPaths.ts              # Centralized path resolution for ~/.h/ directory structure
+│   ├── hPaths.ts                    # Centralized path resolution for ~/.h/ directory structure
 │   ├── fileTracking.ts              # Smart file tracking: auto-detects Git vs fs.watch watcher mode, mid-session Git detection, snapshot/patch file tree context
 │   ├── fileTrackingStore.ts         # JSON-backed file metadata cache (~/.h/store/file-tracking.json) for watcher mode
 │   ├── knowledgeGraph.ts            # Codebase knowledge graph builder: dir/file nodes, CONTAINS + IMPORTS edges, .kg serialization, visualization
@@ -1658,7 +1722,8 @@ H/
 │
 ├── client/
 │   ├── package.json                 # Client deps (React 18, Monaco, xterm.js), Vite + TypeScript
-│   ├── vite.config.ts               # Vite dev config: reads Express port from ~/.h/ports/express-port, proxies /api + /ws + /_browser
+│   ├── vite.config.ts               # Vite dev config: hProxyPlugin scans Express range 51734–51753 via TCP probes
+│   │                                #   + /api /ws /_browser /settings /resources proxying; writeVitePortPlugin writes dev Vite port to $TMP/h-ports/
 │   ├── tsconfig.json                # Client TypeScript config (ES2020, DOM, react-jsx)
 │   ├── index.html                   # SPA entry: mounts React app in <div id="root">
 │   ├── public/
@@ -1688,7 +1753,10 @@ H/
 │           └── useResizable.tsx     # Drag-to-resize panel splitter hook
 │
 └── electron/
-    ├── main.cjs                      # Electron main process: BrowserWindow, server lifecycle, IPC (folder/file picker, geo, permissions), browser session
+    ├── main.cjs                      # Electron main process: splash loader, embedded server spawn (ELECTRON_RUN_AS_NODE=1, windowsHide, shell:false, cwd to resources dir),
+    │                                 #   findLiveServerPort: stdout banner regex + TCP 51734..51753 + /api/health PID verification,
+    │                                 #   BrowserWindow + IPC (folder/file picker, geo, permissions), browser session,
+    │                                 #   startup log -> ~/.h/logs/startup-*.log (survives NSIS installer console teardown)
     ├── preload.cjs                   # Preload bridge: exposes window.hDesktop (openFolder, openFile, onBrowserOpenUrl, setSitePermissions)
     ├── browser-preload.cjs           # Browser webview preload: geolocation bridge, _blank link interception
     └── native-location.cjs           # Windows geolocation via PowerShell GeoCoordinateWatcher
