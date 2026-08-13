@@ -30,7 +30,16 @@ interface ConsoleMessage {
   /** True if this system message is a warning (amber accent). */
   isWarning?: boolean;
   /** Sub-agent message trace (rendered as collapsible block). */
-  subAgentMessages?: { role: string; content: string; name?: string; reasoning_content?: string }[];
+  subAgentMessages?: {
+    role: string;
+    content: string;
+    name?: string;
+    reasoning_content?: string;
+    /** Transient streaming state — same semantics as ConsoleMessage.state. */
+    state?: "thinking" | "generating" | "waiting" | "file_viewing";
+    /** Accumulated thought for this sub-agent turn (shown in thought details). */
+    thought?: string;
+  }[];
   /** Sub-agent display name. */
   subAgentName?: string;
   /** Agent marker for color coding: "main", "browser", "code-search", "code-writer", "researcher". */
@@ -344,6 +353,46 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
   const toolCallMsgIdRef = useRef<Map<string, string>>(new Map());
   const activeDelegationMarkerRef = useRef<string | null>(null);
   const activeDelegationDepthRef = useRef(0);
+  // Live-nest a sub-agent tool event into the current delegate_task card's
+  // subAgentMessages array so agent-sub-agent-body streams like a minified
+  // console-list instead of only populating when delegate_task finishes.
+  const nestSubAgentEvent = useCallback((evt: any) => {
+    const parentId = delegateTaskCardIdRef.current;
+    if (!parentId) return;
+    const name = String(evt.toolName || "");
+    const isStart = evt.type === "tool_start";
+    setMessages((prev) => {
+      const next = [...prev];
+      const idx = next.findIndex((m) => m.id === parentId);
+      if (idx < 0) return prev;
+      const existing = next[idx].subAgentMessages || [];
+      const updated = [...existing];
+      if (isStart) {
+        const content = JSON.stringify([
+          { id: String(evt.toolCallId || ""), type: "function", function: { name, arguments: JSON.stringify(evt.toolParams || {}) } },
+        ]);
+        updated.push({ role: "assistant", name, content, state: "waiting" });
+      } else {
+        // Mark the matching streaming tool card done. write_todos keeps its
+        // tool-call content (the todos live in the arguments); other tools
+        // append a tool-result block to mirror the final server trace.
+        const result = String(evt.toolResult || "");
+        let markedDone = false;
+        for (let i = updated.length - 1; i >= 0; i--) {
+          if (updated[i].name === name && updated[i].state === "waiting") {
+            updated[i] = { ...updated[i], state: undefined };
+            markedDone = true;
+            break;
+          }
+        }
+        if (markedDone && name !== "write_todos") {
+          updated.push({ role: "tool", content: result });
+        }
+      }
+      next[idx] = { ...next[idx], subAgentMessages: updated };
+      return next;
+    });
+  }, []);
   // Deferred destructive file tool: after file auto-executes, diff is shown. User must Accept/Reject before agent continues.
   const deferredToolRef = useRef<{ sessionId: string; toolCallId: string; filePath: string; name: string; originalContent: string | null } | null>(null);
   const continueDeferredRef = useRef<((accepted: boolean, sessionId: string, toolCallId: string) => Promise<void>) | null>(null);
@@ -978,29 +1027,43 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
     else if (!mentionActive && mentionOpen) { setMentionOpen(false); }
   }, [mentionActive, mentionOpen]);
 
-  // Auto-scroll to bottom only when user is already near the bottom.
-  // If they've scrolled up to read history, don't yank them back.
+  // Auto-scroll to bottom.
+  //  - Always scroll when user hasn't manually scrolled up (or came back near the bottom).
+  //  - During active streaming (loading + any message currently in streaming state),
+  //    relax the threshold: if user is still reasonably close to bottom (< 400px),
+  //    keep following along — small scroll-ups to peek shouldn't disable auto-scroll.
   // Deferred via rAF so the browser has laid out new content (important for
   // fast tool calls where flushSync forces synchronous DOM updates).
   useEffect(() => {
     const el = consoleListRef.current;
     if (!el) return;
     const raf = requestAnimationFrame(() => {
-      const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
-      if (nearBottom || !userScrolledUpRef.current) {
+      const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+      const nearBottom = dist < 120;
+      const hasActiveStreaming = loading && messages.some(m => m.state);
+      const closeEnoughWhileStreaming = hasActiveStreaming && dist < 400;
+      if (nearBottom || !userScrolledUpRef.current || closeEnoughWhileStreaming) {
         el.scrollTop = el.scrollHeight;
+        // If we auto-scrolled successfully, also reset the flag so the next tick is clean
+        if (dist < 120) userScrolledUpRef.current = false;
       }
     });
     return () => cancelAnimationFrame(raf);
-  }, [messages]);
+  }, [messages, loading]);
 
-  // Track manual scroll — if user scrolls up, stop auto-scrolling.
+  // Track manual scroll — if user scrolls UP significantly (more than 300px from bottom),
+  // stop auto-scrolling. Otherwise (light scroll to peek at history during streaming),
+  // we keep following along via the closeEnoughWhileStreaming branch above.
   useEffect(() => {
     const el = consoleListRef.current;
     if (!el) return;
     const onScroll = () => {
-      const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
-      userScrolledUpRef.current = !nearBottom;
+      const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+      // 60px near-bottom: definitely at the bottom, clear flag.
+      // 300px+: considered intentionally scrolling up to read history, set flag.
+      // In-between zone (60-300px): no state change — let streaming auto-scroll decide.
+      if (dist < 60) userScrolledUpRef.current = false;
+      else if (dist >= 300) userScrolledUpRef.current = true;
     };
     el.addEventListener("scroll", onScroll, { passive: true });
     return () => el.removeEventListener("scroll", onScroll);
@@ -1013,6 +1076,23 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
       (body as HTMLElement).scrollTop = (body as HTMLElement).scrollHeight;
     }
   }, [messages]);
+
+  // Auto-scroll every expanded sub-agent console-list body to its bottom whenever
+  // messages change. Mirrors console-list behavior but simplified (no hysteresis
+  // since the scope is small).
+  useEffect(() => {
+    const bodies = document.querySelectorAll(".agent-sub-agent-body");
+    const raf = requestAnimationFrame(() => {
+      for (const body of bodies) {
+        const el = body as HTMLElement;
+        // Only auto-scroll if the user is already at the bottom or streaming is
+        // active — same spirit as the console-list check, but no hysteresis.
+        const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+        if (dist < 80 || loading) el.scrollTop = el.scrollHeight;
+      }
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [messages, loading]);
 
   // Safety: if loading is stuck for 5 min with no new messages, force it off.
   // Sub-agents (especially browser with 100 iterations) can run for minutes.
@@ -1214,8 +1294,78 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
     let assistantMsgId: string | null = null;
     const toolIds: string[] = []; // track tool messages within this round
 
+    // Re-extract the latest todo list from this thread's message history so the
+    // server can rehydrate state.latestTodos across server restarts. This is
+    // the critical path when the user stops the agent mid-turn and resumes later:
+    // the server's in-memory AgentState may have been wiped (e.g. restart, reload),
+    // but the client still has msg.todos and write_todos tool calls persisted.
+    const extractTodosFromMessagesForServer = (msgs: ConsoleMessage[]): { id: string; text: string; status: string; agentMarker?: string }[] | undefined => {
+      let latest: { id: string; text: string; status: string; agentMarker?: string }[] | undefined;
+      const tryParseWriteTodosMsg = (content: string, fallbackMarker: string) => {
+        try {
+          const arr = JSON.parse(content);
+          if (Array.isArray(arr) && arr.length > 0) {
+            const fc = arr[0];
+            const args: any =
+              fc?.function?.name === "write_todos" && fc.function?.arguments
+                ? typeof fc.function.arguments === "string"
+                  ? JSON.parse(fc.function.arguments)
+                  : fc.function.arguments
+                : undefined;
+            if (args && Array.isArray(args.todos) && args.todos.length > 0) {
+              return args.todos.map((t: any) => ({
+                id: String(t?.id || ""),
+                text: String(t?.text || ""),
+                status: String(t?.status || "pending"),
+                agentMarker: (t?.agentMarker as string | undefined) || fallbackMarker,
+              }));
+            }
+          }
+        } catch {}
+        return undefined;
+      };
+      for (const m of msgs) {
+        if (m.role === "assistant") {
+          const name = (m as any).name as string | undefined;
+          const content = typeof m.content === "string" ? m.content : "";
+          if (name === "write_todos" && content) {
+            const parsed = tryParseWriteTodosMsg(content, "main");
+            if (parsed) latest = parsed;
+          }
+          if (Array.isArray((m as any).todos) && (m as any).todos.length > 0) {
+            const marker = (m as any).agentMarker || "main";
+            latest = (m as any).todos.map((t: any) => ({
+              id: String(t?.id || ""),
+              text: String(t?.text || ""),
+              status: String(t?.status || "pending"),
+              agentMarker: (t?.agentMarker as string | undefined) || marker,
+            }));
+          }
+          const subs = (m as any).subAgentMessages as any[] | undefined;
+          const subMarker = (m as any).subAgentName || (m as any).agentMarker || "code-writer";
+          if (subs && subs.length > 0) {
+            for (const sam of subs) {
+              if (sam?.name === "write_todos" && typeof sam?.content === "string") {
+                const parsed = tryParseWriteTodosMsg(sam.content, subMarker);
+                if (parsed) latest = parsed;
+              }
+            }
+          }
+        }
+      }
+      return latest;
+    };
+    // Read the current messages synchronously via the setter-callback trick
+    // so runAgent doesn't need `messages` in its dep array (would trigger
+    // expensive recreate on every append).
+    let seedTodos: { id: string; text: string; status: string; agentMarker?: string }[] | undefined;
+    setMessages((current) => {
+      seedTodos = extractTodosFromMessagesForServer(current);
+      return current;
+    });
+
     try {
-      await consumeSSE("/api/chat/agent/stream", { sessionId, message: userMessage, context: fullContext, projectRoot: root, model: selectedModel }, async (evt) => {
+      await consumeSSE("/api/chat/agent/stream", { sessionId, message: userMessage, context: fullContext, projectRoot: root, model: selectedModel, latestTodos: seedTodos ?? null }, async (evt) => {
         if (signal.aborted) return false;
         if (evt.sessionId && evt.sessionId !== sessionId) {
           sessionId = evt.sessionId;
@@ -1245,16 +1395,23 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
           currentText += (evt.text || "");
           if (!assistantMsgId) {
             assistantMsgId = nextId();
-            setMessages((prev) => [...prev, { id: assistantMsgId!, role: "assistant", content: currentText, when: Date.now(), state: "generating", thought: currentThought, fileChanges: fileChangesRef.current.length > 0 ? [...fileChangesRef.current] : undefined }]);
+            setMessages((prev) => [...prev, { id: assistantMsgId!, role: "assistant", content: currentText, when: Date.now(), state: currentThought ? undefined : "generating", thought: currentThought, fileChanges: fileChangesRef.current.length > 0 ? [...fileChangesRef.current] : undefined, todos: todosRef.current.length > 0 ? [...todosRef.current] : undefined }]);
           } else {
             setMessages((prev) => {
               const next = [...prev];
               const idx = next.findIndex((m) => m.id === assistantMsgId);
-              if (idx >= 0) next[idx] = { ...next[idx], content: currentText, state: "generating", fileChanges: fileChangesRef.current.length > 0 ? [...fileChangesRef.current] : undefined };
+              if (idx >= 0) {
+                const existing = next[idx];
+                const hasThought = currentThought || existing.thought;
+                next[idx] = { ...existing, content: currentText, state: hasThought ? undefined : "generating", thought: hasThought ? (currentThought || existing.thought) : undefined, fileChanges: fileChangesRef.current.length > 0 ? [...fileChangesRef.current] : existing.fileChanges, todos: todosRef.current.length > 0 ? [...todosRef.current] : existing.todos };
+              }
               return next;
             });
           }
         } else if (evt.type === "tool_start") {
+          // Sub-agent tool events are nested under the delegate_task card, not
+          // spawned as top-level tool cards in the console-list.
+          if ((evt as any).isSubAgent) { nestSubAgentEvent(evt); return true; }
           // Track file changes from write_file, delete_file, create_directory
           const tn = evt.toolName;
           if (tn === "write_file" && evt.toolParams?.path) {
@@ -1322,11 +1479,17 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
           const lastFcBeforeFlush = fileChangesRef.current[fileChangesRef.current.length - 1];
           const fcTokenSaved = lastFcBeforeFlush?.tokenCount;
           // End the assistant message's streaming state (no flushSync — batched with tool card below)
+          // Always flush todos/fileChanges: if no assistantMsgId exists yet, create one so data isn't lost
+          const hasPendingData = fileChangesRef.current.length > 0 || todosRef.current.length > 0 || currentThought;
+          if (!assistantMsgId && hasPendingData) {
+            assistantMsgId = nextId();
+            pushRaw(assistantMsgId, { role: "assistant", content: currentText, thought: currentThought });
+          }
           if (assistantMsgId) {
             setMessages((prev) => {
               const next = [...prev];
               const idx = next.findIndex((m) => m.id === assistantMsgId);
-              if (idx >= 0) next[idx] = { ...next[idx], state: undefined, thought: currentThought, fileChanges: fileChangesRef.current.length > 0 ? [...fileChangesRef.current] : undefined, todos: todosRef.current.length > 0 ? [...todosRef.current] : undefined };
+              if (idx >= 0) next[idx] = { ...next[idx], state: undefined, thought: currentThought, content: currentText || next[idx].content, fileChanges: fileChangesRef.current.length > 0 ? [...fileChangesRef.current] : undefined, todos: todosRef.current.length > 0 ? [...todosRef.current] : undefined };
               return next;
             });
             assistantMsgId = null;
@@ -1393,6 +1556,8 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
               delegateTaskCardIdRef.current = id;
               activeDelegationDepthRef.current += 1;
               activeDelegationMarkerRef.current = marker;
+              // Auto-expand so the sub-agent body streams live (minified console-list).
+              setExpandedSubAgents((prev) => { const next = new Set(prev); next.add(id); return next; });
             }
             });
           // Yield two frames so the browser paints the tool card (spinner, styling)
@@ -1402,6 +1567,9 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
           // Deferred: open the file in editor now that the tool card is painted
           if (deferredOpenPath) openEditorFile?.(deferredOpenPath);
         } else if (evt.type === "tool_end") {
+          // Sub-agent tool events are nested under the delegate_task card, not
+          // spawned as top-level tool cards in the console-list.
+          if ((evt as any).isSubAgent) { nestSubAgentEvent(evt); return true; }
           // Switch file changes from streaming to done and auto-apply to editor.
           const tn = evt.toolName;
           if (tn === "task_complete") {
@@ -1699,12 +1867,16 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
           currentText += (evt.text || "");
           if (!assistantMsgId) {
             assistantMsgId = nextId();
-            pushRaw(assistantMsgId, { role: "assistant", content: currentText, state: "generating", thought: currentThought });
+            pushRaw(assistantMsgId, { role: "assistant", content: currentText, state: currentThought ? undefined : "generating", thought: currentThought, fileChanges: fileChangesRef.current.length > 0 ? [...fileChangesRef.current] : undefined, todos: todosRef.current.length > 0 ? [...todosRef.current] : undefined });
           } else {
             setMessages((prev) => {
               const next = [...prev];
               const idx = next.findIndex((m) => m.id === assistantMsgId);
-              if (idx >= 0) next[idx] = { ...next[idx], content: currentText, state: "generating" };
+              if (idx >= 0) {
+                const existing = next[idx];
+                const hasThought = currentThought || existing.thought;
+                next[idx] = { ...existing, content: currentText, state: hasThought ? undefined : "generating", thought: hasThought ? (currentThought || existing.thought) : undefined, fileChanges: fileChangesRef.current.length > 0 ? [...fileChangesRef.current] : existing.fileChanges, todos: todosRef.current.length > 0 ? [...todosRef.current] : existing.todos };
+              }
               return next;
             });
           }
@@ -1712,6 +1884,9 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
         }
 
         if (evt.type === "tool_start") {
+          // Sub-agent tool events are nested under the delegate_task card, not
+          // spawned as top-level tool cards in the console-list.
+          if ((evt as any).isSubAgent) { nestSubAgentEvent(evt); return true; }
           // Track file changes and write_todos so the pending banner stays in sync
           const tn = evt.toolName;
           if (tn === "write_file" && evt.toolParams?.path) {
@@ -1774,11 +1949,17 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
             }));
           }
           // End assistant streaming, flush file changes to the assistant message
+          // Always flush todos/fileChanges: if no assistantMsgId exists yet, create one so data isn't lost
+          const hasPendingDataCont = fileChangesRef.current.length > 0 || todosRef.current.length > 0 || currentThought;
+          if (!assistantMsgId && hasPendingDataCont) {
+            assistantMsgId = nextId();
+            pushRaw(assistantMsgId, { role: "assistant", content: currentText, thought: currentThought });
+          }
           if (assistantMsgId) {
             setMessages((prev) => {
               const next = [...prev];
               const idx = next.findIndex((m) => m.id === assistantMsgId);
-              if (idx >= 0) next[idx] = { ...next[idx], state: undefined, thought: currentThought, fileChanges: fileChangesRef.current.length > 0 ? [...fileChangesRef.current] : undefined, todos: todosRef.current.length > 0 ? [...todosRef.current] : undefined };
+              if (idx >= 0) next[idx] = { ...next[idx], state: undefined, thought: currentThought, content: currentText || next[idx].content, fileChanges: fileChangesRef.current.length > 0 ? [...fileChangesRef.current] : undefined, todos: todosRef.current.length > 0 ? [...todosRef.current] : undefined };
               return next;
             });
             assistantMsgId = null;
@@ -1833,6 +2014,13 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
           flushSync(() => {
             pushRaw(id, { role: "tool", content: "", toolName: tn, toolParams: evt.toolParams, toolCallId: evt.toolCallId, state: "waiting", sandboxOutput: tn === "run_command" ? "" : undefined, tokenCount: fcTokenCount, agentMarker: marker2, ...(isSubAgent2 ? { subAgentName: "Sub-agent" } : {}) });
             if (evt.toolCallId) toolCallMsgIdRef.current.set(evt.toolCallId, id);
+            if (tn === "delegate_task") {
+              delegateTaskCardIdRef.current = id;
+              activeDelegationDepthRef.current += 1;
+              activeDelegationMarkerRef.current = marker2;
+              // Auto-expand so the sub-agent body streams live (minified console-list).
+              setExpandedSubAgents((prev) => { const next = new Set(prev); next.add(id); return next; });
+            }
           });
           // Pre-collapse code block by default at card creation
           if (tn !== "run_in_terminal") {
@@ -1853,6 +2041,9 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
         }
 
         if (evt.type === "tool_end") {
+          // Sub-agent tool events are nested under the delegate_task card, not
+          // spawned as top-level tool cards in the console-list.
+          if ((evt as any).isSubAgent) { nestSubAgentEvent(evt); return true; }
           // Switch file changes from streaming to done and auto-apply to editor.
           if (tn === "write_file" || tn === "edit_file") {
             setMessages((prev) => {
@@ -2427,7 +2618,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
 
     // Keep loading if a file tool (edit/write/delete) is waiting for Accept/Reject
     setLoading(deferredToolRef.current != null);
-  }, [getConsoleContext, refreshFileTreeContext, executeBrowserAction, push, getFsBasePath, applyEditorFiles, onRefreshFs, threads]);
+  }, [getConsoleContext, refreshFileTreeContext, executeBrowserAction, push, getFsBasePath, applyEditorFiles, onRefreshFs, threads, nestSubAgentEvent]);
 
   // helper: push a message with explicit id
   const pushRaw = useCallback((id: string, msg: Omit<ConsoleMessage, "id" | "when">) => {
@@ -2460,7 +2651,14 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     preRoundRef.current = messages;
+    // User initiated a send — always reset scroll state so auto-scroll kicks in
+    userScrolledUpRef.current = false;
     push({ role: "user", content: msg });
+    // Force an immediate scroll to bottom after DOM settles with the new user message
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const el = consoleListRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    }));
 
     try {
       await runAgent(tid, msg, ctrl.signal);
@@ -2487,33 +2685,34 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
     const hasTodos = todosRef.current.length > 0;
     const hasFileChanges = fileChangesRef.current.length > 0;
 
-    if (hasTodos || hasFileChanges) {
-      setMessages((prev) => {
-        const next = [...prev];
-        for (let i = next.length - 1; i >= 0; i--) {
-          if (next[i].role === "assistant" && next[i].state !== undefined) {
-            const resolvedTodos = hasTodos
-              ? todosRef.current.map((t) =>
-                  t.status === "in_progress" ? { ...t, status: "pending" as const } : t
-                )
-              : undefined;
-            const resolvedFileChanges = hasFileChanges
-              ? fileChangesRef.current.map((fc) =>
-                  fc.status === "streaming" ? { ...fc, status: "done" as const } : fc
-                )
-              : undefined;
-            next[i] = {
-              ...next[i],
-              state: undefined,
-              todos: resolvedTodos,
-              fileChanges: resolvedFileChanges,
-            };
-            break;
-          }
+    // Always clear the transient streaming `.state` on the latest assistant
+    // message, even if there are no todos or file changes to materialize.
+    // Otherwise the stale state leaks into the banner after a premature stop.
+    setMessages((prev) => {
+      const next = [...prev];
+      for (let i = next.length - 1; i >= 0; i--) {
+        if (next[i].role === "assistant" && next[i].state !== undefined) {
+          const resolvedTodos = hasTodos
+            ? todosRef.current.map((t) =>
+                t.status === "in_progress" ? { ...t, status: "pending" as const } : t
+              )
+            : undefined;
+          const resolvedFileChanges = hasFileChanges
+            ? fileChangesRef.current.map((fc) =>
+                fc.status === "streaming" ? { ...fc, status: "done" as const } : fc
+              )
+            : undefined;
+          next[i] = {
+            ...next[i],
+            state: undefined,
+            todos: resolvedTodos,
+            fileChanges: resolvedFileChanges,
+          };
+          break;
         }
-        return next;
-      });
-    }
+      }
+      return next;
+    });
 
     fileChangesRef.current = [];
     todosRef.current = [];
@@ -2741,30 +2940,83 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
   // ── Pending items for the input-area banner ──
   const [pendingTodosFilter, setPendingTodosFilter] = useState<"all" | "main" | "sub">("all");
 
+  // ── Helpers to extract/normalize a todo list from raw write_todos JSON content.
+  //    Shared by the main banner AND per-sub-agent mini-banners.
+  type RawTodo = { id: string; text: string; status: string; agentMarker?: string };
+  const normalizeTodos = useCallback((arr: any[], fallbackMarker: string): RawTodo[] =>
+    arr
+      .filter((x) => x && typeof x === "object" && "id" in x && "text" in x)
+      .map((x) => ({
+        id: String(x.id || ""),
+        text: String(x.text || ""),
+        status: ["pending", "in_progress", "completed", "cancelled"].includes(String(x.status))
+          ? String(x.status)
+          : "pending",
+        agentMarker: (x.agentMarker as string | undefined) || fallbackMarker,
+      })), []);
+
+  const parseWriteTodosContent = useCallback((content: unknown): RawTodo[] | null => {
+    if (typeof content !== "string") return null;
+    try {
+      const arr = JSON.parse(content);
+      if (!Array.isArray(arr) || arr.length === 0) return null;
+      const fc0 = arr[0];
+      if (fc0?.function?.name !== "write_todos" || !fc0.function.arguments) return null;
+      const args = typeof fc0.function.arguments === "string"
+        ? JSON.parse(fc0.function.arguments)
+        : fc0.function.arguments;
+      return Array.isArray(args?.todos) ? args.todos : null;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const filterPending = useCallback((list: RawTodo[]) =>
+    list.filter((t) => t.status !== "completed" && t.status !== "cancelled")
+  , []);
+
   const pendingTodos = useMemo(() => {
-    // Only use the latest todos — when the agent calls write_todos again,
-    // old messages still carry stale todo arrays. We want just the newest.
-    let latestTodos: (TodoItem & { msgId: string })[] = [];
+    // MAIN BANNER ONLY TRACKS TOP-LEVEL (MAIN-AGENT) TODOS.
+    // Sub-agent todos are intentionally excluded here — they now live in their
+    // own mini-banner rendered inside the respective agent-sub-agent-body so
+    // each sub-agent's tasks scoped to its local scope.
+    const scopeLatest = new Map<string, RawTodo[]>();
+    const markScope = (scope: string, list: RawTodo[]) => { scopeLatest.set(scope, list); };
+
     for (const m of messages) {
+      // ── 1. Top-level write_todos (main agent) ──
       if (m.todos && m.todos.length > 0) {
-        latestTodos = m.todos
-          .filter((t) => t.status !== "completed" && t.status !== "cancelled")
-          .map((t) => ({ ...t, msgId: m.id }));
+        const marker = (m.agentMarker as string | undefined) || "main";
+        const scope = marker === "main" ? "__main__" : marker;
+        markScope(scope, normalizeTodos(m.todos, marker));
+      }
+      // ── 2. Sub-agent todos: INTENTIONALLY SKIPPED for the main banner.
+      //    (See per-sub-agent extraction + rendering inside delegate_task body.)
+    }
+
+    const out: (TodoItem & { msgId: string; _scope: string })[] = [];
+    for (const [scope, list] of scopeLatest) {
+      for (const t of filterPending(list)) {
+        out.push({
+          id: t.id,
+          text: t.text,
+          status: t.status as TodoItem["status"],
+          agentMarker: t.agentMarker,
+          msgId: scope,
+          _scope: scope,
+        });
       }
     }
-    return latestTodos;
-  }, [messages]);
+    return out;
+  }, [messages, normalizeTodos, filterPending]);
 
   // Group pending todos by agent: main vs sub-agents
   const { mainTodos, subTodos, filteredTodos } = useMemo(() => {
     const main: typeof pendingTodos = [];
     const sub: typeof pendingTodos = [];
     for (const t of pendingTodos) {
-      if (!t.agentMarker || t.agentMarker === "main") {
-        main.push(t);
-      } else {
-        sub.push(t);
-      }
+      if (!t.agentMarker || t.agentMarker === "main") main.push(t);
+      else sub.push(t);
     }
     const filtered =
       pendingTodosFilter === "all" ? pendingTodos :
@@ -3160,6 +3412,18 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
     return null;
   }, [safeMessages]);
 
+  // Global (top-level) agent state — taken from the latest streaming message.
+  // Shown in a fixed position above the input area, not embedded per-message.
+  const activeStateInfo = useMemo(() => {
+    let state: string | null = null;
+    let msgId: string | null = null;
+    for (let i = safeMessages.length - 1; i >= 0; i--) {
+      const m = safeMessages[i];
+      if (m.state) { state = m.state; msgId = m.id; break; }
+    }
+    return { state, msgId };
+  }, [safeMessages]);
+
   const lastGroupIsUserOnly = messageGroups.length > 0
     && messageGroups[messageGroups.length - 1].items.every((m) => m.role === "user");
 
@@ -3198,17 +3462,6 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
         </div>
       )}
 
-      {/* ── Goal display ── */}
-      {goal && goal !== "Verify the app works correctly" && (
-        <div className="agent-goal-bar">
-          <i className="codicon codicon-target" />
-          <span>{goal}</span>
-          <button className="agent-goal-clear" onClick={() => onGoalChange("")} title="Clear goal">
-            <i className="codicon codicon-close" />
-          </button>
-        </div>
-      )}
-
       {/* ── Messages ── */}
       <div className="console-list" ref={consoleListRef}>
         {safeMessages.length === 0 && (
@@ -3221,12 +3474,6 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
               <div key={group.key}>
               {group.items.map((msg) => (
                 <div key={msg.id} className={`agent-msg agent-msg-${msg.role}${msg.isWarning ? " agent-msg-warning" : ""}`}>
-            {msg.state && (
-              <div key={`${msg.id}-state`} className="agent-state">
-                {msg.state === "thinking" && lastThinkingId === msg.id && <span className="agent-spinner" />}
-                {stateLabel(msg.state)}
-              </div>
-            )}
             {msg.viewingFile && (
               <div key={`${msg.id}-view`} className="agent-file-view"><i className="codicon codicon-eye" /> {msg.viewingFile}</div>
             )}
@@ -3330,55 +3577,250 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
                       <span>{msg.subAgentName || "Sub-agent"} ({msg.subAgentMessages.length} messages)</span>
                     </div>
                     {expandedSubAgents.has(msg.id) && (
-                      <div className="agent-sub-agent-body">
-                        {msg.subAgentMessages.map((m, i) => {
-                          const hasReasoning = !!m.reasoning_content;
-                          const hasToolName = !!m.name;
-                          const isToolCall = hasToolName;
-                          // Check if this is a write_todos tool call from the sub-agent
-                          const isWriteTodos = m.name === "write_todos";
-                          // Check if previous message was write_todos (this is the tool result)
-                          const prevIsWriteTodos = i > 0 && msg.subAgentMessages?.[i - 1]?.name === "write_todos";
-                          // Extract todos from write_todos tool call content
-                          let writeTodosParsed: TodoItem[] | null = null;
-                          if (isWriteTodos && m.content) {
-                            try {
-                              const arr = JSON.parse(m.content);
-                              if (Array.isArray(arr) && arr.length > 0) {
-                                const fc = arr[0];
-                                if (fc?.function?.name === "write_todos" && fc.function.arguments) {
-                                  const args = typeof fc.function.arguments === "string" ? JSON.parse(fc.function.arguments) : fc.function.arguments;
-                                  if (Array.isArray(args.todos)) {
-                                    writeTodosParsed = args.todos.map((t: any): TodoItem => ({
-                                      id: String(t.id || ""),
-                                      text: String(t.text || ""),
-                                      status: (["pending", "in_progress", "completed", "cancelled"].includes(String(t.status)) ? String(t.status) : "pending") as TodoItem["status"],
-                                    }));
+                      <div className="agent-sub-agent-body" data-sub-agent-body={msg.id}>
+                        {(() => {
+                          // ── Sub-agent messages: group into turns so state badges +
+                          //    thought blocks render once per assistant turn, matching
+                          //    the pattern of the top-level console-list.
+                          const subMarker = (msg.subAgentName as string) || (msg.agentMarker as string) || "code-writer";
+                          const items: JSX.Element[] = [];
+                          const list = msg.subAgentMessages!;
+
+                          // ── (TOP) Extract pending todos for THIS sub-agent from its
+                          //    own trace and render a scoped mini-banner at the top of
+                          //    the sub-body (like console-list's pending-banner but
+                          //    scoped to only this sub-agent's tasks).
+                          let subLatestTodosRaw: RawTodo[] = [];
+                          for (const sam of list) {
+                            if (sam?.name === "write_todos") {
+                              const parsed = parseWriteTodosContent(sam.content);
+                              if (parsed) {
+                                // write_todos is a full replacement — always overwrite.
+                                subLatestTodosRaw = normalizeTodos(parsed, subMarker);
+                              }
+                            }
+                          }
+                          const subPendingTodos = filterPending(subLatestTodosRaw);
+                          if (subPendingTodos.length > 0) {
+                            items.push(
+                              <div key={`${msg.id}-sub-banner`} className="agent-pending-banner agent-pending-banner-sub">
+                                <details
+                                  className="agent-pending-todos agent-pending-todos-sub"
+                                  open
+                                >
+                                  <summary className="agent-pending-summary agent-pending-summary-sub">
+                                    <i className="codicon codicon-checklist" />
+                                    <span className="agent-pending-count">
+                                      {subPendingTodos.length} pending sub-task{subPendingTodos.length > 1 ? "s" : ""}
+                                    </span>
+                                  </summary>
+                                  <div className="agent-pending-list agent-pending-list-sub">
+                                    {subPendingTodos.map((t) => (
+                                      <div key={t.id} className={`agent-todo-item ${t.status}`}>
+                                        <i className={`codicon codicon-${t.status === "in_progress" ? "loading" : "circle-outline"}`} />
+                                        <span className="agent-todo-text">{t.text}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </details>
+                              </div>
+                            );
+                          }
+
+                          for (let i = 0; i < list.length; i++) {
+                            const m = list[i];
+                            const hasReasoning = !!m.reasoning_content;
+                            const hasThought = !!m.thought;
+                            const hasToolName = !!m.name;
+                            const isToolCall = hasToolName;
+                            const isWriteTodos = m.name === "write_todos";
+                            const prevIsWriteTodos = i > 0 && list[i - 1]?.name === "write_todos";
+                            // Skip the synthetic tool-result that immediately follows a
+                            // write_todos call — the TodoCard already shows everything.
+                            if (prevIsWriteTodos && m.role === "tool") continue;
+
+                            // Inline per-sub-message key (derived from outer msg.id + index)
+                            const k = `${msg.id}-sa-${i}`;
+
+                            // 1. Per-assistant-message state indicator: shown once above
+                            //    the message card if state is set (shares the same label
+                            //    logic as the global indicator).
+                            if (m.state && (m.role === "assistant" || m.role === "tool")) {
+                              items.push(
+                                <div key={`${k}-state`} className="agent-state agent-state-sub-agent">
+                                  {m.state === "thinking" && <span className="agent-spinner" />}
+                                  {m.state === "waiting" && <span className="agent-spinner" />}
+                                  {stateLabel(m.state)}
+                                </div>
+                              );
+                            }
+
+                            // 2. Per-message collapsible thought block (same visual as
+                            //    top-level agent-thought: lightbulb + summary + body).
+                            if (hasThought && m.role === "assistant") {
+                              items.push(
+                                <details key={`${k}-thought`} className="agent-thought agent-thought-sub-agent" open={m.state === "thinking"}>
+                                  <summary className="agent-thought-summary agent-thought-summary-sub-agent">
+                                    <i className="codicon codicon-lightbulb" />
+                                    {m.state === "thinking" ? "Thinking..." : "Thought process"}
+                                  </summary>
+                                  <div className="agent-thought-body agent-thought-body-sub-agent">{m.thought}</div>
+                                </details>
+                              );
+                            } else if (hasReasoning && !hasThought && m.role === "assistant") {
+                              // Fallback: if no accumulated thought blob, show the
+                              // tool-call-level reasoning_content inline as light italic.
+                              items.push(
+                                <div key={`${k}-reasoning`} className="agent-sub-agent-thought">{m.reasoning_content}</div>
+                              );
+                            }
+
+                            // 3. Render actual message content.
+                            if (isToolCall) {
+                              // ── Sub-agent tool call → real collapsible nested agent-tool-card
+                              //    with details/summary so it can expand/collapse (header bar
+                              //    with chevron + spinner/check + tool name + args).
+                              const toolDisplayName = (m.name || "").replace("browser_", "").replace(/_/g, " ");
+                              const toolIconClass =
+                                m.name === "write_todos" ? "checklist" :
+                                (m.name || "").startsWith("browser_") ? "globe" :
+                                (m.name === "run_in_terminal" || m.name === "run_command") ? "terminal" :
+                                m.name === "read_file" ? "file-code" :
+                                m.name === "grep" ? "search" :
+                                m.name === "list_files" || m.name === "search_files" ? "folder-opened" :
+                                m.name === "write_summary" ? "notebook" :
+                                "tools";
+                              let cardArgs: Record<string, string> = {};
+                              if (m.content && m.name !== "write_todos") {
+                                try {
+                                  const arr = JSON.parse(m.content);
+                                  if (Array.isArray(arr) && arr.length > 0 && arr[0]?.function?.arguments) {
+                                    const args = typeof arr[0].function.arguments === "string"
+                                      ? JSON.parse(arr[0].function.arguments)
+                                      : arr[0].function.arguments;
+                                    if (args && typeof args === "object") {
+                                      for (const [k2, v] of Object.entries(args)) {
+                                        if (k2 === "task") continue;
+                                        cardArgs[k2] = String(v).slice(0, 60);
+                                      }
+                                    }
                                   }
+                                } catch {}
+                              }
+                              let writeTodosParsed: TodoItem[] | null = null;
+                              if (isWriteTodos && m.content) {
+                                try {
+                                  const arr = JSON.parse(m.content);
+                                  if (Array.isArray(arr) && arr.length > 0) {
+                                    const fc = arr[0];
+                                    if (fc?.function?.name === "write_todos" && fc.function.arguments) {
+                                      const args = typeof fc.function.arguments === "string" ? JSON.parse(fc.function.arguments) : fc.function.arguments;
+                                      if (Array.isArray(args.todos)) {
+                                        writeTodosParsed = args.todos.map((t: any): TodoItem => ({
+                                          id: String(t.id || ""),
+                                          text: String(t.text || ""),
+                                          status: (["pending", "in_progress", "completed", "cancelled"].includes(String(t.status)) ? String(t.status) : "pending") as TodoItem["status"],
+                                        }));
+                                      }
+                                    }
+                                  }
+                                } catch {}
+                              }
+                              // For terminal tools, the result lives in the NEXT
+                              // message (role === "tool", no name). Consume it inside
+                              // this tool card so it renders as agent-terminal-out
+                              // instead of a detached "Result" block.
+                              const isTerminalTool = isToolCall && (m.name === "run_command" || m.name === "run_in_terminal");
+                              let terminalOutput: string | null = null;
+                              if (isTerminalTool) {
+                                const nextMsg = list[i + 1];
+                                if (nextMsg && nextMsg.role === "tool" && !nextMsg.name) {
+                                  terminalOutput = nextMsg.content || "";
                                 }
                               }
-                            } catch {}
-                          }
-                          // Skip the tool result message that follows write_todos
-                          if (prevIsWriteTodos && m.role === "tool") return null;
-                          const roleClass = isToolCall ? "agent-msg-tool"
-                            : m.role === "tool" ? "agent-msg-tool"
-                            : m.role === "user" ? "agent-msg-user"
-                            : "agent-msg-assistant";
-                          return (
-                            <div key={i} className={`agent-sub-agent-msg agent-msg ${roleClass}${isToolCall ? " turn-tool" : ""}${hasReasoning ? " turn-reasoning" : ""}${m.role === "tool" ? " turn-result" : ""}${m.role === "user" ? " turn-user" : ""}${!isToolCall && m.role === "assistant" ? " turn-text" : ""}`}>
-                              {m.reasoning_content && (
-                                <div className="agent-sub-agent-thought">{m.reasoning_content}</div>
-                              )}
-                              {isWriteTodos && writeTodosParsed ? (
-                                <TodoCard todos={writeTodosParsed} locked />
-                              ) : (
-                                <>
-                                  {m.name && (
-                                    <div className="agent-sub-agent-tool">
-                                      <i className="codicon codicon-tools" /> {m.name.replace(/_/g, " ")}
+                              // Sub-agent tool cards start collapsed when completed
+                              // (first paint); expanded while the parent is still
+                              // streaming (spinner visible) so the user sees progress.
+                              const isStreaming = m.state === "waiting";
+                              const isCollapsed = collapsedOutputs.has(k);
+                              items.push(
+                                <details
+                                  key={`${k}-card`}
+                                  className={`agent-sub-agent-toolcard-details agent-tool-card agent-tool-card-${subMarker}${isStreaming ? " streaming" : ""}`}
+                                  open={isStreaming ? true : !isCollapsed}
+                                  onToggle={(e) => {
+                                    // Prevent summary click during streaming from collapsing
+                                    if (m.state === "waiting") return;
+                                    const nowOpen = (e.target as HTMLDetailsElement).open;
+                                    setCollapsedOutputs((prev) => {
+                                      const next = new Set(prev);
+                                      if (nowOpen) next.delete(k); else next.add(k);
+                                      return next;
+                                    });
+                                  }}
+                                >
+                                  <summary className="agent-sub-agent-toolcard-summary">
+                                    {isStreaming ? (
+                                      <span className="agent-spinner agent-toolcard-sub-spinner" />
+                                    ) : (
+                                      <i className="codicon codicon-chevron-right agent-toolcard-sub-chevron" />
+                                    )}
+                                    {!isStreaming && <i className="codicon codicon-check agent-toolcard-sub-check" />}
+                                    {isStreaming && <i className={`codicon codicon-${toolIconClass}`} />}
+                                    {!isStreaming && <i className={`codicon codicon-${toolIconClass}`} />}
+                                    <span className="agent-tool-card-name">{toolDisplayName}</span>
+                                    {Object.keys(cardArgs).length > 0 && (
+                                      <span className="agent-tool-card-args">
+                                        {Object.entries(cardArgs).map(([k2, v]) => (
+                                          <span key={k2}>{k2}: {v}</span>
+                                        ))}
+                                      </span>
+                                    )}
+                                  </summary>
+                                  {/* Expanded body: TodoCard for write_todos, terminal
+                                      output for run_command/run_in_terminal, or a
+                                      structured placeholder for everything else. */}
+                                  {isWriteTodos && writeTodosParsed ? (
+                                    <div className="agent-sub-agent-toolcard-body">
+                                      <TodoCard todos={writeTodosParsed} locked />
+                                    </div>
+                                  ) : isTerminalTool && terminalOutput != null ? (
+                                    <div className="agent-sub-agent-toolcard-body">
+                                      <div className="agent-terminal">
+                                        <div className="agent-terminal-header">
+                                          <i className="codicon codicon-terminal" />
+                                          <span className="agent-terminal-cwd" title={projectPath}>{projectPath || "~"}</span>
+                                          <span className="agent-terminal-label">{m.name === "run_command" ? "sandbox" : "terminal"}</span>
+                                          <i className="codicon codicon-check agent-terminal-done" />
+                                        </div>
+                                        <pre className="agent-terminal-out">{terminalOutput}</pre>
+                                      </div>
+                                    </div>
+                                  ) : (
+                                    <div className="agent-sub-agent-toolcard-body agent-tool-card-body">
+                                      <div className="agent-toolcard-sub-note">
+                                        Sub-agent tool — result shown below in the Result block.
+                                      </div>
                                     </div>
                                   )}
+                                </details>
+                              );
+                              // The terminal tool's result message was consumed above;
+                              // skip it so it doesn't render a detached "Result" block.
+                              if (isTerminalTool && terminalOutput != null) i++;
+                            } else {
+                              // ── Non-tool messages: assistant text / user / tool result
+                              //    Keep the existing agent-msg layout with turn roles, but
+                              //    mirror minified sizes.
+                              const roleClass =
+                                m.role === "tool" ? "agent-msg-tool" :
+                                m.role === "user" ? "agent-msg-user" :
+                                "agent-msg-assistant";
+                              items.push(
+                                <div
+                                  key={k}
+                                  className={`agent-sub-agent-msg agent-msg ${roleClass}${hasReasoning ? " turn-reasoning" : ""}${m.role === "tool" ? " turn-result" : ""}${m.role === "user" ? " turn-user" : ""}${!isToolCall && m.role === "assistant" ? " turn-text" : ""}`}
+                                >
                                   {m.content && !m.name && m.role === "assistant" && (
                                     <div className="agent-sub-agent-text">{m.content}</div>
                                   )}
@@ -3387,11 +3829,11 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
                                   )}
                                   {m.role === "tool" && (
                                     <>
-                                      {!collapsedOutputs.has(`${msg.id}-sa-${i}`) ? (
+                                      {!collapsedOutputs.has(k) ? (
                                         <div className="agent-output-expanded">
                                           <div
                                             className="agent-output-collapse-bar"
-                                            onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.add(`${msg.id}-sa-${i}`); return next; })}
+                                            onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.add(k); return next; })}
                                           >
                                             <span>Result ({String(m.content || "").split("\n").length} lines)</span>
                                             <i className="codicon codicon-chevron-up" />
@@ -3401,7 +3843,7 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
                                       ) : (
                                         <div
                                           className="agent-terminal-out-collapsed"
-                                          onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.delete(`${msg.id}-sa-${i}`); return next; })}
+                                          onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.delete(k); return next; })}
                                         >
                                           <i className="codicon codicon-chevron-right" />
                                           <span>Result ({String(m.content || "").split("\n").length} lines)</span>
@@ -3409,11 +3851,12 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
                                       )}
                                     </>
                                   )}
-                                </>
-                              )}
-                            </div>
-                          );
-                        })}
+                                </div>
+                              );
+                            }
+                          }
+                          return <>{items}</>;
+                        })()}
                       </div>
                     )}
                   </div>
@@ -3781,6 +4224,14 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
         )}
         <div ref={bottomRef} />
       </div>
+
+      {/* ── Global agent state indicator (Thinking... / Generating... / Wait a moment...) ── */}
+      {loading && activeStateInfo.state && (
+        <div className="agent-state agent-state-global">
+          {activeStateInfo.state === "thinking" && <span className="agent-spinner" />}
+          {stateLabel(activeStateInfo.state)}
+        </div>
+      )}
 
       {/* ── Pending todos / changes banner ── */}
       {(pendingTodos.length > 0 || hasPendingFileActions) && (

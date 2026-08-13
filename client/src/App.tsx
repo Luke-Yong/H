@@ -438,7 +438,7 @@ export default function App() {
   useEffect(() => { if (!termVisible) reopenTerminal.current = false; }, [termVisible]);
 
   // Resizable console pane (width from right edge)
-  const { size: consoleW, onMouseDown: onConsoleDrag } = useResizable(390, 390, 800, true);
+  const { size: consoleW, onMouseDown: onConsoleDrag } = useResizable(560, 390, 1200, true);
 
   const ensureTerminalVisible = useCallback((restart: boolean) => {
     reopenTerminal.current = true;

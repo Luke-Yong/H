@@ -4129,12 +4129,15 @@ export async function* agentLoopStream(
           // Not done -> value is guaranteed SubAgentStreamEvent (has .type)
           const evt = iter.value as SubAgentStreamEvent;
           // Forward sub-agent tool events — agentMarker is already set.
-          // Skip text events from sub-agents to avoid polluting the parent's message flow.
+          // Tag them as sub-agent events so the client can nest them under the
+          // delegate_task card instead of spawning top-level tool cards in the
+          // console-list. Skip text events from sub-agents to avoid polluting
+          // the parent's message flow.
           if (evt.type === "tool_start" || evt.type === "tool_end") {
-            yield evt;
+            yield { ...evt, isSubAgent: true, subAgentParentToolCallId: tc.id };
           } else if (evt.type === "browser_tool") {
             // browser_tool from sub-agent: treat same as parent browser_tool
-            yield evt;
+            yield { ...evt, isSubAgent: true, subAgentParentToolCallId: tc.id };
           }
         }
         
@@ -4284,7 +4287,7 @@ export function clearCommandOutputs() {
 
 const agentSessions = new Map<string, AgentState>();
 
-export function createAgentSession(sessionId: string, projectRoot: string, userMessage: string, context: string): AgentState {
+export function createAgentSession(sessionId: string, projectRoot: string, userMessage: string, context: string, seedTodos?: { id: string; text: string; status: string; agentMarker?: string }[] | null): AgentState {
   const prev = agentSessions.get(sessionId);
   if (prev) {
     prev.projectRoot = projectRoot;
@@ -4292,6 +4295,13 @@ export function createAgentSession(sessionId: string, projectRoot: string, userM
     prev.latestSummary = undefined;
     prev.pendingSubAgent = undefined;
     prev.apiUsageTotals = undefined;
+    // If caller provided seed todos (fresh scan from persisted messages),
+    // use them only if the in-memory state has lost its latestTodos
+    // (e.g. a stale session survived but with no todo state).
+    if (!prev.latestTodos || prev.latestTodos.length === 0) {
+      if (seedTodos && seedTodos.length > 0) prev.latestTodos = [...seedTodos];
+      else prev.latestTodos = extractLatestTodosFromMessages(prev.messages);
+    }
     prev.messages.push({ role: "user", content: userMessage });
     agentSessions.set(sessionId, prev);
     return prev;
@@ -4303,8 +4313,55 @@ export function createAgentSession(sessionId: string, projectRoot: string, userM
     projectRoot,
     apiUsageTotals: undefined,
   };
+  // Populate latestTodos from the caller (client re-sent persisted todos)
+  // or by scanning messages. This is critical after server restarts,
+  // where the in-memory agentSessions map is empty but the client has
+  // re-hydrated full message history including write_todos calls.
+  if (seedTodos && seedTodos.length > 0) {
+    state.latestTodos = [...seedTodos];
+  }
   agentSessions.set(sessionId, state);
   return state;
+}
+
+/**
+ * Re-scan the message history to recover the latest write_todos state.
+ * Used defensively when (a) the server was restarted and in-memory
+ * AgentState was lost, or (b) a session is resumed without seed todos.
+ *
+ * Handles both main-agent messages with `name === "write_todos"` and
+ * sub-agent delegations nested inside `delegate_task` tool results.
+ */
+function extractLatestTodosFromMessages(messages: AgentMessage[]): { id: string; text: string; status: string; agentMarker?: string }[] | undefined {
+  let latest: { id: string; text: string; status: string; agentMarker?: string }[] | undefined;
+  for (const m of messages) {
+    if (m.role !== "assistant") continue;
+    const name = (m as any).name as string | undefined;
+    const content = typeof m.content === "string" ? m.content : "";
+    if (name === "write_todos" && content) {
+      try {
+        const arr = JSON.parse(content);
+        if (Array.isArray(arr) && arr.length > 0) {
+          const fc = arr[0];
+          const args: any =
+            fc?.function?.name === "write_todos" && fc.function?.arguments
+              ? typeof fc.function.arguments === "string"
+                ? JSON.parse(fc.function.arguments)
+                : fc.function.arguments
+              : undefined;
+          if (args && Array.isArray(args.todos) && args.todos.length > 0) {
+            latest = args.todos.map((t: any) => ({
+              id: String(t?.id || ""),
+              text: String(t?.text || ""),
+              status: String(t?.status || "pending"),
+              agentMarker: (t?.agentMarker as string | undefined) || "main",
+            }));
+          }
+        }
+      } catch {}
+    }
+  }
+  return latest;
 }
 
 export function getAgentSession(sessionId: string): AgentState | undefined {
