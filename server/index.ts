@@ -2168,13 +2168,41 @@ app.get("/api/mcp/sse", (req, res) => {
 });
 
 // ── Resolve project root ──
-// Works both from source (server/index.ts, rootDir=".") and compiled JS (dist/server/index.js, outDir="dist").
+// Works from:
+//   • dev source (server/index.ts inside project root next to package.json)
+//   • compiled server in dist/server (tsc rootDir=., outDir=dist)
+//   • PACKAGED build running from <resources>/app.asar.unpacked/dist/server:
+//     asarUnpack copies in package.json guarantees package.json, client/dist, dist/server.
 function resolveProjectRoot(): string {
-  // If running from compiled dist/server/, go up twice to reach project root
-  const compiledRoot = path.resolve(__dirname, "..", "..");
+  const dir = __dirname;
+
+  // 1. Compiled dist/server: up twice → directory containing package.json. Works both for
+  //    local dev runs (project root) AND packaged app.asar.unpacked/ — both have a
+  //    package.json at the 2-parent level
+  const compiledRoot = path.resolve(dir, "..", "..");
   if (fs.existsSync(path.join(compiledRoot, "package.json"))) return compiledRoot;
-  // Otherwise assume running from source server/ inside project root
-  return path.resolve(__dirname, "..");
+
+  // 2. Fallback: walk up looking for app.asar FILE (resources/<folder contains app.asar + app.asar.unpacked)
+  let p = dir;
+  for (let i = 0; i < 6; i++) {
+    const asarPath = path.join(p, "app.asar");
+    if (fs.existsSync(asarPath) && fs.statSync(asarPath).isFile()) {
+      // Prefer <p>/app.asar.unpacked/ if that subdir also has a package.json (always
+      // the case when asarUnpack includes it); otherwise fall back to asar FILE virtual
+      // path readable only via asar-aware fs.
+      const unpackedRoot = path.join(p, "app.asar.unpacked");
+      if (fs.existsSync(path.join(unpackedRoot, "package.json"))) {
+        return unpackedRoot;
+      }
+      return asarPath;
+    }
+    const up = path.dirname(p);
+    if (up === p) break;
+    p = up;
+  }
+
+  // 3. Dev source (server/index.ts): up once → project root
+  return path.resolve(dir, "..");
 }
 const PROJECT_ROOT = resolveProjectRoot();
 

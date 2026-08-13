@@ -4,8 +4,57 @@ const { app, BrowserWindow, ipcMain, dialog, session, webContents, nativeImage }
 const http = require("http");
 const path = require("path");
 const fs = require("fs");
+const os = require("os");
 const { getBestAvailableLocation } = require("./native-location.cjs");
 require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
+
+// ── Persistent startup log (survives installer console teardown) ──
+// The NSIS installer's "Launch H" checkbox runs H.exe with stdout/stderr attached to a
+// conhost that gets killed the second the installer UI closes. In that case any
+// console.log / stderr pipes are lost, making "H server failed to start with
+// no output". Write every relevant startup diagnostic messages into a rotating log under %USERPROFILE%\.h\logs\
+// so the user can always recover the server child stderr/stdout tail, port probes, and error message
+// even when no console window survives.
+const H_LOG_DIR = path.join(os.homedir(), ".h", "logs");
+try { fs.mkdirSync(H_LOG_DIR, { recursive: true }); } catch {}
+function startupLogStamp() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+}
+const STARTUP_LOG_PATH = path.join(H_LOG_DIR, `startup-${startupLogStamp()}-${process.pid}.log`);
+let startupLogFd = null;
+try { startupLogFd = fs.openSync(STARTUP_LOG_PATH, "w", 0o644); } catch {}
+function startupLog(level, ...args) {
+  const ts = new Date().toISOString();
+  const parts = args.map((a) => {
+    if (a instanceof Error) return (a.stack || a.message);
+    if (typeof a === "string") return a;
+    try { return JSON.stringify(a); } catch { return String(a); }
+  });
+  const line = `[${ts}] [${level}] ${parts.join(" ")}\n`;
+  try { process.stdout.write(line); } catch {}
+  if (startupLogFd !== null) {
+    try { fs.writeSync(startupLogFd, line); } catch {}
+  }
+}
+startupLog("info", `H desktop v${app.getVersion ? app.getVersion() : "0.0.1"} (${app.isPackaged ? "packaged" : "dev"})`);
+startupLog("info", `startup log: ${STARTUP_LOG_PATH}`);
+startupLog("info", `process.execPath = ${process.execPath}`);
+startupLog("info", `cwd = ${process.cwd()}`);
+startupLog("info", `argv = ${process.argv.join(" ")}`);
+process.on("exit", () => {
+  try { if (startupLogFd !== null) { fs.closeSync(startupLogFd); startupLogFd = null; } } catch {}
+});
+
+function tryReadDir(dirPath) {
+  try {
+    const names = fs.readdirSync(dirPath, { withFileTypes: true });
+    return JSON.stringify(names.map((d) => `${d.isDirectory() ? "d" : "f"} ${d.name}`).slice(0, 50));
+  } catch (err) {
+    return `<error: ${(err && err.message) ? err.message : String(err)}>`;
+  }
+}
 
 // Must be set before any Chromium initialization so child processes inherit the name on Windows
 app.setAppUserModelId("com.h.ide.v1");
@@ -23,8 +72,11 @@ const geoOverrideDebounce = new Map();
 
 function showFatalStartupError(error) {
   const message = error instanceof Error ? (error.stack || error.message) : String(error);
-  try { console.error("[h-startup]", message); } catch {}
-  try { dialog.showErrorBox("H failed to start", message); } catch {}
+  startupLog("error", `FATAL STARTUP ERROR: ${message}`);
+  const body = `${message}\n\nDiagnostic log saved to:\n${STARTUP_LOG_PATH}\n\nPlease attach this file when reporting startup issues.`;
+  try {
+    dialog.showErrorBox("H failed to start", body);
+  } catch {}
 }
 
 process.on("unhandledRejection", (error) => {
@@ -188,12 +240,19 @@ async function waitForUrl(url, timeoutMs) {
 
 async function findLiveServerPort(timeoutMs) {
   const start = Date.now();
+  let iteration = 0;
   while (Date.now() - start < timeoutMs) {
+    iteration++;
     // Early exit: server process crashed; no point probing for 60s.
     if (serverLastExit && !serverChildProcess) {
       const code = serverLastExit.code;
+      const signal = serverLastExit.signal;
       const tail = serverTailLog.trim();
       const hint = tail ? `\n\nServer output tail:\n${tail}` : "";
+      startupLog("error",
+        `findLiveServerPort: server child exited prematurely code=${code ?? "null"} signal=${signal ?? "null"}`,
+        hint ? "server output tail:\n" + tail : "(no server output captured)"
+      );
       throw new Error(
         `Server process exited prematurely with code ${code ?? "<null>"}${hint}`
       );
@@ -217,6 +276,7 @@ async function findLiveServerPort(timeoutMs) {
             req.setTimeout(800, () => { req.destroy(); resolve(null); });
           });
           if (resp && resp.status >= 200 && resp.status < 500 && resp.body && resp.body.pid > 0) {
+            startupLog("info", `findLiveServerPort: matched via stdout parsedPort=${parsedServerPort} serverPID=${resp.body.pid} after ${iteration} iterations`);
             return parsedServerPort;
           }
         } catch {}
@@ -241,17 +301,19 @@ async function findLiveServerPort(timeoutMs) {
           req.setTimeout(500, () => { req.destroy(); resolve(null); });
         });
         if (resp && resp.status >= 200 && resp.status < 500 && resp.body && resp.body.pid > 0) {
+          startupLog("info", `findLiveServerPort: matched via port probe port=${p} serverPID=${resp.body.pid} after ${iteration} iterations`);
           return p;
         }
       } catch {}
     }
     await new Promise((r) => setTimeout(r, 200));
   }
+  startupLog("error", `findLiveServerPort: timed out after ${timeoutMs}ms (${iteration} iterations). parsedServerPort=${parsedServerPort}`);
   return 0;
 }
 
 // Use tmpdir for port file only for VITE dev server port (written by vite plugin)
-const PORTS_DIR = path.join(require("os").tmpdir(), "h-ports");
+const PORTS_DIR = path.join(os.tmpdir(), "h-ports");
 const VITE_PORT_FILE = path.join(PORTS_DIR, "vite-port");
 
 function readPortFile(filePath) {
@@ -298,6 +360,7 @@ function startEmbeddedServer() {
   let cmd;
   let args = [];
   const serverEnv = { ...process.env };
+  let spawnOpts_cwd = null; // optionally overridden by packaged branch
 
   if (isDev) {
     // Dev mode: run tsx via node loader, avoiding any shell (which would split
@@ -315,44 +378,123 @@ function startEmbeddedServer() {
     cmd = process.execPath;
     args = [tsxCli, serverPath];
   } else {
-    // Packaged mode: MUST run the pre-compiled CommonJS server
-    // (desktop:build-server step produces dist/server/index.js). tsx has been moved
-    // to devDependencies and is not bundled in the installer, so there is no
-    // fallback transpile path — the build step must have run.
-    const compiledServer = path.join(projectRoot, "dist", "server", "index.js");
-    if (!fs.existsSync(compiledServer)) {
+    // Packaged mode: MUST run the pre-compiled CommonJS server. Because the
+    // child is spawned with ELECTRON_RUN_AS_NODE=1 (running from the same EXE,
+    // only Node bootstrap is executed — not the full Electron/Chromium shell),
+    // two guarantees ensure the server finds its files without using asar-internal
+    // paths:
+    //   1) dist/server/ is in asarUnpack  -> lives under app.asar.unpacked/dist/server
+    //   2) cwd is process.resourcesPath    -> D:\H\resources (real dir)
+    //
+    // Setting cwd to app.getAppPath() (= app.asar FILE path) was the source
+    // of ENOENT: Windows CreateProcess rejects non-directory working dirs.
+    const resourcesDir = process.resourcesPath
+      ? process.resourcesPath
+      : path.dirname(app.getAppPath ? app.getAppPath() : projectRoot);
+    const unpackedServerDir = path.join(resourcesDir, "app.asar.unpacked", "dist", "server");
+    const compiledServer = path.join(unpackedServerDir, "index.js");
+    // --require bootstrap is run BEFORE index.js starts executing. It injects
+    // the dual node_modules locations (unpacked for .node natives, app.asar for
+    // pure-JS packages) into Module.globalPaths, so require('dotenv/config')
+    // on line 1 of index.js resolves correctly.
+    const bootstrapCjs = path.join(unpackedServerDir, "bootstrap-packaged.cjs");
+
+    // The client static assets are still read from inside asar by the Express
+    // server code itself — which runs in the child after the parent's asar
+    // monkey patches are intentionally NOT installed. Instead, the server's
+    // resolveProjectRoot() walks UP from its own __dirname (unpacked
+    // dist/server) and checks for a sibling app.asar to treat as the
+    // project-root sentinel, then serves client/dist via Electron's asar
+    // aware require/fs (which Node in AS_NODE mode + parent's patched
+    // environment actually has access to — because we inherit the patched
+    // fs bindings when the same EXE initializes Electron's internals in the
+    // parent first, then forks itself). For safety we also verify the
+    // pre-compiled bundle exists in the asar copy so the packaged build
+    // definitely contains the UI.
+    const clientDistIndex = path.join(projectRoot, "client", "dist", "index.html");
+    if (!fs.existsSync(compiledServer) || !fs.existsSync(bootstrapCjs)) {
+      const missing = [];
+      if (!fs.existsSync(compiledServer)) missing.push(compiledServer);
+      if (!fs.existsSync(bootstrapCjs)) missing.push(bootstrapCjs);
       const errMsg =
-        `[h-startup] FATAL: compiled server not found at ${compiledServer}.\n` +
-        `  Run 'npm run desktop:build-server' before packaging, or re-run 'npm run desktop:pack'.`;
-      console.error(errMsg);
-      if (typeof dialog !== "undefined") {
-        dialog.showErrorBox("H could not start", errMsg);
-      }
+        `FATAL: unpacked server files missing:\n  - ${missing.join("\n  - ")}\n` +
+        `  Expected asarUnpack to copy dist/server into app.asar.unpacked.\n` +
+        `  Re-run 'npm run dist:clean && npm run desktop:pack'.`;
+      startupLog("error", errMsg);
+      startupLog("error", `Checked parent asar path: projectRoot=${projectRoot} resourcesDir=${resourcesDir}`);
+      startupLog("error", `unpacked exists? ${fs.existsSync(unpackedServerDir)} contents: ${tryReadDir(unpackedServerDir)}`);
+      showFatalStartupError(errMsg);
+      throw new Error(errMsg);
+    }
+    if (!fs.existsSync(clientDistIndex)) {
+      const errMsg =
+        `FATAL: client build not found at ${clientDistIndex}.\n` +
+        `  Run 'npm run desktop:build' (Vite client build) before packaging.`;
+      startupLog("error", errMsg);
+      showFatalStartupError(errMsg);
       throw new Error(errMsg);
     }
     serverEnv.ELECTRON_RUN_AS_NODE = "1";
     cmd = process.execPath;
-    args = [compiledServer];
+    // Node/Electron accept `--require <path>` before the entry file. Runs the
+    // bootstrap synchronously before any user code in index.js, so by the time
+    // index.js does require("dotenv/config") the dual node_modules locations
+    // are already registered in Module.globalPaths.
+    args = ["--require", bootstrapCjs, compiledServer];
 
-    // Ensure native modules (better-sqlite3, node-pty, @esbuild/win32-x64) are
-    // resolved from the *unpacked* folder inside the installer. Electron asar's
-    // patched require walks asar first by default; if the package.json/main lands
-    // in asar and the package's `build/Release/*.node` is in asar.unpacked,
-    // relative requires from within asar resolve incorrectly on Windows.
-    // Prepending NODE_PATH forces `require("better-sqlite3")` to check
-    // app.asar.unpacked/node_modules before any asar-relative resolution.
+    // Resolve native modules (better-sqlite3 / node-pty / @esbuild platform bins)
+    // from the *physically unpacked* folder first. The packages are now entirely
+    // present under app.asar.unpacked (not just their .node files) so NODE_PATH
+    // lookup finds the package.json and resolves requires correctly.
     if (process.resourcesPath) {
       const unpackedNodeModules = path.join(
         process.resourcesPath,
         "app.asar.unpacked",
         "node_modules"
       );
+      const asarNodeModules = path.join(
+        process.resourcesPath,
+        "app.asar",
+        "node_modules"
+      );
+      // Build a NODE_PATH that tries unpacked (native .node binaries, our freshly
+      // compiled dist/server) FIRST, then falls back to app.asar virtual node_modules
+      // for all the pure-JS packages (dotenv, express, ws, typescript, etc.) that
+      // electron-builder leaves inside the compressed asar archive.
+      const nodePathParts = [];
+      if (fs.existsSync(unpackedNodeModules)) nodePathParts.push(unpackedNodeModules);
+      if (fs.existsSync(asarNodeModules)) nodePathParts.push(asarNodeModules);
+      if (serverEnv.NODE_PATH) nodePathParts.push(serverEnv.NODE_PATH);
+      if (nodePathParts.length > 0) {
+        serverEnv.NODE_PATH = nodePathParts.join(path.delimiter);
+        startupLog("info", `NODE_PATH = ${serverEnv.NODE_PATH}`);
+      } else {
+        startupLog("warn", "No node_modules search locations found in packaged layout.");
+      }
+
+      // Sanity-check that a representative native package (better-sqlite3) is
+      // fully present, so on startup we can log whether NODE_PATH resolution
+      // would actually succeed (helps diagnose "server failed to start" cases).
       if (fs.existsSync(unpackedNodeModules)) {
-        serverEnv.NODE_PATH = serverEnv.NODE_PATH
-          ? `${unpackedNodeModules}${path.delimiter}${serverEnv.NODE_PATH}`
-          : unpackedNodeModules;
+        const sqlitePkg = path.join(unpackedNodeModules, "better-sqlite3", "package.json");
+        const sqliteNodeGlob = path.join(unpackedNodeModules, "better-sqlite3", "build", "Release");
+        try {
+          const hasSqlitePkg = fs.existsSync(sqlitePkg);
+          const hasSqliteBuild = fs.existsSync(sqliteNodeGlob);
+          startupLog("info",
+            `unpacked natives: better-sqlite3 pkg=${hasSqlitePkg} buildDir=${hasSqliteBuild} path=${unpackedNodeModules}`
+          );
+        } catch {}
+      } else {
+        startupLog("warn",
+          `unpacked node_modules dir NOT found at ${unpackedNodeModules}. Native modules will likely fail to load.`
+        );
       }
     }
+    // Override cwd for the packaged case to the real resources/ folder.
+    // app.getAppPath() would otherwise return "path/to/app.asar" (a FILE),
+    // which CreateProcess rejects.
+    spawnOpts_cwd = resourcesDir;
   }
 
   // CRITICAL: never enable shell — it re-tokenizes arguments at spaces which breaks
@@ -362,25 +504,41 @@ function startEmbeddedServer() {
   // Also explicitly set the child CWD to the app root. On fresh installations the
   // inherited CWD can be the user's home, the desktop, or the installer exe dir,
   // which changes what relative require()/readFile() inside the server resolve to.
+  //
+  // IMPORTANT: packaged branch overrides spawnOpts_cwd to process.resourcesPath (a real
+  // directory) because app.getAppPath() returns "app.asar" (a FILE, not a directory)
+  // in packaged builds. Passing an asar path as cwd makes the kernel CreateProcess
+  // call fail with ENOENT on Windows.
+  const resolvedCwd = spawnOpts_cwd
+    ? spawnOpts_cwd
+    : (app.getAppPath ? app.getAppPath() : projectRoot);
   const spawnOpts = {
     env: serverEnv,
     stdio: ["ignore", "pipe", "pipe"],
     shell: false,
     windowsHide: true,
-    cwd: app.getAppPath ? app.getAppPath() : projectRoot,
+    cwd: resolvedCwd,
   };
 
-  console.log(`[h-startup] spawning: cmd=${cmd}`);
-  console.log(`[h-startup] args: ${args.map((a) => `"${a}"`).join(" ")}`);
-  console.log(`[h-startup] cwd:  ${spawnOpts.cwd}`);
+  startupLog("info", `spawning cmd=${cmd}`);
+  startupLog("info", `spawning args: ${args.map((a) => `"${a}"`).join(" ")}`);
+  startupLog("info", `spawning cwd = ${spawnOpts.cwd}`);
   if (spawnOpts.env && spawnOpts.env.NODE_PATH) {
-    console.log(`[h-startup] NODE_PATH: ${spawnOpts.env.NODE_PATH}`);
+    startupLog("info", `NODE_PATH = ${spawnOpts.env.NODE_PATH}`);
   }
 
   // Reset state from previous runs.
   serverLastExit = null;
   serverTailLog = "";
-  serverChildProcess = spawn(cmd, args, spawnOpts);
+  try {
+    serverChildProcess = spawn(cmd, args, spawnOpts);
+    startupLog("info", `spawned pid=${serverChildProcess.pid ?? "null"}`);
+  } catch (spawnErr) {
+    const msg = spawnErr && spawnErr.message ? spawnErr.message : String(spawnErr);
+    startupLog("error", `spawn() threw: ${msg}`, spawnErr && spawnErr.stack ? spawnErr.stack : "");
+    showFatalStartupError(new Error(`Failed to start server child process: ${msg}`));
+    throw spawnErr;
+  }
 
   // ── Parse port from server stdout + forward logs ──
   // Regex matches: H server running on http://localhost:<PORT>
@@ -395,11 +553,15 @@ function startEmbeddedServer() {
   const onStdout = (chunk) => {
     const text = chunk.toString ? chunk.toString("utf8") : String(chunk);
     appendTail(text);
+    startupLog("debug", `server stdout: ${text.replace(/\r?\n$/, "")}`);
     if (!parsedServerPort) {
       const m = portRegex.exec(text);
       if (m && m[1]) {
         const p = parseInt(m[1], 10);
-        if (p > 0) { parsedServerPort = p; }
+        if (p > 0) {
+          parsedServerPort = p;
+          startupLog("info", `parsed server port ${p} from stdout banner`);
+        }
       }
     }
     try { process.stdout.write(chunk); } catch {}
@@ -410,11 +572,15 @@ function startEmbeddedServer() {
   const onStderr = (chunk) => {
     const text = chunk.toString ? chunk.toString("utf8") : String(chunk);
     appendTail(text);
+    startupLog("error", `server stderr: ${text.replace(/\r?\n$/, "")}`);
     if (!parsedServerPort) {
       const m = portRegex.exec(text);
       if (m && m[1]) {
         const p = parseInt(m[1], 10);
-        if (p > 0) { parsedServerPort = p; }
+        if (p > 0) {
+          parsedServerPort = p;
+          startupLog("info", `parsed server port ${p} from stderr banner`);
+        }
       }
     }
     try { process.stderr.write(chunk); } catch {}
@@ -427,15 +593,20 @@ function startEmbeddedServer() {
   serverChildProcess.stderr?.on("data", onStderr);
 
   serverChildProcess.on("error", (err) => {
-    appendTail(`[electron] spawn error: ${err && err.message ? err.message : String(err)}\n`);
-    console.error("[h-startup] Server process error:", err.message);
+    const msg = err && err.message ? err.message : String(err);
+    appendTail(`[electron] spawn error: ${msg}\n`);
+    startupLog("error", `server child on(error): ${msg}`, err && err.stack ? err.stack : "");
   });
 
   serverChildProcess.on("exit", (code, signal) => {
     serverLastExit = { code, signal };
-    console.log("[h-startup] Server process exited with code", code, signal ? `signal ${signal}` : "");
-    if (code !== 0 && code !== null) {
-      console.error("[h-startup] Server stderr/stdout tail:\n" + serverTailLog);
+    startupLog("info",
+      `server child exit code=${code ?? "null"} signal=${signal ?? "none"}`
+    );
+    if ((code !== 0 && code !== null) || signal) {
+      startupLog("error",
+        `server child stderr/stdout tail (last ${SERVER_TAIL_MAX} chars):\n${serverTailLog}`
+      );
     }
     serverChildProcess = null;
   });
@@ -557,11 +728,11 @@ function getAllBrowserContents() {
   });
 }
 
-async function ensureGeolocationOverride(contents, reason = "") {
+async function ensureGeolocationOverride(contents, _reason = "") {
   if (!isBrowserContents(contents)) return;
 
   const currentUrl = contents.getURL?.() || "";
-  const origin = normalizeOrigin(currentUrl);
+  void normalizeOrigin(currentUrl);
 
   let loc = cachedLocation;
   if (!loc?.ok) {
@@ -589,7 +760,7 @@ async function ensureGeolocationOverride(contents, reason = "") {
   }
 }
 
-async function refreshSharedLocation(reason, timeoutMs) {
+async function refreshSharedLocation(_reason, timeoutMs) {
   if (locationRefreshPromise) return locationRefreshPromise;
 
   locationRefreshPromise = (async () => {
@@ -651,7 +822,7 @@ function getStandaloneUrl(pagePath) {
   return `http://127.0.0.1:${serverPort}${pagePath}`;
 }
 
-function openResourceMonitorWindow(parentWin) {
+function openResourceMonitorWindow(_parentWin) {
   if (resourceMonitorWindow && !resourceMonitorWindow.isDestroyed()) {
     resourceMonitorWindow.focus();
     return;
@@ -695,7 +866,7 @@ function closeResourceMonitorWindow() {
 // ── Settings Window ──
 let settingsWindow = null;
 
-function openSettingsWindow(parentWin) {
+function openSettingsWindow(_parentWin) {
   if (settingsWindow && !settingsWindow.isDestroyed()) {
     if (settingsWindow.isMinimized()) settingsWindow.restore();
     settingsWindow.focus();
@@ -950,18 +1121,23 @@ async function createMainWindow() {
       expressPort = await findLiveServerPort(60_000);
     } catch (startupErr) {
       const reason = startupErr instanceof Error ? startupErr.message : String(startupErr);
-      console.error("[h-startup] Dev server startup failed:", reason);
+      startupLog("error", "Dev server startup failed:", reason);
       const failHtml = loadingPageHtml(
         "H",
-        `Dev server failed to start.\n\n${reason}`,
-        serverTailLog || "Check the terminal for more details."
+        `Dev server failed to start.\n\n${reason}\n\nDiagnostic log:\n${STARTUP_LOG_PATH}`,
+        serverTailLog || "Check the terminal or the log file above for details."
       );
       win.loadURL(`data:text/html;base64,${Buffer.from(failHtml, "utf8").toString("base64")}`);
       win.show();
       return;
     }
     if (!expressPort) {
-      const failHtml = loadingPageHtml("H", "Express server failed to start. Check logs for errors.", serverTailLog);
+      startupLog("error", "Dev server: findLiveServerPort returned 0 (server port not found in time).");
+      const failHtml = loadingPageHtml(
+        "H",
+        `Express server failed to start within 60s.\n\nDiagnostic log:\n${STARTUP_LOG_PATH}`,
+        serverTailLog || "No server output captured."
+      );
       win.loadURL(`data:text/html;base64,${Buffer.from(failHtml, "utf8").toString("base64")}`);
       win.show();
       return;
@@ -971,7 +1147,11 @@ async function createMainWindow() {
     // Express ready — find Vite dev server
     const vitePort = await waitForVitePort(120_000);
     if (!vitePort) {
-      const failHtml = loadingPageHtml("H", "Vite dev server failed to start. Check logs for errors.");
+      startupLog("error", "Vite dev server failed to start within 120s.");
+      const failHtml = loadingPageHtml(
+        "H",
+        `Vite dev server failed to start.\n\nDiagnostic log:\n${STARTUP_LOG_PATH}`
+      );
       win.loadURL(`data:text/html;base64,${Buffer.from(failHtml, "utf8").toString("base64")}`);
       win.show();
       return;
@@ -994,29 +1174,42 @@ async function createMainWindow() {
       port = await findLiveServerPort(60_000);
     } catch (startupErr) {
       const reason = startupErr instanceof Error ? startupErr.message : String(startupErr);
-      console.error("[h-startup] Packaged server startup failed:", reason);
+      startupLog("error", "Packaged server startup failed:", reason);
+      const dialogBody =
+        `${reason}\n\nDiagnostic log:\n${STARTUP_LOG_PATH}` +
+        (serverTailLog ? `\n\nLast server output:\n${serverTailLog}` : "\n\nNo server output captured.");
       try {
-        dialog.showErrorBox(
-          "H could not start",
-          reason + (serverTailLog ? `\n\nDiagnostic log:\n${serverTailLog}` : "")
-        );
+        dialog.showErrorBox("H could not start", dialogBody);
       } catch {}
       const failHtml = loadingPageHtml(
         "H",
-        `H could not start:\n\n${reason}`,
-        serverTailLog || "No server logs captured."
+        `H could not start:\n\n${reason}\n\nDiagnostic log:\n${STARTUP_LOG_PATH}`,
+        serverTailLog || "No server output captured. Open the log file above for details."
       );
       win.loadURL(`data:text/html;base64,${Buffer.from(failHtml, "utf8").toString("base64")}`);
       win.show();
       return;
     }
     if (!port) {
-      const failHtml = loadingPageHtml("H", "H server failed to start. Please try launching again.");
+      startupLog("error", "Packaged server: findLiveServerPort returned 0 (port not found in 60s timeout).");
+      try {
+        dialog.showErrorBox(
+          "H could not start",
+          `H server failed to respond on port range ${EXPRESS_DEFAULT_PORT}-${EXPRESS_DEFAULT_PORT + EXPRESS_PORT_RANGE - 1} within 60 seconds.\n\nDiagnostic log:\n${STARTUP_LOG_PATH}` +
+          (serverTailLog ? `\n\nLast server output:\n${serverTailLog}` : "")
+        );
+      } catch {}
+      const failHtml = loadingPageHtml(
+        "H",
+        `H server failed to start.\n\nDiagnostic log:\n${STARTUP_LOG_PATH}\n\nPlease try launching again, or attach the log file when reporting this issue.`,
+        serverTailLog || "No server output captured."
+      );
       win.loadURL(`data:text/html;base64,${Buffer.from(failHtml, "utf8").toString("base64")}`);
       win.show();
       return;
     }
     serverPort = port;
+    startupLog("info", `createMainWindow: server live on port=${port}. Requesting client app from http://127.0.0.1:${port}`);
     await loadUrlWhenReady(
       win,
       `http://127.0.0.1:${port}`,
@@ -1043,7 +1236,7 @@ ipcMain.on("h:setTitle", (event, title) => {
 // ── Custom single-instance lock (PID-file based) ──
 // Electron's requestSingleInstanceLock() is unreliable on Windows (ACCESS_DENIED).
 // We use a PID file to track the running instance.
-const PID_FILE = path.join(require("os").tmpdir(), "h-pid");
+const PID_FILE = path.join(os.tmpdir(), "h-pid");
 
 function isProcessAlive(pid) {
   try {
@@ -1134,7 +1327,7 @@ app.whenReady().then(async () => {
     contents.on("did-navigate", apply);
     contents.on("did-navigate-in-page", apply);
     try {
-      contents.debugger.on("detach", (_event, reason) => {
+      contents.debugger.on("detach", (_event, _reason) => {
         scheduleGeolocationOverride(contents, "debugger-detach");
       });
     } catch {}
