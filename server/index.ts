@@ -467,7 +467,7 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
       sendEvent({ type: "tool_end", toolName: "delegate_task", toolResult: resultText, toolParams: {},
         subAgentName: psa.config.name,
         subAgentMessages: subResult.subState.messages.map((m: any) => ({
-          role: m.role, content: m.content || "", name: m.name, reasoning_content: m.reasoning_content,
+          role: m.role, content: m.content || "", name: m.name, reasoning_content: m.reasoning_content, tool_call_id: m.tool_call_id,
         })),
       } as AgentSseEvent);
       const continueContext = typeof consoleContext === "string" ? consoleContext : "";

@@ -381,7 +381,7 @@ export interface AgentSseEvent {
   /** Whether background=true was set (on permission_required, for /continue). */
   backgroundPerm?: boolean;
   /** Sub-agent message trace (on tool_end for delegate_task). */
-  subAgentMessages?: { role: string; content: string; name?: string; reasoning_content?: string }[];
+  subAgentMessages?: { role: string; content: string; name?: string; reasoning_content?: string; tool_call_id?: string }[];
   /** Sub-agent display name (on tool_end for delegate_task). */
   subAgentName?: string;
   /** When a browser_tool is yielded from within a sub-agent, this is the delegate_task's tool_call_id. */
@@ -3728,7 +3728,11 @@ export async function* agentLoopStream(
   const pendingTodos = state.latestTodos?.filter((t) => t.status !== "completed" && t.status !== "cancelled");
   if (pendingTodos && pendingTodos.length > 0) {
     const pendingList = pendingTodos.map((t) => `  [${t.status}] ${t.text}`).join("\n");
-    state.messages.splice(1, 0, {
+    // Insert right before the current user message so the reminder stays in the
+    // recent context (and survives history compaction), rather than being buried
+    // at the top of the conversation where it can be summarized away.
+    const insertAt = Math.max(0, state.messages.length - 1);
+    state.messages.splice(insertAt, 0, {
       role: "assistant" as const,
       content: `⚠️ You have ${pendingTodos.length} pending task${pendingTodos.length > 1 ? "s" : ""} from your previous session:\n${pendingList}\n\nUse write_todos to continue tracking these.`,
     });
@@ -3811,6 +3815,9 @@ export async function* agentLoopStream(
     const executedTools: { name: string; result: string }[] = [];
     let browserTool: { name: string; id: string; params: Record<string, unknown> } | null = null;
     let browserBreakIdx = -1;
+    // When a delegated sub-agent pauses on a browser tool, carry its parent
+    // delegate_task context so the yielded browser_tool can be nested correctly.
+    let subAgentBrowserContext: { parentToolCallId: string; agentType: string } | null = null;
 
     for (let i = 0; i < finalToolCalls.length; i++) {
       const tc = finalToolCalls[i];
@@ -4151,17 +4158,14 @@ export async function* agentLoopStream(
             parentToolArgs: tc.function.arguments,
             parentReasoning: finalReasoning ?? undefined,
           };
-          yield {
-            type: "browser_tool",
-            toolName: subResult!.toolName,
-            toolParams: subResult!.params,
-            toolCallId: subResult!.toolCallId,
-            sessionId,
-            executedTools,
-            subAgentParentToolCallId: tc.id,
-            agentMarker: agentType,
-          };
-          return;
+          // Pause the main agent through the same browser-tool path used for
+          // top-level browser tools. This lets the bottom block mark any
+          // remaining parallel tool calls (e.g. other delegate_task calls) as
+          // NOT_EXECUTED instead of silently dropping them.
+          browserTool = { name: subResult!.toolName, id: subResult!.toolCallId, params: subResult!.params };
+          browserBreakIdx = i;
+          subAgentBrowserContext = { parentToolCallId: tc.id, agentType };
+          break;
         }
         const resultText = `[${cfg.name}] Completed in ${subResult!.iterations} turns.\n${subResult!.summary}`;
         state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
@@ -4179,6 +4183,7 @@ export async function* agentLoopStream(
             content: m.content || "",
             name: m.name,
             reasoning_content: m.reasoning_content,
+            tool_call_id: m.tool_call_id,
           })),
         };
         executedTools.push({ name: fnName, result: resultText.slice(0, 1000) });
@@ -4220,6 +4225,13 @@ export async function* agentLoopStream(
         toolCallId: browserTool.id,
         sessionId,
         executedTools,
+        ...(subAgentBrowserContext
+          ? {
+              subAgentParentToolCallId: subAgentBrowserContext.parentToolCallId,
+              agentMarker: subAgentBrowserContext.agentType,
+              isSubAgent: true,
+            }
+          : {}),
       };
       return;
     }

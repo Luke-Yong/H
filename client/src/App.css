@@ -1690,27 +1690,24 @@ body.resizing iframe { pointer-events: none; }
 }
 .agent-sub-agent-header:hover { background: rgba(140, 100, 220, 0.26); color: rgba(240, 225, 255, 1); }
 
-/* ── agent-sub-agent-body = a MINIFIED console-list ──
-   Background + text colors now MATCH console-list exactly (no purple tint that
-   was crushing contrast). Left accent border is still purple so the user can
-   see the nesting, but content text uses real var(--text) / full opacity. */
+/* ── agent-sub-agent-body = a MINIFIED console-list container ──
+   Hosts a nested .console-list (the scroll area) plus an
+   .agent-pending-banner scoped to the sub-agent. */
 .agent-sub-agent-body {
   margin: 0;
-  padding: 18px 14px 20px 22px;
+  padding: 0;
   max-height: 760px;
-  overflow-y: auto;
-  overflow-x: hidden;
+  overflow: hidden;
   border-top: 1px solid var(--border);
   background: var(--bg, #1e1e1e);
-  display: flex; flex-direction: column; gap: 12px;
+  display: flex; flex-direction: column;
   color: var(--text);
 }
-/* Keep flex children at their natural size so the sub-agent body scrolls
-   instead of shrinking more elements into the same 760px box. */
-.agent-sub-agent-body > * { flex-shrink: 0; }
-.agent-sub-agent-body::-webkit-scrollbar { width: 8px; }
-.agent-sub-agent-body::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.18); border-radius: 4px; }
-.agent-sub-agent-body::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.3); }
+.agent-sub-agent-body > .agent-pending-banner { flex-shrink: 0; }
+.agent-sub-agent-body > .console-list { flex: 1; min-height: 0; overflow-y: auto; }
+.agent-sub-agent-body > .console-list::-webkit-scrollbar { width: 8px; }
+.agent-sub-agent-body > .console-list::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.18); border-radius: 4px; }
+.agent-sub-agent-body > .console-list::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.3); }
 
 /* State indicator inside sub-agent body (match main state exactly) */
 .agent-state.agent-state-sub-agent {

@@ -35,6 +35,8 @@ interface ConsoleMessage {
     content: string;
     name?: string;
     reasoning_content?: string;
+    /** Tool-call id for tool messages — used to associate a result with its tool call. */
+    tool_call_id?: string;
     /** Transient streaming state — same semantics as ConsoleMessage.state. */
     state?: "thinking" | "generating" | "waiting" | "file_viewing";
     /** Accumulated thought for this sub-agent turn (shown in thought details). */
@@ -336,6 +338,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
           for (let i = 0; i < msg.subAgentMessages.length; i++) {
             if (msg.subAgentMessages[i].role === "tool" || msg.subAgentMessages[i].name) {
               ids.add(`${msg.id}-sa-${i}`);
+              ids.add(`${msg.id}-sa-${i}-code`);
             }
           }
         }
@@ -351,6 +354,8 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
   // Track the local message ID of the most recent delegate_task tool card
   const delegateTaskCardIdRef = useRef<string | null>(null);
   const toolCallMsgIdRef = useRef<Map<string, string>>(new Map());
+  // Paused sub-agent browser tool waiting for the renderer to execute it.
+  const pendingSubAgentBrowserRef = useRef<{ toolName: string; params: Record<string, unknown>; toolCallId: string; parentCardId: string } | null>(null);
   const activeDelegationMarkerRef = useRef<string | null>(null);
   const activeDelegationDepthRef = useRef(0);
   // Live-nest a sub-agent tool event into the current delegate_task card's
@@ -1081,7 +1086,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
   // messages change. Mirrors console-list behavior but simplified (no hysteresis
   // since the scope is small).
   useEffect(() => {
-    const bodies = document.querySelectorAll(".agent-sub-agent-body");
+    const bodies = document.querySelectorAll(".agent-sub-agent-body .console-list");
     const raf = requestAnimationFrame(() => {
       for (const body of bodies) {
         const el = body as HTMLElement;
@@ -1096,11 +1101,14 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
 
   // Safety: if loading is stuck for 5 min with no new messages, force it off.
   // Sub-agents (especially browser with 100 iterations) can run for minutes.
+  // Depend on the full messages array (not just its length) so nested sub-agent
+  // updates keep the timer alive — otherwise a long delegation looks "stuck"
+  // even though the sub-agent is actively streaming into an existing card.
   useEffect(() => {
     if (!loading) return;
     const timer = setTimeout(() => { setLoading(false); setAgentStatus("stopped"); }, 300_000);
     return () => clearTimeout(timer);
-  }, [loading, messages.length]);
+  }, [loading, messages]);
 
   // ── Message helpers ──
 
@@ -1244,6 +1252,10 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
     agentDoneRef.current = false;
     streamToolRef.current = new Map();
     toolCallMsgIdRef.current = new Map();
+    pendingSubAgentBrowserRef.current = null;
+    delegateTaskCardIdRef.current = null;
+    activeDelegationMarkerRef.current = null;
+    activeDelegationDepthRef.current = 0;
     fileChangesRef.current = [];
     pendingFileChangesRef.current = [];
     todosRef.current = [];
@@ -1363,6 +1375,57 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
       seedTodos = extractTodosFromMessagesForServer(current);
       return current;
     });
+
+    // Register a sub-agent browser tool so the outer while-loop can execute it
+    // via the shared browser bridge and then resume the paused sub-agent.
+    const queueSubAgentBrowser = (evt: any) => {
+      const parentId = delegateTaskCardIdRef.current;
+      pendingSubAgentBrowserRef.current = {
+        toolName: String(evt.toolName || ""),
+        params: evt.toolParams || {},
+        toolCallId: String(evt.toolCallId || ""),
+        parentCardId: parentId || "",
+      };
+      if (parentId) {
+        setMessages((prev) => {
+          const next = [...prev];
+          const idx = next.findIndex((m) => m.id === parentId);
+          if (idx >= 0) {
+            const existing = next[idx].subAgentMessages || [];
+            next[idx] = {
+              ...next[idx],
+              subAgentMessages: [...existing, { role: "tool", name: String(evt.toolName || ""), content: `Running ${String(evt.toolName || "").replace(/_/g, " ")}...` }],
+              state: "waiting",
+            };
+          }
+          return next;
+        });
+      }
+    };
+    const completeSubAgentBrowser = (pending: { toolName: string; params: Record<string, unknown>; toolCallId: string; parentCardId: string }, result: string) => {
+      if (!pending.parentCardId) return;
+      setMessages((prev) => {
+        const next = [...prev];
+        const idx = next.findIndex((m) => m.id === pending.parentCardId);
+        if (idx < 0) return prev;
+        const existing = next[idx].subAgentMessages || [];
+        let placeholderDone = false;
+        const updated = existing.map((sm) => {
+          if (!placeholderDone && sm.role === "tool" && sm.name === pending.toolName && typeof sm.content === "string" && sm.content.startsWith("Running ")) {
+            placeholderDone = true;
+            return { ...sm, content: result };
+          }
+          // Clear the waiting state on the matching tool-call entry so the
+          // card stops showing a spinner once the browser action completes.
+          if (sm.role === "assistant" && sm.name === pending.toolName && sm.state === "waiting") {
+            return { ...sm, state: undefined };
+          }
+          return sm;
+        });
+        next[idx] = { ...next[idx], subAgentMessages: updated };
+        return next;
+      });
+    };
 
     try {
       await consumeSSE("/api/chat/agent/stream", { sessionId, message: userMessage, context: fullContext, projectRoot: root, model: selectedModel, latestTodos: seedTodos ?? null }, async (evt) => {
@@ -1485,11 +1548,17 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
             assistantMsgId = nextId();
             pushRaw(assistantMsgId, { role: "assistant", content: currentText, thought: currentThought });
           }
-          if (assistantMsgId) {
+          // Snapshot the message id and refs now. The setMessages updater runs later
+          // (e.g. inside the flushSync below) after these values are cleared, so reading
+          // them inside the updater would drop the todo/file-change state.
+          const flushMsgId = assistantMsgId;
+          const snapshotFileChanges = fileChangesRef.current.length > 0 ? [...fileChangesRef.current] : undefined;
+          const snapshotTodos = todosRef.current.length > 0 ? [...todosRef.current] : undefined;
+          if (flushMsgId) {
             setMessages((prev) => {
               const next = [...prev];
-              const idx = next.findIndex((m) => m.id === assistantMsgId);
-              if (idx >= 0) next[idx] = { ...next[idx], state: undefined, thought: currentThought, content: currentText || next[idx].content, fileChanges: fileChangesRef.current.length > 0 ? [...fileChangesRef.current] : undefined, todos: todosRef.current.length > 0 ? [...todosRef.current] : undefined };
+              const idx = next.findIndex((m) => m.id === flushMsgId);
+              if (idx >= 0) next[idx] = { ...next[idx], state: undefined, thought: currentThought, content: currentText || next[idx].content, fileChanges: snapshotFileChanges, todos: snapshotTodos };
               return next;
             });
             assistantMsgId = null;
@@ -1693,6 +1762,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
                 for (let i = 0; i < saMessages.length; i++) {
                   if (saMessages[i].role === "tool" || saMessages[i].name) {
                     next.add(`${id}-sa-${i}`);
+                    next.add(`${id}-sa-${i}-code`);
                   }
                 }
                 return next;
@@ -1742,20 +1812,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
           toolCallId = evt.toolCallId || "";
           // If this browser tool belongs to a sub-agent, nest it under the delegate_task card
           if ((evt as any).subAgentParentToolCallId && delegateTaskCardIdRef.current) {
-            const parentId = delegateTaskCardIdRef.current;
-            setMessages((prev) => {
-              const next = [...prev];
-              const idx = next.findIndex((m) => m.id === parentId);
-              if (idx >= 0) {
-                const existing = next[idx].subAgentMessages || [];
-                next[idx] = {
-                  ...next[idx],
-                  subAgentMessages: [...existing, { role: "tool", name: evt.toolName, content: `Running ${(evt.toolName || "").replace(/_/g, " ")}...` }],
-                  state: undefined,
-                };
-              }
-              return next;
-            });
+            queueSubAgentBrowser(evt);
             return false;
           }
           // Show the browser tool being executed
@@ -1955,11 +2012,17 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
             assistantMsgId = nextId();
             pushRaw(assistantMsgId, { role: "assistant", content: currentText, thought: currentThought });
           }
-          if (assistantMsgId) {
+          // Snapshot the message id and refs now. The setMessages updater runs later
+          // (e.g. inside the flushSync below) after these values are cleared, so reading
+          // them inside the updater would drop the todo/file-change state.
+          const flushMsgId = assistantMsgId;
+          const snapshotFileChanges = fileChangesRef.current.length > 0 ? [...fileChangesRef.current] : undefined;
+          const snapshotTodos = todosRef.current.length > 0 ? [...todosRef.current] : undefined;
+          if (flushMsgId) {
             setMessages((prev) => {
               const next = [...prev];
-              const idx = next.findIndex((m) => m.id === assistantMsgId);
-              if (idx >= 0) next[idx] = { ...next[idx], state: undefined, thought: currentThought, content: currentText || next[idx].content, fileChanges: fileChangesRef.current.length > 0 ? [...fileChangesRef.current] : undefined, todos: todosRef.current.length > 0 ? [...todosRef.current] : undefined };
+              const idx = next.findIndex((m) => m.id === flushMsgId);
+              if (idx >= 0) next[idx] = { ...next[idx], state: undefined, thought: currentThought, content: currentText || next[idx].content, fileChanges: snapshotFileChanges, todos: snapshotTodos };
               return next;
             });
             assistantMsgId = null;
@@ -2161,6 +2224,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
                 for (let i = 0; i < saMessages2.length; i++) {
                   if (saMessages2[i].role === "tool" || saMessages2[i].name) {
                     next.add(`${id}-sa-${i}`);
+                    next.add(`${id}-sa-${i}-code`);
                   }
                 }
                 return next;
@@ -2297,20 +2361,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
           toolCallId = evt.toolCallId || "";
           // If this browser tool belongs to a sub-agent, nest it under the delegate_task card
           if ((evt as any).subAgentParentToolCallId && delegateTaskCardIdRef.current) {
-            const parentId = delegateTaskCardIdRef.current;
-            setMessages((prev) => {
-              const next = [...prev];
-              const idx = next.findIndex((m) => m.id === parentId);
-              if (idx >= 0) {
-                const existing = next[idx].subAgentMessages || [];
-                next[idx] = {
-                  ...next[idx],
-                  subAgentMessages: [...existing, { role: "tool", name: evt.toolName, content: `Running ${(evt.toolName || "").replace(/_/g, " ")}...` }],
-                  state: undefined,
-                };
-              }
-              return next;
-            });
+            queueSubAgentBrowser(evt);
             return false;
           }
           if (assistantMsgId) {
@@ -2588,30 +2639,47 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
       // Only process browser tools here.  File tools (rename_file, write_file,
       // etc.) are handled by acceptFile → continueDeferredRef — don't try to
       // execute them via executeBrowserAction.
-      const lastToolId = toolCallId ? toolCallMsgIdRef.current.get(toolCallId) || toolIds[toolIds.length - 1] : toolIds[toolIds.length - 1];
-      const toolData = lastToolId ? streamToolRef.current.get(lastToolId) : undefined;
-      const isBrowser = toolData?.name?.startsWith("browser_");
-      if (isBrowser) {
+      const pendingSubBrowser = pendingSubAgentBrowserRef.current as { toolName: string; params: Record<string, unknown>; toolCallId: string; parentCardId: string } | null;
+      if (pendingSubBrowser && pendingSubBrowser.toolCallId === toolCallId) {
+        // Browser tool issued by a paused sub-agent: execute it in the shared
+        // browser bridge, then resume the sub-agent with the same toolCallId.
         let toolResult = "Tool not available.";
         if (executeBrowserAction) {
-          toolResult = await executeBrowserAction(toolData!.name, toolData!.params || {});
+          toolResult = await executeBrowserAction(pendingSubBrowser.toolName, pendingSubBrowser.params || {});
         }
-        if (lastToolId) {
-          setMessages((prev) => {
-            const next = [...prev];
-            const idx = next.findIndex((m) => m.id === lastToolId);
-            if (idx >= 0) next[idx] = { ...next[idx], content: toolResult, state: undefined };
-            return next;
-          });
-        }
+        completeSubAgentBrowser(pendingSubBrowser, toolResult);
+        pendingSubAgentBrowserRef.current = null;
         if (!signal.aborted) {
           await continueStreaming({ sessionId, toolCallId, toolResult, model: selectedModel, thinking: isThinking, consoleContext: getConsoleContext?.() || "" });
         } else {
           agentDoneRef.current = true;
         }
       } else {
-        // Not a browser tool — nothing to process in this loop.
-        agentDoneRef.current = true;
+        const lastToolId = toolCallId ? toolCallMsgIdRef.current.get(toolCallId) || toolIds[toolIds.length - 1] : toolIds[toolIds.length - 1];
+        const toolData = lastToolId ? streamToolRef.current.get(lastToolId) : undefined;
+        const isBrowser = toolData?.name?.startsWith("browser_");
+        if (isBrowser) {
+          let toolResult = "Tool not available.";
+          if (executeBrowserAction) {
+            toolResult = await executeBrowserAction(toolData!.name, toolData!.params || {});
+          }
+          if (lastToolId) {
+            setMessages((prev) => {
+              const next = [...prev];
+              const idx = next.findIndex((m) => m.id === lastToolId);
+              if (idx >= 0) next[idx] = { ...next[idx], content: toolResult, state: undefined };
+              return next;
+            });
+          }
+          if (!signal.aborted) {
+            await continueStreaming({ sessionId, toolCallId, toolResult, model: selectedModel, thinking: isThinking, consoleContext: getConsoleContext?.() || "" });
+          } else {
+            agentDoneRef.current = true;
+          }
+        } else {
+          // Not a browser tool — nothing to process in this loop.
+          agentDoneRef.current = true;
+        }
       }
     }
     }
@@ -3366,7 +3434,7 @@ function TodoCard({ todos, locked }: { todos: TodoItem[]; locked?: boolean }) {
 }
 
 const iconForRole = (r: string) => r === "user" ? "account" : r === "assistant" ? "sparkle" : r === "tool" ? "tools" : "info";
-const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Generating...", waiting: "Wait a moment...", file_viewing: "Reading file..." } as Record<string, string>)[s] || "";
+const stateLabel = (s: string) => ({ thinking: "Thinking...", generating: "Generating...", waiting: "Wait a moment...", file_viewing: "Reading file...", pending_subagent: "Pending sub agent..." } as Record<string, string>)[s] || "";
 const getCacheSummary = (usage: UsageStats | null | undefined) => {
   const hit = usage?.promptCacheHitTokens ?? 0;
   const miss = usage?.promptCacheMissTokens ?? 0;
@@ -3419,13 +3487,522 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
     let msgId: string | null = null;
     for (let i = safeMessages.length - 1; i >= 0; i--) {
       const m = safeMessages[i];
-      if (m.state) { state = m.state; msgId = m.id; break; }
+      if (m.state) {
+        // A running delegate_task means the main agent is waiting on a
+        // sub-agent, not just "waiting" on a regular tool card.
+        state = m.role === "tool" && m.toolName === "delegate_task" && m.state === "waiting"
+          ? "pending_subagent"
+          : m.state;
+        msgId = m.id;
+        break;
+      }
     }
     return { state, msgId };
   }, [safeMessages]);
 
   const lastGroupIsUserOnly = messageGroups.length > 0
     && messageGroups[messageGroups.length - 1].items.every((m) => m.role === "user");
+
+  const renderAgentMessage = (msg: ConsoleMessage, marker: string): JSX.Element => {
+    return (
+      <div key={msg.id} className={`agent-msg agent-msg-${msg.role}${msg.isWarning ? " agent-msg-warning" : ""}`}>
+        {msg.viewingFile && (
+          <div key={`${msg.id}-view`} className="agent-file-view"><i className="codicon codicon-eye" /> {msg.viewingFile}</div>
+        )}
+        {/* Sandbox only shown inside tool card for tool messages; standalone for non-tool */}
+        {msg.role !== "tool" && msg.sandboxOutput && (
+          <div key={`${msg.id}-term`} className="agent-terminal">
+            <div className="agent-terminal-header">
+              <i className="codicon codicon-terminal" />
+              <span className="agent-terminal-cwd" title={projectPath}>{projectPath || "~"}</span>
+              <span className="agent-terminal-label">terminal</span>
+              <i className="codicon codicon-check agent-terminal-done" />
+            </div>
+            <pre className="agent-terminal-out">{msg.sandboxOutput}</pre>
+          </div>
+        )}
+        {msg.permissionPrompt && msg.role !== "tool" && (
+          <div key={`${msg.id}-perm`} className="agent-perms">
+            <i className="codicon codicon-warning" />
+            <span>{msg.permissionPrompt}</span>
+            <div className="agent-perms-actions">
+              <button className="agent-btn agent-btn-accept" onClick={(e) => { e.stopPropagation(); handlePermissionResponse(msg.id, true); }}>Allow</button>
+              <button className="agent-btn agent-btn-reject" onClick={(e) => { e.stopPropagation(); handlePermissionResponse(msg.id, false); }}>Deny</button>
+            </div>
+          </div>
+        )}
+        {msg.pendingDiff && (
+          <div key={`${msg.id}-diff`} className="agent-diff">
+            <div className="agent-diff-header">
+              <i className="codicon codicon-diff" /> <code>{msg.pendingDiff.path}</code>
+              <span className="agent-diff-summary">{msg.pendingDiff.content.split("\n").length} lines</span>
+            </div>
+            <pre className="agent-diff-preview">{msg.pendingDiff.content.slice(0, 2000)}</pre>
+            <div className="agent-diff-actions">
+              <button className="agent-btn agent-btn-accept" onClick={() => acceptDiff(msg)}><i className="codicon codicon-check" /> Accept</button>
+              <button className="agent-btn agent-btn-reject" onClick={() => rejectDiff(msg)}><i className="codicon codicon-close" /> Reject</button>
+            </div>
+          </div>
+        )}
+        {/* Todo list */}
+        {msg.todos && msg.todos.length > 0 && <TodoCard key={`${msg.id}-todos`} todos={msg.todos} />}
+        {msg.thought && (
+          <details key={`${msg.id}-thought`} className="agent-thought" open={msg.state === "thinking"}>
+            <summary className="agent-thought-summary">
+              <i className="codicon codicon-lightbulb" /> {msg.state === "thinking" ? "Thinking..." : "Thought process"}
+            </summary>
+            <div className="agent-thought-body">{msg.thought}</div>
+          </details>
+        )}
+        {/* Tool execution card */}
+        {msg.role === "tool" && msg.toolName && (
+          <div key={`${msg.id}-tool`} className={`agent-tool-card agent-tool-card-${msg.agentMarker || "main"}${msg.state === "waiting" ? " streaming" : ""}`}>
+            <div className="agent-tool-card-header">
+              {msg.state === "waiting" ? <span className="agent-spinner" /> : <i className="codicon codicon-check" />}
+              <i className={`codicon codicon-${msg.toolName === "delegate_task" ? "hubot" : msg.toolName.startsWith("browser_") ? "globe" : msg.toolName === "run_in_terminal" ? "terminal" : msg.toolName === "read_file" ? "file-code" : msg.toolName === "grep" ? "search" : msg.toolName === "list_files" || msg.toolName === "search_files" ? "folder-opened" : "tools"}`} />
+              {(() => {
+                const FILE_CARD_TOOLS = ["write_file", "edit_file", "delete_file", "rename_file"];
+                if (FILE_CARD_TOOLS.includes(msg.toolName)) {
+                  const fp = String(msg.toolParams?.path || msg.toolParams?.oldPath || "");
+                  const tkn = msg.tokenCount ?? 0;
+                  return (
+                    <>
+                      <span className="agent-tool-card-name">{msg.toolName.replace(/_/g, " ")}</span>
+                      <span className="agent-tool-card-file">{truncPath(fp)}</span>
+                      {tkn > 0 && (
+                        <span className="agent-tool-card-tokens"><i className="codicon codicon-arrow-down" />{tkn}</span>
+                      )}
+                      {msg.subAgentName && <span className="agent-tool-card-label">sub-agent</span>}
+                    </>
+                  );
+                }
+                return (
+                  <>
+                    <span className="agent-tool-card-name">{msg.toolName.replace("browser_", "").replace(/_/g, " ")}</span>
+                    {msg.toolName === "delegate_task" && <span className="agent-tool-card-label">sub-agent</span>}
+                    {msg.subAgentName && msg.toolName !== "delegate_task" && <span className="agent-tool-card-label">sub-agent</span>}
+                    {msg.toolName === "run_in_terminal" && <span className="agent-tool-card-label">terminal</span>}
+                    {msg.toolName === "run_command" && <span className="agent-tool-card-label">sandbox</span>}
+                    {msg.toolParams && msg.toolName !== "run_in_terminal" && msg.toolName !== "run_command" && (
+                      <span className="agent-tool-card-args">
+                        {Object.entries(msg.toolParams)
+                          .filter(([k]) => msg.toolName === "delegate_task" ? k !== "task" : true)
+                          .map(([k, v]) => (
+                            <span key={k}>{k}: {String(v).slice(0, 60)}</span>
+                          ))}
+                      </span>
+                    )}
+                  </>
+                );
+              })()}
+            </div>
+            {/* ── Sub-agent container inside tool card ── */}
+            {msg.toolName === "delegate_task" && msg.subAgentMessages && msg.subAgentMessages.length > 0 && (
+              <div className="agent-sub-agent">
+                <div className="agent-sub-agent-header"
+                  onClick={() => setExpandedSubAgents((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(msg.id)) next.delete(msg.id); else next.add(msg.id);
+                    return next;
+                  })}>
+                  <i className={`codicon codicon-${expandedSubAgents.has(msg.id) ? "chevron-down" : "chevron-right"}`} />
+                  <span>{msg.subAgentName || "Sub-agent"} ({msg.subAgentMessages.length} messages)</span>
+                </div>
+                {expandedSubAgents.has(msg.id) && (
+                  <div className="agent-sub-agent-body" data-sub-agent-body={msg.id}>
+                    {(() => {
+                      const subMarker = (msg.subAgentName as string) || (msg.agentMarker as string) || "code-writer";
+                      const list = msg.subAgentMessages!;
+                      let subLatestTodosRaw: RawTodo[] = [];
+                      for (const sam of list) {
+                        if (sam?.name === "write_todos") {
+                          const parsed = parseWriteTodosContent(sam.content);
+                          if (parsed) {
+                            subLatestTodosRaw = normalizeTodos(parsed, subMarker);
+                          }
+                        }
+                      }
+                      const subPendingTodos = filterPending(subLatestTodosRaw);
+                      return (
+                        <>
+                          {subPendingTodos.length > 0 && (
+                            <div className="agent-pending-banner agent-pending-banner-sub" data-agent-marker={subMarker}>
+                              <details
+                                className="agent-pending-todos agent-pending-todos-sub"
+                                open
+                              >
+                                <summary className="agent-pending-summary agent-pending-summary-sub">
+                                  <i className="codicon codicon-checklist" />
+                                  <span className="agent-pending-count">
+                                    {subPendingTodos.length} pending sub-task{subPendingTodos.length > 1 ? "s" : ""}
+                                  </span>
+                                </summary>
+                                <div className="agent-pending-list agent-pending-list-sub">
+                                  {subPendingTodos.map((t) => (
+                                    <div key={t.id} className={`agent-todo-item ${t.status}`}>
+                                      <i className={`codicon codicon-${t.status === "in_progress" ? "loading" : "circle-outline"}`} />
+                                      <span className="agent-todo-text">{t.text}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </details>
+                            </div>
+                          )}
+                          <div className="console-list" data-agent-marker={subMarker}>
+                            {subAgentMessagesToConsoleMessages(msg.subAgentMessages!, msg.id, subMarker).map((m) => renderAgentMessage(m, subMarker))}
+                          </div>
+                        </>
+                      );
+                    })()}
+                  </div>
+                )}
+              </div>
+            )}
+            {/* ── Accept/reject for file tools ── */}
+            {(() => {
+              const FILE_TOOLS = ["edit_file"];
+              if (marker !== "main") return null;
+              if (!FILE_TOOLS.includes(msg.toolName) || msg.state === "waiting") return null;
+              const fp = String(msg.toolParams?.path || msg.toolParams?.oldPath || "");
+              // Check if already resolved
+              let isResolved = false;
+              let isAccepted = false;
+              for (const mmm of messages) {
+                if (mmm.fileChanges) {
+                  for (const fcc of mmm.fileChanges) {
+                    if (fcc.path === fp && (fcc.accepted || fcc.rejected)) {
+                      isResolved = true;
+                      isAccepted = !!fcc.accepted;
+                      break;
+                    }
+                  }
+                  if (isResolved) break;
+                }
+              }
+              if (isResolved) {
+                const label = isAccepted ? "Applied" : "Dismissed";
+                return (
+                  <div className="agent-tool-card-actions">
+                    <span className="agent-tool-card-action-label">{label}</span>
+                  </div>
+                );
+              }
+              return (
+                <div className="agent-tool-card-actions">
+                  <button className="agent-btn agent-btn-accept" onClick={(e) => { e.stopPropagation(); handleToolCardAccept(fp); }} title="Accept">
+                    <i className="codicon codicon-check" /> Accept
+                  </button>
+                  <button className="agent-btn agent-btn-reject" onClick={(e) => { e.stopPropagation(); handleToolCardReject(fp); }} title="Reject">
+                    <i className="codicon codicon-close" /> Reject
+                  </button>
+                </div>
+              );
+            })()}
+            {/* ── Terminal block for run_in_terminal ── */}
+            {msg.toolName === "run_in_terminal" && (
+              <div className="agent-terminal">
+                <div className="agent-terminal-header">
+                  <i className="codicon codicon-terminal" />
+                  <span className="agent-terminal-cwd" title={projectPath}>{projectPath || "~"}</span>
+                  {msg.permissionPrompt ? (
+                    <i className="codicon codicon-warning agent-terminal-warn" />
+                  ) : msg.state === "waiting" ? (
+                    <span className="agent-spinner agent-terminal-spinner" />
+                  ) : (
+                    <i className="codicon codicon-check agent-terminal-done" />
+                  )}
+                </div>
+                <div className="agent-terminal-cmdline">
+                  <span className="agent-terminal-prompt">$</span>
+                  <span className="agent-terminal-cmd">{String(msg.toolParams?.command ?? "")}</span>
+                </div>
+                {msg.sandboxOutput != null && (
+                  <>
+                    {!collapsedOutputs.has(msg.id) ? (
+                      <div className="agent-output-expanded">
+                        <div
+                          className="agent-output-collapse-bar"
+                          onClick={() => {
+                            if (msg.state !== "waiting") {
+                              setCollapsedOutputs((prev) => { const next = new Set(prev); next.add(msg.id); return next; });
+                            }
+                          }}
+                        >
+                          <span>Output ({msg.sandboxOutput.split("\n").length} lines)</span>
+                          <i className="codicon codicon-chevron-up" />
+                        </div>
+                        <pre className="agent-terminal-out">{msg.sandboxOutput}</pre>
+                      </div>
+                    ) : (
+                      <div
+                        className="agent-terminal-out-collapsed"
+                        onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.delete(msg.id); return next; })}
+                      >
+                        <i className="codicon codicon-chevron-right" />
+                        <span>Output ({msg.sandboxOutput.split("\n").length} lines)</span>
+                      </div>
+                    )}
+                  </>
+                )}
+                {/* Permission prompt at the bottom of the terminal body */}
+                {msg.permissionPrompt && (
+                  <div className="agent-terminal-perms">
+                    <i className="codicon codicon-warning" />
+                    <span>{msg.permissionPrompt}</span>
+                    <div className="agent-perms-actions">
+                      <button className="agent-btn agent-btn-accept" onClick={(e) => { e.stopPropagation(); handlePermissionResponse(msg.id, true); }}>Allow</button>
+                      <button className="agent-btn agent-btn-reject" onClick={(e) => { e.stopPropagation(); handlePermissionResponse(msg.id, false); }}>Deny</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+            {/* ── Sandbox terminal block for run_command ── */}
+            {msg.toolName === "run_command" && (
+              <div className="agent-terminal">
+                <div className="agent-terminal-header">
+                  <i className="codicon codicon-terminal" />
+                  <span className="agent-terminal-cwd" title={projectPath}>{projectPath || "~"}</span>
+                  {msg.state === "waiting" ? (
+                    <span className="agent-spinner agent-terminal-spinner" />
+                  ) : (
+                    <i className="codicon codicon-check agent-terminal-done" />
+                  )}
+                </div>
+                {msg.toolParams && "command" in msg.toolParams && (
+                  <div className="agent-terminal-cmdline">
+                    <span className="agent-terminal-prompt">$</span>
+                    <span className="agent-terminal-cmd">{String(msg.toolParams.command ?? "")}</span>
+                  </div>
+                )}
+                {msg.sandboxOutput != null && (
+                  <>
+                    {!collapsedOutputs.has(msg.id) ? (
+                      <div className="agent-output-expanded">
+                        <div
+                          className="agent-output-collapse-bar"
+                          onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.add(msg.id); return next; })}
+                        >
+                          <span>Output ({msg.sandboxOutput.split("\n").length} lines)</span>
+                          <i className="codicon codicon-chevron-up" />
+                        </div>
+                        <pre className="agent-terminal-out">{msg.sandboxOutput}</pre>
+                      </div>
+                    ) : (
+                      <div
+                        className="agent-terminal-out-collapsed"
+                        onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.delete(msg.id); return next; })}
+                      >
+                        <i className="codicon codicon-chevron-right" />
+                        <span>Output ({msg.sandboxOutput.split("\n").length} lines)</span>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+            {/* ── Sandbox output for other non-terminal tools ── */}
+            {msg.toolName !== "run_in_terminal" && msg.toolName !== "run_command" && msg.sandboxOutput && (
+              <div className="agent-terminal">
+                <div className="agent-terminal-header">
+                  <i className="codicon codicon-terminal" />
+                  <span className="agent-terminal-cwd" title={projectPath}>{projectPath || "~"}</span>
+                  {msg.state === "waiting" ? (
+                    <span className="agent-spinner agent-terminal-spinner" />
+                  ) : (
+                    <i className="codicon codicon-check agent-terminal-done" />
+                  )}
+                </div>
+                {!collapsedOutputs.has(msg.id) ? (
+                  <div className="agent-output-expanded">
+                    <div
+                      className="agent-output-collapse-bar"
+                      onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.add(msg.id); return next; })}
+                    >
+                      <span>Output ({msg.sandboxOutput.split("\n").length} lines)</span>
+                      <i className="codicon codicon-chevron-up" />
+                    </div>
+                    <pre className="agent-terminal-out">{msg.sandboxOutput}</pre>
+                  </div>
+                ) : (
+                  <div
+                    className="agent-terminal-out-collapsed"
+                    onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.delete(msg.id); return next; })}
+                  >
+                    <i className="codicon codicon-chevron-right" />
+                    <span>Output ({msg.sandboxOutput.split("\n").length} lines)</span>
+                  </div>
+                )}
+              </div>
+            )}
+            {msg.content && !msg.sandboxOutput && msg.toolName !== "run_in_terminal" && (
+              <>
+                {!collapsedOutputs.has(`${msg.id}-code`) ? (
+                  <div className="agent-output-expanded">
+                    <div
+                      className="agent-output-collapse-bar"
+                      onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.add(`${msg.id}-code`); return next; })}
+                    >
+                      <span>Code ({String(msg.content || "").split("\n").length} lines)</span>
+                      <i className="codicon codicon-chevron-up" />
+                    </div>
+                    <pre className="agent-code">{formatToolContent(msg.content)}</pre>
+                  </div>
+                ) : (
+                  <div
+                    className="agent-terminal-out-collapsed"
+                    onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.delete(`${msg.id}-code`); return next; })}
+                  >
+                    <i className="codicon codicon-chevron-right" />
+                    <span>Result ({msg.content.split("\n").length} lines)</span>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+        {/* Fallback for tool msgs without tool-card */}
+        {msg.role === "tool" && !msg.toolName && msg.content && (
+          <pre key={`${msg.id}-tool-fb`} className="agent-code">{formatToolContent(msg.content)}</pre>
+        )}
+        {msg.role !== "tool" && msg.content && (
+          <div key={`${msg.id}-body`} className="agent-body">
+            <span className="agent-role-icon"><i className={`codicon codicon-${iconForRole(msg.role)}`} /></span>
+            <div className="agent-content">
+              <div className="agent-text">
+                {msg.role === "user"
+                  ? <CollapsedCode text={msg.content} msgId={msg.id} />
+                  : msg.role === "assistant"
+                    ? <MarkdownPreview text={msg.content} msgId={msg.id} />
+                    : msg.content}
+              </div>
+              {msg.role === "user" && marker === "main" && (
+                <div className="agent-msg-actions">
+                  <button className="agent-icon-btn" title="Copy" onClick={() => copyText(msg.content)}><i className="codicon codicon-copy" /></button>
+                  <button className="agent-icon-btn" title="Delete" onClick={() => handleActionClick(() => removeMessage(msg.id))}><i className="codicon codicon-trash" /></button>
+                  <button className="agent-icon-btn" title="Revert to before this message" onClick={() => handleActionClick(() => revertToPreRound(msg.id))}><i className="codicon codicon-discard" /></button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const subAgentMessagesToConsoleMessages = (
+    sub: NonNullable<ConsoleMessage["subAgentMessages"]>,
+    parentId: string,
+    subMarker: string,
+  ): ConsoleMessage[] => {
+    const out: ConsoleMessage[] = [];
+    for (let i = 0; i < sub.length; i++) {
+      const m = sub[i];
+      const id = `${parentId}-sa-${i}`;
+      if (m.role === "assistant" && m.name) {
+        let argsObj: any = undefined;
+        let toolCallId: string | undefined;
+        try {
+          const arr = JSON.parse(m.content);
+          if (Array.isArray(arr) && arr.length > 0) {
+            toolCallId = arr[0]?.id ? String(arr[0].id) : undefined;
+            if (arr[0]?.function?.arguments) {
+              const rawArgs = arr[0].function.arguments;
+              argsObj = typeof rawArgs === "string" ? JSON.parse(rawArgs) : rawArgs;
+            }
+          }
+        } catch {
+          argsObj = undefined;
+        }
+        const toolParams = argsObj && typeof argsObj === "object"
+          ? (argsObj as Record<string, unknown>)
+          : undefined;
+        let todos: TodoItem[] | undefined;
+        if (m.name === "write_todos" && argsObj && Array.isArray(argsObj.todos)) {
+          todos = argsObj.todos.map((t: any): TodoItem => ({
+            id: String(t?.id || ""),
+            text: String(t?.text || ""),
+            status: (["pending", "in_progress", "completed", "cancelled"].includes(String(t?.status))
+              ? String(t?.status)
+              : "pending") as TodoItem["status"],
+          }));
+        }
+        out.push({
+          id,
+          role: "tool",
+          toolName: m.name,
+          toolParams,
+          toolCallId,
+          content: "",
+          when: 0,
+          state: m.state,
+          thought: m.thought,
+          agentMarker: subMarker,
+          todos,
+        });
+        continue;
+      }
+      if (m.role === "assistant") {
+        out.push({ id, role: "assistant", content: m.content || "", when: 0, state: m.state, thought: m.thought, agentMarker: subMarker });
+        continue;
+      }
+      if (m.role === "tool") {
+        const resultId = m.tool_call_id ? String(m.tool_call_id) : undefined;
+        // Match the result to the tool call it belongs to (by toolCallId when
+        // available) so the result card shows the correct tool name instead of
+        // whatever happens to be the previous card.
+        let target: ConsoleMessage | undefined;
+        if (resultId) {
+          for (let j = out.length - 1; j >= 0; j--) {
+            const c = out[j];
+            if (c.role === "tool" && c.toolName && c.toolCallId === resultId) {
+              target = c;
+              break;
+            }
+          }
+        }
+        if (!target) {
+          const prev = out[out.length - 1];
+          if (prev && prev.role === "tool" && prev.toolName) target = prev;
+        }
+        // Live browser placeholders from queueSubAgentBrowser carry a name but
+        // no tool_call_id. Prefer that name so each browser step keeps its own
+        // card instead of inheriting the previous card's name.
+        const toolName = m.name || target?.toolName;
+        const toolParams = target?.toolParams;
+        if (toolName === "write_todos") continue;
+        if (toolName === "run_command" || toolName === "run_in_terminal") {
+          if (target) target.sandboxOutput = m.content || "";
+          continue;
+        }
+        // Render the tool result as its own agent-msg-tool with an
+        // agent-tool-card (like the main agent) instead of a bare agent-code.
+        if (toolName) {
+          out.push({
+            id,
+            role: "tool",
+            toolName,
+            toolParams,
+            toolCallId: resultId,
+            content: m.content || "",
+            when: 0,
+            agentMarker: subMarker,
+          });
+          continue;
+        }
+        out.push({ id, role: "tool", content: m.content || "", when: 0, agentMarker: subMarker });
+        continue;
+      }
+      out.push({
+        id,
+        role: m.role === "user" ? "user" : "assistant",
+        content: m.content || "",
+        when: 0,
+        agentMarker: subMarker,
+      });
+    }
+    return out;
+  };
 
   return (
     <div className="console-panel">
@@ -3463,7 +4040,7 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
       )}
 
       {/* ── Messages ── */}
-      <div className="console-list" ref={consoleListRef}>
+      <div className="console-list" ref={consoleListRef} data-agent-marker="main">
         {safeMessages.length === 0 && (
           <div className="agent-empty">Ask anything — DeepSeek can write code, debug, browse the web, run commands, and manage files.</div>
         )}
@@ -3472,624 +4049,7 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
            const hasAssistant = group.items.some((m) => m.role !== "user");
            return (
               <div key={group.key}>
-              {group.items.map((msg) => (
-                <div key={msg.id} className={`agent-msg agent-msg-${msg.role}${msg.isWarning ? " agent-msg-warning" : ""}`}>
-            {msg.viewingFile && (
-              <div key={`${msg.id}-view`} className="agent-file-view"><i className="codicon codicon-eye" /> {msg.viewingFile}</div>
-            )}
-            {/* Sandbox only shown inside tool card for tool messages; standalone for non-tool */}
-            {msg.role !== "tool" && msg.sandboxOutput && (
-              <div key={`${msg.id}-term`} className="agent-terminal">
-                <div className="agent-terminal-header">
-                  <i className="codicon codicon-terminal" />
-                  <span className="agent-terminal-cwd" title={projectPath}>{projectPath || "~"}</span>
-                  <span className="agent-terminal-label">terminal</span>
-                  <i className="codicon codicon-check agent-terminal-done" />
-                </div>
-                <pre className="agent-terminal-out">{msg.sandboxOutput}</pre>
-              </div>
-            )}
-            {msg.permissionPrompt && msg.role !== "tool" && (
-              <div key={`${msg.id}-perm`} className="agent-perms">
-                <i className="codicon codicon-warning" />
-                <span>{msg.permissionPrompt}</span>
-                <div className="agent-perms-actions">
-                  <button className="agent-btn agent-btn-accept" onClick={(e) => { e.stopPropagation(); handlePermissionResponse(msg.id, true); }}>Allow</button>
-                  <button className="agent-btn agent-btn-reject" onClick={(e) => { e.stopPropagation(); handlePermissionResponse(msg.id, false); }}>Deny</button>
-                </div>
-              </div>
-            )}
-            {msg.pendingDiff && (
-              <div key={`${msg.id}-diff`} className="agent-diff">
-                <div className="agent-diff-header">
-                  <i className="codicon codicon-diff" /> <code>{msg.pendingDiff.path}</code>
-                  <span className="agent-diff-summary">{msg.pendingDiff.content.split("\n").length} lines</span>
-                </div>
-                <pre className="agent-diff-preview">{msg.pendingDiff.content.slice(0, 2000)}</pre>
-                <div className="agent-diff-actions">
-                  <button className="agent-btn agent-btn-accept" onClick={() => acceptDiff(msg)}><i className="codicon codicon-check" /> Accept</button>
-                  <button className="agent-btn agent-btn-reject" onClick={() => rejectDiff(msg)}><i className="codicon codicon-close" /> Reject</button>
-                </div>
-              </div>
-            )}
-            {/* Todo list */}
-            {msg.todos && msg.todos.length > 0 && <TodoCard key={`${msg.id}-todos`} todos={msg.todos} />}
-            {msg.thought && (
-              <details key={`${msg.id}-thought`} className="agent-thought" open={msg.state === "thinking"}>
-                <summary className="agent-thought-summary">
-                  <i className="codicon codicon-lightbulb" /> {msg.state === "thinking" ? "Thinking..." : "Thought process"}
-                </summary>
-                <div className="agent-thought-body">{msg.thought}</div>
-              </details>
-            )}
-            {/* Tool execution card */}
-            {msg.role === "tool" && msg.toolName && (
-              <div key={`${msg.id}-tool`} className={`agent-tool-card agent-tool-card-${msg.agentMarker || "main"}${msg.state === "waiting" ? " streaming" : ""}`}>
-                <div className="agent-tool-card-header">
-                  {msg.state === "waiting" ? <span className="agent-spinner" /> : <i className="codicon codicon-check" />}
-                  <i className={`codicon codicon-${msg.toolName === "delegate_task" ? "hubot" : msg.toolName.startsWith("browser_") ? "globe" : msg.toolName === "run_in_terminal" ? "terminal" : msg.toolName === "read_file" ? "file-code" : msg.toolName === "grep" ? "search" : msg.toolName === "list_files" || msg.toolName === "search_files" ? "folder-opened" : "tools"}`} />
-                  {(() => {
-                    const FILE_CARD_TOOLS = ["write_file", "edit_file", "delete_file", "rename_file"];
-                    if (FILE_CARD_TOOLS.includes(msg.toolName)) {
-                      const fp = String(msg.toolParams?.path || msg.toolParams?.oldPath || "");
-                      const tkn = msg.tokenCount ?? 0;
-                      return (
-                        <>
-                          <span className="agent-tool-card-name">{msg.toolName.replace(/_/g, " ")}</span>
-                          <span className="agent-tool-card-file">{truncPath(fp)}</span>
-                          {tkn > 0 && (
-                            <span className="agent-tool-card-tokens"><i className="codicon codicon-arrow-down" />{tkn}</span>
-                          )}
-                          {msg.subAgentName && <span className="agent-tool-card-label">sub-agent</span>}
-                        </>
-                      );
-                    }
-                    return (
-                      <>
-                        <span className="agent-tool-card-name">{msg.toolName.replace("browser_", "").replace(/_/g, " ")}</span>
-                        {msg.toolName === "delegate_task" && <span className="agent-tool-card-label">sub-agent</span>}
-                        {msg.subAgentName && msg.toolName !== "delegate_task" && <span className="agent-tool-card-label">sub-agent</span>}
-                        {msg.toolName === "run_in_terminal" && <span className="agent-tool-card-label">terminal</span>}
-                        {msg.toolName === "run_command" && <span className="agent-tool-card-label">sandbox</span>}
-                        {msg.toolParams && msg.toolName !== "run_in_terminal" && msg.toolName !== "run_command" && (
-                          <span className="agent-tool-card-args">
-                            {Object.entries(msg.toolParams)
-                              .filter(([k]) => msg.toolName === "delegate_task" ? k !== "task" : true)
-                              .map(([k, v]) => (
-                                <span key={k}>{k}: {String(v).slice(0, 60)}</span>
-                              ))}
-                          </span>
-                        )}
-                      </>
-                    );
-                  })()}
-                </div>
-                {/* ── Sub-agent container inside tool card ── */}
-                {msg.toolName === "delegate_task" && msg.subAgentMessages && msg.subAgentMessages.length > 0 && (
-                  <div className="agent-sub-agent">
-                    <div className="agent-sub-agent-header"
-                      onClick={() => setExpandedSubAgents((prev) => {
-                        const next = new Set(prev);
-                        if (next.has(msg.id)) next.delete(msg.id); else next.add(msg.id);
-                        return next;
-                      })}>
-                      <i className={`codicon codicon-${expandedSubAgents.has(msg.id) ? "chevron-down" : "chevron-right"}`} />
-                      <span>{msg.subAgentName || "Sub-agent"} ({msg.subAgentMessages.length} messages)</span>
-                    </div>
-                    {expandedSubAgents.has(msg.id) && (
-                      <div className="agent-sub-agent-body" data-sub-agent-body={msg.id}>
-                        {(() => {
-                          // ── Sub-agent messages: group into turns so state badges +
-                          //    thought blocks render once per assistant turn, matching
-                          //    the pattern of the top-level console-list.
-                          const subMarker = (msg.subAgentName as string) || (msg.agentMarker as string) || "code-writer";
-                          const items: JSX.Element[] = [];
-                          const list = msg.subAgentMessages!;
-
-                          // ── (TOP) Extract pending todos for THIS sub-agent from its
-                          //    own trace and render a scoped mini-banner at the top of
-                          //    the sub-body (like console-list's pending-banner but
-                          //    scoped to only this sub-agent's tasks).
-                          let subLatestTodosRaw: RawTodo[] = [];
-                          for (const sam of list) {
-                            if (sam?.name === "write_todos") {
-                              const parsed = parseWriteTodosContent(sam.content);
-                              if (parsed) {
-                                // write_todos is a full replacement — always overwrite.
-                                subLatestTodosRaw = normalizeTodos(parsed, subMarker);
-                              }
-                            }
-                          }
-                          const subPendingTodos = filterPending(subLatestTodosRaw);
-                          if (subPendingTodos.length > 0) {
-                            items.push(
-                              <div key={`${msg.id}-sub-banner`} className="agent-pending-banner agent-pending-banner-sub">
-                                <details
-                                  className="agent-pending-todos agent-pending-todos-sub"
-                                  open
-                                >
-                                  <summary className="agent-pending-summary agent-pending-summary-sub">
-                                    <i className="codicon codicon-checklist" />
-                                    <span className="agent-pending-count">
-                                      {subPendingTodos.length} pending sub-task{subPendingTodos.length > 1 ? "s" : ""}
-                                    </span>
-                                  </summary>
-                                  <div className="agent-pending-list agent-pending-list-sub">
-                                    {subPendingTodos.map((t) => (
-                                      <div key={t.id} className={`agent-todo-item ${t.status}`}>
-                                        <i className={`codicon codicon-${t.status === "in_progress" ? "loading" : "circle-outline"}`} />
-                                        <span className="agent-todo-text">{t.text}</span>
-                                      </div>
-                                    ))}
-                                  </div>
-                                </details>
-                              </div>
-                            );
-                          }
-
-                          for (let i = 0; i < list.length; i++) {
-                            const m = list[i];
-                            const hasReasoning = !!m.reasoning_content;
-                            const hasThought = !!m.thought;
-                            const hasToolName = !!m.name;
-                            const isToolCall = hasToolName;
-                            const isWriteTodos = m.name === "write_todos";
-                            const prevIsWriteTodos = i > 0 && list[i - 1]?.name === "write_todos";
-                            // Skip the synthetic tool-result that immediately follows a
-                            // write_todos call — the TodoCard already shows everything.
-                            if (prevIsWriteTodos && m.role === "tool") continue;
-
-                            // Inline per-sub-message key (derived from outer msg.id + index)
-                            const k = `${msg.id}-sa-${i}`;
-
-                            // 1. Per-assistant-message state indicator: shown once above
-                            //    the message card if state is set (shares the same label
-                            //    logic as the global indicator).
-                            if (m.state && (m.role === "assistant" || m.role === "tool")) {
-                              items.push(
-                                <div key={`${k}-state`} className="agent-state agent-state-sub-agent">
-                                  {m.state === "thinking" && <span className="agent-spinner" />}
-                                  {m.state === "waiting" && <span className="agent-spinner" />}
-                                  {stateLabel(m.state)}
-                                </div>
-                              );
-                            }
-
-                            // 2. Per-message collapsible thought block (same visual as
-                            //    top-level agent-thought: lightbulb + summary + body).
-                            if (hasThought && m.role === "assistant") {
-                              items.push(
-                                <details key={`${k}-thought`} className="agent-thought agent-thought-sub-agent" open={m.state === "thinking"}>
-                                  <summary className="agent-thought-summary agent-thought-summary-sub-agent">
-                                    <i className="codicon codicon-lightbulb" />
-                                    {m.state === "thinking" ? "Thinking..." : "Thought process"}
-                                  </summary>
-                                  <div className="agent-thought-body agent-thought-body-sub-agent">{m.thought}</div>
-                                </details>
-                              );
-                            } else if (hasReasoning && !hasThought && m.role === "assistant") {
-                              // Fallback: if no accumulated thought blob, show the
-                              // tool-call-level reasoning_content inline as light italic.
-                              items.push(
-                                <div key={`${k}-reasoning`} className="agent-sub-agent-thought">{m.reasoning_content}</div>
-                              );
-                            }
-
-                            // 3. Render actual message content.
-                            if (isToolCall) {
-                              // ── Sub-agent tool call → real collapsible nested agent-tool-card
-                              //    with details/summary so it can expand/collapse (header bar
-                              //    with chevron + spinner/check + tool name + args).
-                              const toolDisplayName = (m.name || "").replace("browser_", "").replace(/_/g, " ");
-                              const toolIconClass =
-                                m.name === "write_todos" ? "checklist" :
-                                (m.name || "").startsWith("browser_") ? "globe" :
-                                (m.name === "run_in_terminal" || m.name === "run_command") ? "terminal" :
-                                m.name === "read_file" ? "file-code" :
-                                m.name === "grep" ? "search" :
-                                m.name === "list_files" || m.name === "search_files" ? "folder-opened" :
-                                m.name === "write_summary" ? "notebook" :
-                                "tools";
-                              let cardArgs: Record<string, string> = {};
-                              if (m.content && m.name !== "write_todos") {
-                                try {
-                                  const arr = JSON.parse(m.content);
-                                  if (Array.isArray(arr) && arr.length > 0 && arr[0]?.function?.arguments) {
-                                    const args = typeof arr[0].function.arguments === "string"
-                                      ? JSON.parse(arr[0].function.arguments)
-                                      : arr[0].function.arguments;
-                                    if (args && typeof args === "object") {
-                                      for (const [k2, v] of Object.entries(args)) {
-                                        if (k2 === "task") continue;
-                                        cardArgs[k2] = String(v).slice(0, 60);
-                                      }
-                                    }
-                                  }
-                                } catch {}
-                              }
-                              let writeTodosParsed: TodoItem[] | null = null;
-                              if (isWriteTodos && m.content) {
-                                try {
-                                  const arr = JSON.parse(m.content);
-                                  if (Array.isArray(arr) && arr.length > 0) {
-                                    const fc = arr[0];
-                                    if (fc?.function?.name === "write_todos" && fc.function.arguments) {
-                                      const args = typeof fc.function.arguments === "string" ? JSON.parse(fc.function.arguments) : fc.function.arguments;
-                                      if (Array.isArray(args.todos)) {
-                                        writeTodosParsed = args.todos.map((t: any): TodoItem => ({
-                                          id: String(t.id || ""),
-                                          text: String(t.text || ""),
-                                          status: (["pending", "in_progress", "completed", "cancelled"].includes(String(t.status)) ? String(t.status) : "pending") as TodoItem["status"],
-                                        }));
-                                      }
-                                    }
-                                  }
-                                } catch {}
-                              }
-                              // For terminal tools, the result lives in the NEXT
-                              // message (role === "tool", no name). Consume it inside
-                              // this tool card so it renders as agent-terminal-out
-                              // instead of a detached "Result" block.
-                              const isTerminalTool = isToolCall && (m.name === "run_command" || m.name === "run_in_terminal");
-                              let terminalOutput: string | null = null;
-                              if (isTerminalTool) {
-                                const nextMsg = list[i + 1];
-                                if (nextMsg && nextMsg.role === "tool" && !nextMsg.name) {
-                                  terminalOutput = nextMsg.content || "";
-                                }
-                              }
-                              // Sub-agent tool cards start collapsed when completed
-                              // (first paint); expanded while the parent is still
-                              // streaming (spinner visible) so the user sees progress.
-                              const isStreaming = m.state === "waiting";
-                              const isCollapsed = collapsedOutputs.has(k);
-                              items.push(
-                                <details
-                                  key={`${k}-card`}
-                                  className={`agent-sub-agent-toolcard-details agent-tool-card agent-tool-card-${subMarker}${isStreaming ? " streaming" : ""}`}
-                                  open={isStreaming ? true : !isCollapsed}
-                                  onToggle={(e) => {
-                                    // Prevent summary click during streaming from collapsing
-                                    if (m.state === "waiting") return;
-                                    const nowOpen = (e.target as HTMLDetailsElement).open;
-                                    setCollapsedOutputs((prev) => {
-                                      const next = new Set(prev);
-                                      if (nowOpen) next.delete(k); else next.add(k);
-                                      return next;
-                                    });
-                                  }}
-                                >
-                                  <summary className="agent-sub-agent-toolcard-summary">
-                                    {isStreaming ? (
-                                      <span className="agent-spinner agent-toolcard-sub-spinner" />
-                                    ) : (
-                                      <i className="codicon codicon-chevron-right agent-toolcard-sub-chevron" />
-                                    )}
-                                    {!isStreaming && <i className="codicon codicon-check agent-toolcard-sub-check" />}
-                                    {isStreaming && <i className={`codicon codicon-${toolIconClass}`} />}
-                                    {!isStreaming && <i className={`codicon codicon-${toolIconClass}`} />}
-                                    <span className="agent-tool-card-name">{toolDisplayName}</span>
-                                    {Object.keys(cardArgs).length > 0 && (
-                                      <span className="agent-tool-card-args">
-                                        {Object.entries(cardArgs).map(([k2, v]) => (
-                                          <span key={k2}>{k2}: {v}</span>
-                                        ))}
-                                      </span>
-                                    )}
-                                  </summary>
-                                  {/* Expanded body: TodoCard for write_todos, terminal
-                                      output for run_command/run_in_terminal, or a
-                                      structured placeholder for everything else. */}
-                                  {isWriteTodos && writeTodosParsed ? (
-                                    <div className="agent-sub-agent-toolcard-body">
-                                      <TodoCard todos={writeTodosParsed} locked />
-                                    </div>
-                                  ) : isTerminalTool && terminalOutput != null ? (
-                                    <div className="agent-sub-agent-toolcard-body">
-                                      <div className="agent-terminal">
-                                        <div className="agent-terminal-header">
-                                          <i className="codicon codicon-terminal" />
-                                          <span className="agent-terminal-cwd" title={projectPath}>{projectPath || "~"}</span>
-                                          <span className="agent-terminal-label">{m.name === "run_command" ? "sandbox" : "terminal"}</span>
-                                          <i className="codicon codicon-check agent-terminal-done" />
-                                        </div>
-                                        <pre className="agent-terminal-out">{terminalOutput}</pre>
-                                      </div>
-                                    </div>
-                                  ) : (
-                                    <div className="agent-sub-agent-toolcard-body agent-tool-card-body">
-                                      <div className="agent-toolcard-sub-note">
-                                        Sub-agent tool — result shown below in the Result block.
-                                      </div>
-                                    </div>
-                                  )}
-                                </details>
-                              );
-                              // The terminal tool's result message was consumed above;
-                              // skip it so it doesn't render a detached "Result" block.
-                              if (isTerminalTool && terminalOutput != null) i++;
-                            } else {
-                              // ── Non-tool messages: assistant text / user / tool result
-                              //    Keep the existing agent-msg layout with turn roles, but
-                              //    mirror minified sizes.
-                              const roleClass =
-                                m.role === "tool" ? "agent-msg-tool" :
-                                m.role === "user" ? "agent-msg-user" :
-                                "agent-msg-assistant";
-                              items.push(
-                                <div
-                                  key={k}
-                                  className={`agent-sub-agent-msg agent-msg ${roleClass}${hasReasoning ? " turn-reasoning" : ""}${m.role === "tool" ? " turn-result" : ""}${m.role === "user" ? " turn-user" : ""}${!isToolCall && m.role === "assistant" ? " turn-text" : ""}`}
-                                >
-                                  {m.content && !m.name && m.role === "assistant" && (
-                                    <div className="agent-sub-agent-text">{m.content}</div>
-                                  )}
-                                  {m.role === "user" && (
-                                    <div className="agent-sub-agent-text agent-sub-agent-user">User: {m.content}</div>
-                                  )}
-                                  {m.role === "tool" && (
-                                    <>
-                                      {!collapsedOutputs.has(k) ? (
-                                        <div className="agent-output-expanded">
-                                          <div
-                                            className="agent-output-collapse-bar"
-                                            onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.add(k); return next; })}
-                                          >
-                                            <span>Result ({String(m.content || "").split("\n").length} lines)</span>
-                                            <i className="codicon codicon-chevron-up" />
-                                          </div>
-                                          <div className="agent-sub-agent-result">{formatToolContent(m.content)}</div>
-                                        </div>
-                                      ) : (
-                                        <div
-                                          className="agent-terminal-out-collapsed"
-                                          onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.delete(k); return next; })}
-                                        >
-                                          <i className="codicon codicon-chevron-right" />
-                                          <span>Result ({String(m.content || "").split("\n").length} lines)</span>
-                                        </div>
-                                      )}
-                                    </>
-                                  )}
-                                </div>
-                              );
-                            }
-                          }
-                          return <>{items}</>;
-                        })()}
-                      </div>
-                    )}
-                  </div>
-                )}
-                {/* ── Accept/reject for file tools ── */}
-                {(() => {
-                  const FILE_TOOLS = ["edit_file"];
-                  if (!FILE_TOOLS.includes(msg.toolName) || msg.state === "waiting") return null;
-                  const fp = String(msg.toolParams?.path || msg.toolParams?.oldPath || "");
-                  // Check if already resolved
-                  let isResolved = false;
-                  let isAccepted = false;
-                  for (const mmm of messages) {
-                    if (mmm.fileChanges) {
-                      for (const fcc of mmm.fileChanges) {
-                        if (fcc.path === fp && (fcc.accepted || fcc.rejected)) {
-                          isResolved = true;
-                          isAccepted = !!fcc.accepted;
-                          break;
-                        }
-                      }
-                      if (isResolved) break;
-                    }
-                  }
-                  if (isResolved) {
-                    const label = isAccepted ? "Applied" : "Dismissed";
-                    return (
-                      <div className="agent-tool-card-actions">
-                        <span className="agent-tool-card-action-label">{label}</span>
-                      </div>
-                    );
-                  }
-                  return (
-                    <div className="agent-tool-card-actions">
-                      <button className="agent-btn agent-btn-accept" onClick={(e) => { e.stopPropagation(); handleToolCardAccept(fp); }} title="Accept">
-                        <i className="codicon codicon-check" /> Accept
-                      </button>
-                      <button className="agent-btn agent-btn-reject" onClick={(e) => { e.stopPropagation(); handleToolCardReject(fp); }} title="Reject">
-                        <i className="codicon codicon-close" /> Reject
-                      </button>
-                    </div>
-                  );
-                })()}
-                {/* ── Terminal block for run_in_terminal ── */}
-                {msg.toolName === "run_in_terminal" && (
-                  <div className="agent-terminal">
-                    <div className="agent-terminal-header">
-                      <i className="codicon codicon-terminal" />
-                      <span className="agent-terminal-cwd" title={projectPath}>{projectPath || "~"}</span>
-                      {msg.permissionPrompt ? (
-                        <i className="codicon codicon-warning agent-terminal-warn" />
-                      ) : msg.state === "waiting" ? (
-                        <span className="agent-spinner agent-terminal-spinner" />
-                      ) : (
-                        <i className="codicon codicon-check agent-terminal-done" />
-                      )}
-                    </div>
-                    <div className="agent-terminal-cmdline">
-                      <span className="agent-terminal-prompt">$</span>
-                      <span className="agent-terminal-cmd">{String(msg.toolParams?.command ?? "")}</span>
-                    </div>
-                    {msg.sandboxOutput != null && (
-                      <>
-                        {!collapsedOutputs.has(msg.id) ? (
-                          <div className="agent-output-expanded">
-                            <div
-                              className="agent-output-collapse-bar"
-                              onClick={() => {
-                                if (msg.state !== "waiting") {
-                                  setCollapsedOutputs((prev) => { const next = new Set(prev); next.add(msg.id); return next; });
-                                }
-                              }}
-                            >
-                              <span>Output ({msg.sandboxOutput.split("\n").length} lines)</span>
-                              <i className="codicon codicon-chevron-up" />
-                            </div>
-                            <pre className="agent-terminal-out">{msg.sandboxOutput}</pre>
-                          </div>
-                        ) : (
-                          <div
-                            className="agent-terminal-out-collapsed"
-                            onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.delete(msg.id); return next; })}
-                          >
-                            <i className="codicon codicon-chevron-right" />
-                            <span>Output ({msg.sandboxOutput.split("\n").length} lines)</span>
-                          </div>
-                        )}
-                      </>
-                    )}
-                    {/* Permission prompt at the bottom of the terminal body */}
-                    {msg.permissionPrompt && (
-                      <div className="agent-terminal-perms">
-                        <i className="codicon codicon-warning" />
-                        <span>{msg.permissionPrompt}</span>
-                        <div className="agent-perms-actions">
-                          <button className="agent-btn agent-btn-accept" onClick={(e) => { e.stopPropagation(); handlePermissionResponse(msg.id, true); }}>Allow</button>
-                          <button className="agent-btn agent-btn-reject" onClick={(e) => { e.stopPropagation(); handlePermissionResponse(msg.id, false); }}>Deny</button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-                {/* ── Sandbox terminal block for run_command ── */}
-                {msg.toolName === "run_command" && (
-                  <div className="agent-terminal">
-                    <div className="agent-terminal-header">
-                      <i className="codicon codicon-terminal" />
-                      <span className="agent-terminal-cwd" title={projectPath}>{projectPath || "~"}</span>
-                      {msg.state === "waiting" ? (
-                        <span className="agent-spinner agent-terminal-spinner" />
-                      ) : (
-                        <i className="codicon codicon-check agent-terminal-done" />
-                      )}
-                    </div>
-                    {msg.toolParams && "command" in msg.toolParams && (
-                      <div className="agent-terminal-cmdline">
-                        <span className="agent-terminal-prompt">$</span>
-                        <span className="agent-terminal-cmd">{String(msg.toolParams.command ?? "")}</span>
-                      </div>
-                    )}
-                    {msg.sandboxOutput != null && (
-                      <>
-                        {!collapsedOutputs.has(msg.id) ? (
-                          <div className="agent-output-expanded">
-                            <div
-                              className="agent-output-collapse-bar"
-                              onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.add(msg.id); return next; })}
-                            >
-                              <span>Output ({msg.sandboxOutput.split("\n").length} lines)</span>
-                              <i className="codicon codicon-chevron-up" />
-                            </div>
-                            <pre className="agent-terminal-out">{msg.sandboxOutput}</pre>
-                          </div>
-                        ) : (
-                          <div
-                            className="agent-terminal-out-collapsed"
-                            onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.delete(msg.id); return next; })}
-                          >
-                            <i className="codicon codicon-chevron-right" />
-                            <span>Output ({msg.sandboxOutput.split("\n").length} lines)</span>
-                          </div>
-                        )}
-                      </>
-                    )}
-                  </div>
-                )}
-                {/* ── Sandbox output for other non-terminal tools ── */}
-                {msg.toolName !== "run_in_terminal" && msg.toolName !== "run_command" && msg.sandboxOutput && (
-                  <div className="agent-terminal">
-                    <div className="agent-terminal-header">
-                      <i className="codicon codicon-terminal" />
-                      <span className="agent-terminal-cwd" title={projectPath}>{projectPath || "~"}</span>
-                      {msg.state === "waiting" ? (
-                        <span className="agent-spinner agent-terminal-spinner" />
-                      ) : (
-                        <i className="codicon codicon-check agent-terminal-done" />
-                      )}
-                    </div>
-                    {!collapsedOutputs.has(msg.id) ? (
-                      <div className="agent-output-expanded">
-                        <div
-                          className="agent-output-collapse-bar"
-                          onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.add(msg.id); return next; })}
-                        >
-                          <span>Output ({msg.sandboxOutput.split("\n").length} lines)</span>
-                          <i className="codicon codicon-chevron-up" />
-                        </div>
-                        <pre className="agent-terminal-out">{msg.sandboxOutput}</pre>
-                      </div>
-                    ) : (
-                      <div
-                        className="agent-terminal-out-collapsed"
-                        onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.delete(msg.id); return next; })}
-                      >
-                        <i className="codicon codicon-chevron-right" />
-                        <span>Output ({msg.sandboxOutput.split("\n").length} lines)</span>
-                      </div>
-                    )}
-                  </div>
-                )}
-                {msg.content && !msg.sandboxOutput && msg.toolName !== "run_in_terminal" && (
-                  <>
-                    {!collapsedOutputs.has(`${msg.id}-code`) ? (
-                      <div className="agent-output-expanded">
-                        <div
-                          className="agent-output-collapse-bar"
-                          onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.add(`${msg.id}-code`); return next; })}
-                        >
-                          <span>Code ({String(msg.content || "").split("\n").length} lines)</span>
-                          <i className="codicon codicon-chevron-up" />
-                        </div>
-                        <pre className="agent-code">{formatToolContent(msg.content)}</pre>
-                      </div>
-                    ) : (
-                      <div
-                        className="agent-terminal-out-collapsed"
-                        onClick={() => setCollapsedOutputs((prev) => { const next = new Set(prev); next.delete(`${msg.id}-code`); return next; })}
-                      >
-                        <i className="codicon codicon-chevron-right" />
-                        <span>Result ({msg.content.split("\n").length} lines)</span>
-                      </div>
-                    )}
-                  </>
-                )}
-              </div>
-            )}
-            {/* Fallback for tool msgs without tool-card */}
-            {msg.role === "tool" && !msg.toolName && msg.content && (
-              <pre key={`${msg.id}-tool-fb`} className="agent-code">{formatToolContent(msg.content)}</pre>
-            )}
-            {msg.role !== "tool" && msg.content && (
-              <div key={`${msg.id}-body`} className="agent-body">
-                <span className="agent-role-icon"><i className={`codicon codicon-${iconForRole(msg.role)}`} /></span>
-                <div className="agent-content">
-                  <div className="agent-text">
-                    {msg.role === "user"
-                      ? <CollapsedCode text={msg.content} msgId={msg.id} />
-                      : msg.role === "assistant"
-                        ? <MarkdownPreview text={msg.content} msgId={msg.id} />
-                        : msg.content}
-                  </div>
-                  {msg.role === "user" && (
-                    <div className="agent-msg-actions">
-                      <button className="agent-icon-btn" title="Copy" onClick={() => copyText(msg.content)}><i className="codicon codicon-copy" /></button>
-                      <button className="agent-icon-btn" title="Delete" onClick={() => handleActionClick(() => removeMessage(msg.id))}><i className="codicon codicon-trash" /></button>
-                      <button className="agent-icon-btn" title="Revert to before this message" onClick={() => handleActionClick(() => revertToPreRound(msg.id))}><i className="codicon codicon-discard" /></button>
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
-        ))}
+              {group.items.map((msg) => renderAgentMessage(msg, "main"))}
         {/* Compact footer after each assistant turn (except the last — main footer handles that) */}
         {!isLast && hasAssistant && (
           <div className="agent-footer">
@@ -4228,14 +4188,14 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
       {/* ── Global agent state indicator (Thinking... / Generating... / Wait a moment...) ── */}
       {loading && activeStateInfo.state && (
         <div className="agent-state agent-state-global">
-          {activeStateInfo.state === "thinking" && <span className="agent-spinner" />}
+          {(activeStateInfo.state === "thinking" || activeStateInfo.state === "pending_subagent") && <span className="agent-spinner" />}
           {stateLabel(activeStateInfo.state)}
         </div>
       )}
 
       {/* ── Pending todos / changes banner ── */}
       {(pendingTodos.length > 0 || hasPendingFileActions) && (
-        <div className="agent-pending-banner">
+        <div className="agent-pending-banner" data-agent-marker="main">
           {pendingTodos.length > 0 && (
             <details className="agent-pending-todos" open={showPendingBanner} onToggle={(e) => setShowPendingBanner((e.target as HTMLDetailsElement).open)}>
               <summary className="agent-pending-summary">
