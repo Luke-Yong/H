@@ -1629,6 +1629,14 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
               setExpandedSubAgents((prev) => { const next = new Set(prev); next.add(id); return next; });
             }
             });
+          if (evt.toolName === "delegate_task") {
+            // Ensure the newly-created delegate card is visible even if the
+            // rAF-based auto-scroll effect hasn't caught up with the flushSync.
+            requestAnimationFrame(() => requestAnimationFrame(() => {
+              const el = consoleListRef.current;
+              if (el) el.scrollTop = el.scrollHeight;
+            }));
+          }
           // Yield two frames so the browser paints the tool card (spinner, styling)
           // before tool_end arrives in the next SSE event. Single rAF fires before
           // the paint; double rAF guarantees at least one paint cycle completes.
@@ -2085,6 +2093,12 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
               setExpandedSubAgents((prev) => { const next = new Set(prev); next.add(id); return next; });
             }
           });
+          if (tn === "delegate_task") {
+            requestAnimationFrame(() => requestAnimationFrame(() => {
+              const el = consoleListRef.current;
+              if (el) el.scrollTop = el.scrollHeight;
+            }));
+          }
           // Pre-collapse code block by default at card creation
           if (tn !== "run_in_terminal") {
             setCollapsedOutputs((prev) => { const next = new Set(prev); next.add(`${id}-code`); return next; });

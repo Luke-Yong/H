@@ -1821,6 +1821,36 @@ body.resizing iframe { pointer-events: none; }
   overflow-y: auto;
 }
 
+/* ── Compact sizing for the nested sub-agent console-list ──
+   The nested body reuses the main .agent-msg / .agent-tool-card / .agent-code
+   components; scope these overrides so the minified list stays readable but
+   denser than the top-level console. */
+.agent-sub-agent-body .agent-msg { padding: 5px 8px; }
+.agent-sub-agent-body .agent-tool-card { margin: 2px 0; border-radius: 4px; }
+.agent-sub-agent-body .agent-tool-card-header { padding: 3px 8px; gap: 5px; font-size: 10px; }
+.agent-sub-agent-body .agent-tool-card-name { font-size: 10px; }
+.agent-sub-agent-body .agent-tool-card-file { font-size: 10px; max-width: 220px; }
+.agent-sub-agent-body .agent-tool-card-tokens { font-size: 9px; }
+.agent-sub-agent-body .agent-tool-card-args { gap: 3px; font-size: 9px; }
+.agent-sub-agent-body .agent-tool-card-args span { padding: 0 4px; max-width: 110px; }
+.agent-sub-agent-body .agent-code { padding: 4px 6px; font-size: 10px; max-height: 120px; }
+.agent-sub-agent-body .agent-output-collapse-bar { padding: 3px 8px; font-size: 10px; }
+.agent-sub-agent-body .agent-output-collapse-bar .codicon { font-size: 10px; }
+.agent-sub-agent-body .agent-terminal { margin: 2px 0; }
+.agent-sub-agent-body .agent-terminal-header { padding: 3px 8px; font-size: 10px; gap: 5px; }
+.agent-sub-agent-body .agent-terminal-cmdline { padding: 3px 8px; font-size: 11px; gap: 6px; }
+.agent-sub-agent-body .agent-terminal-out { padding: 5px 8px; font-size: 10px; max-height: 160px; }
+.agent-sub-agent-body .agent-terminal-out-collapsed { padding: 3px 8px; font-size: 10px; }
+.agent-sub-agent-body .agent-body { gap: 6px; }
+.agent-sub-agent-body .agent-role-icon { width: 14px; font-size: 11px; }
+.agent-sub-agent-body .agent-text { font-size: 11px; line-height: 1.4; }
+.agent-sub-agent-body .agent-md-h1 { font-size: 15px; }
+.agent-sub-agent-body .agent-md-h2 { font-size: 14px; }
+.agent-sub-agent-body .agent-md-h3 { font-size: 13px; }
+.agent-sub-agent-body .agent-md-h4,
+.agent-sub-agent-body .agent-md-h5,
+.agent-sub-agent-body .agent-md-h6 { font-size: 12px; }
+
 /* ── Collapsible nested tool-card inside sub-agent body.
    Borders + icons stay color-coded; text uses main theme colors at full opacity. */
 .agent-sub-agent-toolcard-details {
