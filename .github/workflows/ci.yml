@@ -23,7 +23,7 @@ jobs:
       - name: Install server deps
         run: |
           npm ci --ignore-scripts
-          npm rebuild better-sqlite3 node-pty
+          npm rebuild node-pty
 
       - name: Install client deps
         run: npm ci

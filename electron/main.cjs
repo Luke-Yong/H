@@ -442,7 +442,7 @@ function startEmbeddedServer() {
     // are already registered in Module.globalPaths.
     args = ["--require", bootstrapCjs, compiledServer];
 
-    // Resolve native modules (better-sqlite3 / node-pty / @esbuild platform bins)
+    // Resolve native modules (node-pty / @esbuild platform bins)
     // from the *physically unpacked* folder first. The packages are now entirely
     // present under app.asar.unpacked (not just their .node files) so NODE_PATH
     // lookup finds the package.json and resolves requires correctly.
@@ -472,17 +472,17 @@ function startEmbeddedServer() {
         startupLog("warn", "No node_modules search locations found in packaged layout.");
       }
 
-      // Sanity-check that a representative native package (better-sqlite3) is
+      // Sanity-check that a representative native package (node-pty) is
       // fully present, so on startup we can log whether NODE_PATH resolution
       // would actually succeed (helps diagnose "server failed to start" cases).
       if (fs.existsSync(unpackedNodeModules)) {
-        const sqlitePkg = path.join(unpackedNodeModules, "better-sqlite3", "package.json");
-        const sqliteNodeGlob = path.join(unpackedNodeModules, "better-sqlite3", "build", "Release");
+        const ptyPkg = path.join(unpackedNodeModules, "node-pty", "package.json");
+        const ptyNodeGlob = path.join(unpackedNodeModules, "node-pty", "build", "Release");
         try {
-          const hasSqlitePkg = fs.existsSync(sqlitePkg);
-          const hasSqliteBuild = fs.existsSync(sqliteNodeGlob);
+          const hasPtyPkg = fs.existsSync(ptyPkg);
+          const hasPtyBuild = fs.existsSync(ptyNodeGlob);
           startupLog("info",
-            `unpacked natives: better-sqlite3 pkg=${hasSqlitePkg} buildDir=${hasSqliteBuild} path=${unpackedNodeModules}`
+            `unpacked natives: node-pty pkg=${hasPtyPkg} buildDir=${hasPtyBuild} path=${unpackedNodeModules}`
           );
         } catch {}
       } else {

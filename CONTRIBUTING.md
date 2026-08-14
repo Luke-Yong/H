@@ -12,7 +12,7 @@ Be respectful and assume good intent. Keep discussions technical and focused on 
 - A **DeepSeek API key** — get one at [platform.deepseek.com](https://platform.deepseek.com)
 - Git
 
-Native modules (`better-sqlite3`, `node-pty`) are rebuilt automatically during install via the root `postinstall` script.
+Native module (`node-pty`) is rebuilt automatically during install via the root `postinstall` script.
 
 ## Development setup
 

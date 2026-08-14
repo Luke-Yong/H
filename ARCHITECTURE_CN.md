@@ -1,4 +1,4 @@
-﻿# H — 架构
+# H — 架构
 
 基于 DeepSeek 的 AI 编程助手。
 
@@ -90,7 +90,7 @@ npm run dev
 | `ports/vite-port` | Electron 加载错误 URL → 连接被拒绝 → 加载页面超时。 |
 | `store/client-state.json` | `JSON.parse` 失败 → 所有状态重置为默认值。有效但错误的 JSON → UI 显示错误的模型/路径；模型字符串仅导致 API 调用失败；路径仅显示，不会自动打开。 |
 | `store/api-keys.enc` | AES-256-GCM 认证标签解密不匹配 → API 密钥重置。文件在没有 `~/.h/.key` 机器密钥的情况下不可读。 |
-| `store/memory.db` | SQLite 损坏 → 记忆功能重置。 |
+| `memory/`（markdown/JSONL） | 损坏/不可读的文件在读取时跳过；其他记忆文件保持完好。 |
 | `.key` | 被替换或删除 → 现有 `api-keys.enc` 永久不可读（下次保存时生成新密钥）。 |
 
 ## 架构
@@ -252,7 +252,7 @@ H 也可以作为桌面应用运行（更接近 VS Code），带有嵌入式服�
 
 - **`app.asar` 归档**（默认，压缩后）：所有纯 JS npm 包（`express`、`ws`、`dotenv`、`typescript`）、Vite 客户端生产构建（`client/dist`）、服务器 TS 源码、Electron 脚本。
 - **`app.asar.unpacked/` 目录**（真实 NTFS 路径，始终位于 `<安装目录>/resources/app.asar.unpacked/`）：
-  - 通过 `dlopen` / `LoadLibraryExW` 加载、**不能** 从归档内部读取的原生模块：`better-sqlite3/build/Release/*.node`、`node-pty/build/Release/*.node`、`@esbuild/win32-x64/esbuild.exe`
+  - 通过 `dlopen` / `LoadLibraryExW` 加载、**不能** 从归档内部读取的原生模块：`node-pty/build/Release/*.node`、`@esbuild/win32-x64/esbuild.exe`
   - **编译后的 Express 服务器**（`dist/server/index.js`，由 `tsc -p tsconfig.json` 输出的 CommonJS）
   - 预加载启动程序（`dist/server/bootstrap-packaged.cjs`）—— 详见下文
   - `client/dist` 和 `package.json` 的副本（这样编译服务器中的 `resolveProjectRoot()` 可以定位项目根目录，而无需触碰 asar 归档的虚拟路径）
@@ -312,7 +312,6 @@ npm run desktop:pack           # dist:clean -> icon:generate -> desktop:build-se
         ├── client/dist/               ← Vite 生产构建副本（resolveProjectRoot() + Express 静态中间件使用）
         └── node_modules/
             ├── @esbuild/win32-x64/    ← 原生 esbuild.exe
-            ├── better-sqlite3/        ← 原生绑定 + package.json
             └── node-pty/              ← 原生绑定 + package.json
 ```
 
@@ -1209,41 +1208,40 @@ Agent: task_complete
 
 ### 持久化记忆
 
-H 包含一个基于 SQLite 的**跨会话记忆系统**。Agent 可以存储关键决策、用户偏好、项目约定和发现的模式 — 并在未来的会话中回忆它们。
+H 包含一个基于纯文件的**跨会话记忆系统**。Agent 可以存储关键决策、用户偏好、项目约定和发现的模式 — 并在未来的会话中回忆它们。
 
 #### 工作原理
 
 ```
 Agent 检测到重要事实
-  → 调用 remember(key, value, category, tags)
-  → 值可选择性地通过 DeepSeek embeddings API 进行嵌入
-  → 存储在 ~/.h/store/memory.db（SQLite，全局用户存储）
+  → 调用 remember(key, value, category, tags, scope)
+  → 写入 user_profile.md（scope=user）或 projects/<slug>/project_memory.md（scope=project）
 
 下一会话：
   → Agent 调用 recall(query: "UI framework")
-  → 语义搜索（如存在嵌入则为余弦相似度）
-  → 如果 embedding API 不可用，回退到关键词搜索
-  → 返回带分数的排序结果
+  → 对记忆文件（markdown + JSONL）进行关键词搜索
+  → 返回排序结果
 ```
 
 #### 工具
 
 | 工具 | 描述 |
 |------|------|
-| `remember` | 存储关键决策、用户偏好、项目约定或重要事实。在 SQLite 中跨会话持久化。分类：`decision`、`preference`、`convention`、`fact`、`pattern`、`general`。标签帮助分组相关记忆。值可选择性地通过 DeepSeek API 嵌入以进行语义搜索。 |
-| `recall` | 按语义或精确键搜索存储的记忆。如果嵌入可用，使用余弦相似度搜索。否则回退到键、值、标签和分类的关键词匹配。不传参数则列出所有记忆。 |
+| `remember` | 存储关键决策、用户偏好、项目约定或重要事实。在文件中跨会话持久化。`scope` 选择用户档案（`user`）或项目记忆（`project`）。分类：`decision`、`preference`、`convention`、`fact`、`pattern`、`general`。标签帮助分组相关记忆。 |
+| `recall` | 按关键词或精确键搜索存储的记忆。同时会搜索 `topics.md` 和 `session_memory_*.jsonl` 中的匹配上下文。不传参数则列出所有记忆。 |
 | `forget` | 按其键移除存储的记忆。当决策被撤销、偏好改变或存储的信息过时时使用。 |
 
 #### 存储
 
 | 详情 | 值 |
 |--------|------|
-| 数据库 | SQLite（WAL 模式）位于 `~/.h/store/memory.db`（全局，不在项目目录中） |
+| 用户记忆 | `~/.h/memory/user_profile.md`（跨项目） |
+| 项目记忆 | `~/.h/memory/projects/<slug>/project_memory.md`（按项目） |
+| 会话日志 | `~/.h/memory/projects/<slug>/<YYYYMMDD>/session_memory_<sessionId>.jsonl`（仅追加） |
+| 主题 | `~/.h/memory/projects/<slug>/<YYYYMMDD>/topics.md`（目标/进度/摘要） |
 | API Keys | AES-256-GCM 加密文件位于 `~/.h/store/api-keys.enc`（持久化，在重启和应用更新后仍然存在） |
 | 客户端状态 | JSON 文件位于 `~/.h/store/client-state.json` — 镜像所有浏览器 `localStorage` 数据（模型、聊天历史、最近路径、打开标签页、预设、终端历史），以便在重装后仍然存在 |
-| Schema | `id`、`key`（唯一）、`value`、`category`、`tags`、`embedding`（BLOB）、`created_at`、`updated_at` |
-| 嵌入 | 通过 DeepSeek `/v1/embeddings` 端点生成（可选；如果不可用则优雅回退到关键词搜索） |
-| 检索 | 嵌入余弦相似度搜索 → 关键词 `LIKE` 回退 → 列出全部 |
+| 检索 | 对 markdown/jsonl 文件进行关键词搜索（grep 式）；无嵌入或原生数据库依赖 |
 
 #### Agent 何时使用记忆
 
@@ -1255,8 +1253,7 @@ Agent 检测到重要事实
 
 | 文件 | 职责 |
 |------|------|
-| `server/memory.ts` | `MemoryStore` 类 — SQLite CRUD、embedding 搜索、余弦相似度、全局单例 |
-| `server/deepseek.ts` | `generateEmbedding()` — 调用 DeepSeek embeddings API，返回 `Float32Array` |
+| `server/memory.ts` | `MemoryStore` 类 — 文件 CRUD、关键词搜索、会话/主题日志、全局单例 |
 | `server/agent.ts` | `runMemoryTool()` — 工具执行处理程序；在 `agentLoop()` 和 `agentLoopStream()` 中均已连接 |
 
 ## Agent 命令目录
@@ -1657,7 +1654,7 @@ H 实现 **MCP 协议版本 `2024-11-05`**，采用 JSON-RPC 2.0：
 ```
 H/
 ├── .env.example                     # 环境变量模板（DeepSeek API Key）
-├── package.json                     # 根依赖（Express、better-sqlite3、node-pty）、脚本（dev、test、desktop:build、desktop:pack）
+├── package.json                     # 根依赖（Express、node-pty）、脚本（dev、test、desktop:build、desktop:pack）
 ├── package-lock.json
 ├── tsconfig.json                    # 服务器 TypeScript 配置（CommonJS 输出、Node moduleResolution、strict=false、vitest globals、@types/node）
 ├── vitest.config.ts                 # Vitest 运行器配置（node env、30s 超时）
@@ -1690,7 +1687,7 @@ H/
 │   ├── lsp.ts                       # LSP 客户端：启动语言服务器（pyright、gopls 等）、SSE 诊断流式传输、30+ 语言
 │   ├── mcp.ts                       # MCP 服务器：JSON-RPC 处理程序、外部 AI 客户端的工具集、stdio + SSE 传输
 │   ├── mcp-server.ts                # 独立 MCP 服务器入口点（stdio 模式）
-│   ├── memory.ts                    # SQLite 持久化记忆存储（~/.h/store/memory.db）：关键词 + embedding 搜索，供 agent remember/recall/forget 工具使用
+│   ├── memory.ts                    # 基于文件的持久化记忆存储（~/.h/memory）：关键词搜索 + 会话/主题日志，供 agent remember/recall/forget 工具使用
 │   ├── cryptoStore.ts               # AES-256-GCM 加密的 API Key 存储（~/.h/store/api-keys.enc）
 │   ├── hPaths.ts                    # ~/.h/ 目录结构的集中路径解析
 │   ├── fileTracking.ts              # 智能文件追踪：自动检测 Git vs fs.watch 监视器模式、会话中期 Git 检测、快照/补丁文件树上下文

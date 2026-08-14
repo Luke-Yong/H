@@ -8,7 +8,7 @@
 //
 // Conversation state is held in memory keyed by session id.
 
-import { chatDeepSeekTool, chatDeepSeekToolStream, generateEmbedding, type DeepSeekApiUsage } from "./deepseek";
+import { chatDeepSeekTool, chatDeepSeekToolStream, type DeepSeekApiUsage } from "./deepseek";
 import { getSnapshotPath } from "./hPaths";
 import { getMemoryStore } from "./memory";
 import { killSession, getLastCreatedSessionId } from "./terminalManager";
@@ -46,6 +46,8 @@ export interface AgentState {
   messages: AgentMessage[];
   iteration: number;
   projectRoot: string;
+  /** Client-provided session id — used to scope session memory logs. */
+  sessionId?: string;
   /** Rolling summary of older resolved plain-text turns trimmed out of messages. */
   historySummary?: string;
   /** Shared message prefix per sub-agent type — improves cache hit rates across
@@ -796,7 +798,9 @@ export const TOOLS: ToolDef[] = [
       "Store a key decision, user preference, project convention, or important fact for cross-session recall. "
       + "Use this proactively when the user makes a decision (e.g. 'let's use Preact instead of React'), "
       + "states a preference (e.g. 'I prefer tabs over spaces'), establishes a convention, or when you discover "
-      + "an important project detail that will be useful in future sessions. Memories persist across sessions via SQLite. "
+      + "an important project detail that will be useful in future sessions. Memories persist across sessions in files. "
+      + "Use scope 'user' for cross-project facts (identity, global preferences, tech stack) and 'project' for "
+      + "anything specific to this codebase. "
       + "Categories: 'decision', 'preference', 'convention', 'fact', 'pattern', or 'general'. "
       + "Tags help group related memories (comma-separated, e.g. 'react,styling,architecture').",
     parameters: {
@@ -806,6 +810,7 @@ export const TOOLS: ToolDef[] = [
         value: { type: "string", description: "The information to remember. Be specific and detailed." },
         category: { type: "string", enum: ["decision", "preference", "convention", "fact", "pattern", "general"], description: "Category of this memory." },
         tags: { type: "string", description: "Comma-separated tags for grouping (e.g. 'react,frontend,styling')." },
+        scope: { type: "string", enum: ["user", "project"], description: "Where to store: 'user' (cross-project user profile) or 'project' (this project). Defaults to 'project'." },
       },
       required: ["key", "value"],
     },
@@ -813,13 +818,13 @@ export const TOOLS: ToolDef[] = [
   {
     name: "recall",
     description:
-      "Search stored memories by semantic meaning or exact key. Use this at the start of a session or task "
+      "Search stored memories by keyword or exact key. Use this at the start of a session or task "
       + "to recall user preferences, past decisions, and project conventions. "
       + "Results are ordered by relevance. If no query/key provided, lists all memories.",
     parameters: {
       type: "object",
       properties: {
-        query: { type: "string", description: "Search query to find relevant memories (semantic search if embeddings available, keyword fallback otherwise)." },
+        query: { type: "string", description: "Search query to find relevant memories (keyword search over memory files)." },
         key: { type: "string", description: "Exact key to retrieve a specific memory. Overrides query if both provided." },
         limit: { type: "integer", description: "Max results to return (default: 5, max: 20)." },
       },
@@ -1643,36 +1648,34 @@ function runGraphQuery(query: string, projectRoot: string): string {
 }
 
 // ── Memory tools ──
-// Handles remember, recall, forget — backed by SQLite with optional embeddings.
+// Handles remember, recall, forget — backed by the file-based Trae-style store.
 
-async function runMemoryTool(
+function runMemoryTool(
   name: string,
   params: Record<string, unknown>,
-  _projectRoot: string,
-  apiKey: string,
-): Promise<string> {
+  projectRoot: string,
+  sessionId: string,
+): string {
   const store = getMemoryStore();
 
   if (name === "remember") {
     const key = String(params.key || "").trim();
     const value = String(params.value || "");
     const category = String(params.category || "general");
+    const scope = String(params.scope || "project") === "user" ? "user" : "project";
     const tagsStr = String(params.tags || "");
     const tags = tagsStr ? tagsStr.split(",").map((t) => t.trim()).filter(Boolean) : [];
 
     if (!key) return "Error: 'key' is required for remember.";
     if (!value) return "Error: 'value' is required for remember.";
 
-    // Try to generate an embedding for semantic search
-    let embedding: Float32Array | undefined;
-    try {
-      const emb = await generateEmbedding(value, apiKey);
-      if (emb) embedding = emb;
-    } catch { /* embedding generation is optional */ }
-
-    store.remember(key, value, category, tags, embedding);
-    const total = store.count();
-    return `Stored memory "${key}" (${category})${embedding ? " with embedding" : ""}. Total memories: ${total}.`;
+    store.remember(projectRoot, key, value, category, tags, scope);
+    const total = store.count(projectRoot);
+    const scopeLabel = scope === "user" ? "user profile" : "project memory";
+    if (sessionId) {
+      store.appendSession(projectRoot, sessionId, { type: "memory", action: "remember", key, scope, category });
+    }
+    return `Stored memory "${key}" (${category}) in ${scopeLabel}. Total memories: ${total}.`;
   }
 
   if (name === "recall") {
@@ -1682,31 +1685,20 @@ async function runMemoryTool(
 
     // Exact key lookup
     if (exactKey) {
-      const entry = store.recallByKey(exactKey);
+      const entry = store.recallByKey(projectRoot, exactKey);
       if (!entry) return `No memory found with key "${exactKey}".`;
       return formatMemoryEntry(entry);
     }
 
-    // Semantic / keyword search
+    // Keyword search
     if (query) {
-      // Try embedding-based search first if available
-      try {
-        const emb = await generateEmbedding(query, apiKey);
-        if (emb && store.hasEmbeddings()) {
-          const results = store.searchByEmbedding(emb, limit);
-          if (results.length > 0) {
-            return formatMemoryResults(results, "semantic");
-          }
-        }
-      } catch { /* fall through to keyword search */ }
-
-      const results = store.searchByKeyword(query, limit);
+      const results = store.searchByKeyword(projectRoot, query, limit);
       if (results.length === 0) return `No memories found matching "${query}".`;
       return formatMemoryResults(results, "keyword");
     }
 
     // No query or key — list all
-    const all = store.list();
+    const all = store.list(projectRoot);
     if (all.length === 0) return "No memories stored yet. Use remember to store important decisions, preferences, and conventions.";
     const recent = all.slice(0, limit);
     return formatMemoryResults(recent, "recent");
@@ -1715,7 +1707,10 @@ async function runMemoryTool(
   if (name === "forget") {
     const key = String(params.key || "").trim();
     if (!key) return "Error: 'key' is required for forget.";
-    const deleted = store.forget(key);
+    const deleted = store.forget(projectRoot, key);
+    if (sessionId && deleted) {
+      store.appendSession(projectRoot, sessionId, { type: "memory", action: "forget", key });
+    }
     return deleted
       ? `Deleted memory "${key}".`
       : `No memory found with key "${key}". Nothing deleted.`;
@@ -2045,8 +2040,8 @@ You have access to tools that let you read/write files, run commands, and delega
     - \`security-auditor\` / \`architect-analyst\` / \`docs-analyst\`: Read-only audit/analysis tasks.
 
 ### Persistent Memory
-- Use \`remember\` to store important decisions, user preferences, project conventions, and discovered patterns. Memories survive across sessions (SQLite-backed). Be proactive — when the user says "let's use X", "I prefer Y", or establishes a convention, store it.
-- Use \`recall\` at the start of a session or task to retrieve relevant past memories. Search by semantic meaning or exact key.
+- Use \`remember\` to store important decisions, user preferences, project conventions, and discovered patterns. Memories survive across sessions in file-based storage. Be proactive — when the user says "let's use X", "I prefer Y", or establishes a convention, store it.
+- Use \`recall\` at the start of a session or task to retrieve relevant past memories. Search by keyword or exact key.
 - Use \`forget\` to remove outdated or incorrect memories when preferences change.
 
 ### Tool priority
@@ -3409,6 +3404,8 @@ export async function* agentLoopStepByStep(
           ...allResults.map((r, i) => `Step ${i + 1} [${r.status.toUpperCase()}]: ${r.text}\n  ${r.result.slice(0, 300)}`),
         ];
 
+        logSessionSummary(projectRoot, state.sessionId || sessionId, summaryLines.join("\n"));
+
         yield {
           type: "done",
           reply: summaryLines.join("\n"),
@@ -3524,7 +3521,7 @@ export async function agentLoop(
 
       // ── Memory tools: remember, recall, forget ──
       if (fnName === "remember" || fnName === "recall" || fnName === "forget") {
-        const memResult = await runMemoryTool(fnName, params, projectRoot, apiKey);
+        const memResult = runMemoryTool(fnName, params, projectRoot, state.sessionId || "");
         state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc2(reasoningContent) });
         state.messages.push({ role: "tool", content: memResult, tool_call_id: tc.id });
         executedTools.push({ name: fnName, result: memResult.slice(0, 1000) });
@@ -3555,6 +3552,7 @@ export async function agentLoop(
           continue;
         }
         state.latestSummary = summary;
+        logSessionSummary(projectRoot, state.sessionId || "", summary);
         state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc2(reasoningContent) });
         state.messages.push({ role: "tool", content: "OK", tool_call_id: tc.id });
         executedTools.push({ name: fnName, result: "OK" });
@@ -3964,7 +3962,7 @@ export async function* agentLoopStream(
       // ── Memory tools: remember, recall, forget ──
       if (fnName === "remember" || fnName === "recall" || fnName === "forget") {
         yield { type: "tool_start", toolName: fnName, toolParams: params };
-        const memResult = await runMemoryTool(fnName, params, projectRoot, apiKey);
+        const memResult = runMemoryTool(fnName, params, projectRoot, state.sessionId || sessionId);
         state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
         state.messages.push({ role: "tool", content: memResult, tool_call_id: tc.id });
         yield {
@@ -4067,6 +4065,7 @@ export async function* agentLoopStream(
           continue;
         }
         state.latestSummary = summary;
+        logSessionSummary(projectRoot, state.sessionId || sessionId, summary);
         state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
         state.messages.push({ role: "tool", content: "OK", tool_call_id: tc.id });
         yield {
@@ -4302,6 +4301,7 @@ const agentSessions = new Map<string, AgentState>();
 export function createAgentSession(sessionId: string, projectRoot: string, userMessage: string, context: string, seedTodos?: { id: string; text: string; status: string; agentMarker?: string }[] | null): AgentState {
   const prev = agentSessions.get(sessionId);
   if (prev) {
+    prev.sessionId = sessionId;
     prev.projectRoot = projectRoot;
     prev.iteration = 0;
     prev.latestSummary = undefined;
@@ -4316,6 +4316,7 @@ export function createAgentSession(sessionId: string, projectRoot: string, userM
     }
     prev.messages.push({ role: "user", content: userMessage });
     agentSessions.set(sessionId, prev);
+    logSessionUserMessage(projectRoot, sessionId, userMessage);
     return prev;
   }
 
@@ -4323,6 +4324,7 @@ export function createAgentSession(sessionId: string, projectRoot: string, userM
     messages: [{ role: "user", content: userMessage }],
     iteration: 0,
     projectRoot,
+    sessionId,
     apiUsageTotals: undefined,
   };
   // Populate latestTodos from the caller (client re-sent persisted todos)
@@ -4333,7 +4335,34 @@ export function createAgentSession(sessionId: string, projectRoot: string, userM
     state.latestTodos = [...seedTodos];
   }
   agentSessions.set(sessionId, state);
+  logSessionUserMessage(projectRoot, sessionId, userMessage);
+  logTopicGoal(projectRoot, userMessage);
   return state;
+}
+
+// ── Session memory logging (best-effort; never blocks the agent loop) ──
+
+function logSessionUserMessage(projectRoot: string, sessionId: string, userMessage: string): void {
+  if (!sessionId || !userMessage) return;
+  try {
+    getMemoryStore().appendSession(projectRoot, sessionId, { type: "user", content: userMessage.slice(0, 2000) });
+  } catch { /* best-effort */ }
+}
+
+function logTopicGoal(projectRoot: string, userMessage: string): void {
+  if (!userMessage) return;
+  try {
+    const goal = userMessage.replace(/\s+/g, " ").trim().slice(0, 160);
+    getMemoryStore().appendTopics(projectRoot, `## ${new Date().toISOString()} — ${goal}\n\n- goal: ${userMessage.slice(0, 500)}\n\n`);
+  } catch { /* best-effort */ }
+}
+
+function logSessionSummary(projectRoot: string, sessionId: string, summary: string): void {
+  if (!sessionId || !summary) return;
+  try {
+    getMemoryStore().appendSession(projectRoot, sessionId, { type: "summary", content: summary.slice(0, 4000) });
+    getMemoryStore().appendTopics(projectRoot, `${summary.slice(0, 4000)}\n\n`);
+  } catch { /* best-effort */ }
 }
 
 /**

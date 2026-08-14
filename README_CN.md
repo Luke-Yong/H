@@ -31,7 +31,7 @@ Copilot 是代码 **助手** — 自动补全、聊天、行内建议。H 是 **
 | **模式** | **Agent** — 自主规划、端到端执行、自行纠错 | **助手** — 响应提示、建议片段、需要用户驱动 |
 | **任务委托** | `delegate_task` — 派生 11 种专用子 Agent（浏览器、代码编写、研究、安全审计、架构分析…），每个拥有独立上下文窗口 | 无 — 单聊天线程 |
 | **子 Agent 实时 UI** | 按 Agent 颜色编码流式输出、进度卡片、嵌套 Todo | 无 |
-| **持久化记忆** | SQLite 支持的跨会话记忆（`remember` / `recall` / `forget`） | 仅当前会话聊天记录 |
+| **持久化记忆** | 文件支持的跨会话记忆（`remember` / `recall` / `forget`） | 仅当前会话聊天记录 |
 | **浏览器自动化** | 内置 Electron webview + 16 个浏览器工具（点击、输入、上传、控制台、网络、DOM） | 无 |
 | **终端控制** | `run_in_terminal` — 真实 PTY，Agent 可读写/终止 | 集成终端，Agent 无法访问 |
 | **知识图谱** | 自动构建代码库图谱（.kg）、符号级导入关系、`read_graph` 工具 | 无 |
@@ -77,7 +77,7 @@ npm run dev
 ## 技术栈
 
 - **客户端：** React 18、Vite、Monaco 编辑器、xterm.js
-- **服务端：** Node.js、Express、WebSocket (ws)、node-pty、better-sqlite3
+- **服务端：** Node.js、Express、WebSocket (ws)、node-pty
 - **AI：** DeepSeek API（工具调用、嵌入、前缀缓存）
 - **桌面：** Electron
 - **LSP：** 30+ 语言服务器（pyright、gopls、rust-analyzer、clangd、jdtls…）

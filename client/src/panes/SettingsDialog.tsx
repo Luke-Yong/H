@@ -186,7 +186,7 @@ function AboutTab() {
             <ul>
               <li><strong>API keys</strong> — Encrypted with AES-256-GCM using a machine-specific key at <code>~/.h/store/api-keys.enc</code>. Never stored in browser localStorage. Transmitted only to DeepSeek API as Bearer token.</li>
               <li><strong>Chat history & preferences</strong> — Stored in browser localStorage, synced to <code>~/.h/store/client-state.json</code> on disk.</li>
-              <li><strong>Agent memory</strong> — SQLite database at <code>~/.h/store/memory.db</code> (WAL mode).</li>
+              <li><strong>Agent memory</strong> — file-based (markdown + JSONL) under <code>~/.h/memory</code>.</li>
               <li><strong>File tracking metadata</strong> — <code>~/.h/store/file-tracking.json</code> (file paths, sizes, checksums; no file contents).</li>
               <li><strong>Port discovery files</strong> — OS temp directory; runtime only, not persisted.</li>
             </ul>
@@ -214,7 +214,6 @@ function AboutTab() {
               <li><strong>TypeScript</strong> (Apache-2.0) — <a href="https://www.typescriptlang.org" target="_blank" rel="noopener">typescriptlang.org</a></li>
               <li><strong>Vite</strong> (MIT) — <a href="https://vitejs.dev" target="_blank" rel="noopener">vitejs.dev</a></li>
               <li><strong>Electron</strong> (MIT) — <a href="https://www.electronjs.org" target="_blank" rel="noopener">electronjs.org</a></li>
-              <li><strong>better-sqlite3</strong> (MIT) — <a href="https://github.com/WiseLibs/better-sqlite3" target="_blank" rel="noopener">github.com/WiseLibs/better-sqlite3</a></li>
               <li><strong>node-pty</strong> (MIT) — <a href="https://github.com/lydell/node-pty" target="_blank" rel="noopener">github.com/lydell/node-pty</a></li>
               <li><strong>dotenv</strong> (BSD-2-Clause) — <a href="https://github.com/motdotla/dotenv" target="_blank" rel="noopener">github.com/motdotla/dotenv</a></li>
               <li><strong>ws</strong> (MIT) — <a href="https://github.com/websockets/ws" target="_blank" rel="noopener">github.com/websockets/ws</a></li>

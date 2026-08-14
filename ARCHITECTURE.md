@@ -70,7 +70,7 @@ Get a key at [platform.deepseek.com](https://platform.deepseek.com).
 | **Model & Thinking Mode** | `localStorage` keys `H-model`, `H-thinking` | Plain text |
 | **Model Presets** | `localStorage` keys `H-presets`, `H-active-preset` | JSON array |
 | **Chat History & Preferences** | `localStorage` → mirrored to `~/.h/store/client-state.json` | JSON on disk |
-| **Agent Memory** | `~/.h/store/memory.db` | SQLite (WAL mode) |
+| **Agent Memory** | `~/.h/memory/user_profile.md`, `~/.h/memory/projects/<slug>/…` | Markdown + JSONL |
 | **File Tracking Metadata** | `~/.h/store/file-tracking.json` | JSON (paths, sizes, checksums; no file contents) |
 | **Knowledge Graph Snapshots** | `~/.h/snapshots/file-tree-snapshot-<hash>.kg` | Edge-list format |
 | **Port Discovery** | `%TEMP%/h-ports/express-port`, `vite-port` | Runtime only, not persisted |
@@ -107,7 +107,7 @@ Both servers let the OS decide — no hardcoded port numbers anywhere.
 | `ports/vite-port` | Electron loads wrong URL → connection refused → loading screen with timeout. |
 | `store/client-state.json` | `JSON.parse` failure → all state resets to defaults. Valid but wrong JSON → UI shows bad model/paths; model strings just fail API calls; paths are displayed, never auto-opened. |
 | `store/api-keys.enc` | AES-256-GCM auth tag mismatch on decrypt → API keys reset. File is unreadable without the machine key at `~/.h/.key`. |
-| `store/memory.db` | SQLite corruption → memory features reset. |
+| `memory/` (markdown/JSONL) | Corrupt/unreadable files are skipped on read; other memory files remain intact. |
 | `.key` | Replaced or deleted → existing `api-keys.enc` becomes permanently unreadable (new key generated on next save). |
 
 ## Architecture
@@ -269,7 +269,7 @@ H can also run as a desktop app (closer to VS Code) with an embedded server and 
 
 - **`app.asar` archive** (compressed, default): all pure-JS npm packages (`express`, `ws`, `dotenv`, `typescript`), Vite client production build (`client/dist`), server TS source, Electron scripts.
 - **`app.asar.unpacked/` directory** (real NTFS paths, always at `<install>/resources/app.asar.unpacked/`):
-  - Native modules that load via `dlopen`/`LoadLibraryExW` and **cannot** be read from inside an archive: `better-sqlite3/build/Release/*.node`, `node-pty/build/Release/*.node`, `@esbuild/win32-x64/esbuild.exe`
+  - Native modules that load via `dlopen`/`LoadLibraryExW` and **cannot** be read from inside an archive: `node-pty/build/Release/*.node`, `@esbuild/win32-x64/esbuild.exe`
   - The **compiled Express server** (`dist/server/index.js`, CJS output of `tsc -p tsconfig.json`)
   - The pre-require bootstrap (`dist/server/bootstrap-packaged.cjs`) — see below
   - A copy of `client/dist` and `package.json` (so `resolveProjectRoot()` in the compiled server can locate the project root without touching the asar archive virtual path)
@@ -329,7 +329,6 @@ Notes:
         ├── client/dist/               ← Vite production build (copy: resolveProjectRoot() + Express static middleware)
         └── node_modules/
             ├── @esbuild/win32-x64/    ← native esbuild.exe
-            ├── better-sqlite3/        ← native bindings + package.json
             └── node-pty/              ← native bindings + package.json
 ```
 
@@ -1226,41 +1225,40 @@ The problem lock ensures the agent cannot declare a task complete while known er
 
 ### Persistent Memory
 
-H includes a **cross-session memory system** backed by SQLite. The agent can store key decisions, user preferences, project conventions, and discovered patterns — and recall them in future sessions.
+H includes a **cross-session memory system** backed by plain files. The agent can store key decisions, user preferences, project conventions, and discovered patterns — and recall them in future sessions.
 
 #### How it works
 
 ```
 Agent detects an important fact
-  → calls remember(key, value, category, tags)
-  → value is optionally embedded via DeepSeek embeddings API
-  → stored in ~/.h/store/memory.db (SQLite, global user store)
+  → calls remember(key, value, category, tags, scope)
+  → written to user_profile.md (scope=user) or projects/<slug>/project_memory.md (scope=project)
 
 Next session:
   → Agent calls recall(query: "UI framework")
-  → Semantic search (cosine similarity) if embeddings exist
-  → Falls back to keyword search if embedding API unavailable
-  → Returns ranked results with scores
+  → Keyword search over memory files (markdown + JSONL)
+  → Returns ranked results
 ```
 
 #### Tools
 
 | Tool | Description |
 |------|-------------|
-| `remember` | Store a key decision, user preference, project convention, or important fact. Persists across sessions in SQLite. Categories: `decision`, `preference`, `convention`, `fact`, `pattern`, `general`. Tags help group related memories. The value is optionally embedded via DeepSeek API for semantic search. |
-| `recall` | Search stored memories by semantic meaning or exact key. If embeddings are available, uses cosine similarity search. Otherwise falls back to keyword matching on key, value, tags, and category. Pass no params to list all memories. |
+| `remember` | Store a key decision, user preference, project convention, or important fact. Persists across sessions in files. `scope` selects the user profile (`user`) or project memory (`project`). Categories: `decision`, `preference`, `convention`, `fact`, `pattern`, `general`. Tags help group related memories. |
+| `recall` | Search stored memories by keyword or exact key. Also greps `topics.md` and `session_memory_*.jsonl` for matching context. Pass no params to list all memories. |
 | `forget` | Remove a stored memory by its key. Use when a decision is reversed, a preference changes, or stored information becomes outdated. |
 
 #### Storage
 
 | Detail | Value |
 |--------|-------|
-| Database | SQLite (WAL mode) at `~/.h/store/memory.db` (global, not in project dir) |
+| User memory | `~/.h/memory/user_profile.md` (cross-project) |
+| Project memory | `~/.h/memory/projects/<slug>/project_memory.md` (per project) |
+| Session log | `~/.h/memory/projects/<slug>/<YYYYMMDD>/session_memory_<sessionId>.jsonl` (append-only) |
+| Topics | `~/.h/memory/projects/<slug>/<YYYYMMDD>/topics.md` (goal/progress/summary) |
 | API Keys | AES-256-GCM encrypted file at `~/.h/store/api-keys.enc` (persistent, survives restarts and app updates) |
 | Client State | JSON file at `~/.h/store/client-state.json` — mirrors all browser `localStorage` data (model, chat history, recent paths, open tabs, presets, terminal history) so it survives reinstalls |
-| Schema | `id`, `key` (unique), `value`, `category`, `tags`, `embedding` (BLOB), `created_at`, `updated_at` |
-| Embeddings | Generated via DeepSeek `/v1/embeddings` endpoint (optional; graceful fallback to keyword search if unavailable) |
-| Retrieval | Embedding cosine similarity search → keyword `LIKE` fallback → list-all |
+| Retrieval | Keyword search over markdown/jsonl files (grep-style); no embeddings or native database dependency |
 
 #### When the agent uses memory
 
@@ -1272,8 +1270,7 @@ Next session:
 
 | File | Role |
 |------|------|
-| `server/memory.ts` | `MemoryStore` class — SQLite CRUD, embedding search, cosine similarity, global singleton |
-| `server/deepseek.ts` | `generateEmbedding()` — calls DeepSeek embeddings API, returns `Float32Array` |
+| `server/memory.ts` | `MemoryStore` class — file CRUD, keyword search, session/topic logging, global singleton |
 | `server/agent.ts` | `runMemoryTool()` — tool execution handler; wired in both `agentLoop()` and `agentLoopStream()` |
 
 ## Agent Command Catalog
@@ -1674,7 +1671,7 @@ The server only exposes **tools** capability — no resources or prompts.
 ```
 H/
 ├── .env.example                     # Template for environment variables (DeepSeek API key)
-├── package.json                     # Root deps (Express, better-sqlite3, node-pty), scripts (dev, test, desktop:build, desktop:pack)
+├── package.json                     # Root deps (Express, node-pty), scripts (dev, test, desktop:build, desktop:pack)
 ├── package-lock.json
 ├── tsconfig.json                    # TypeScript config for server (CommonJS output, Node moduleResolution, strict=false, vitest globals, @types/node)
 ├── vitest.config.ts                 # Vitest runner config (node env, 30s timeout)
@@ -1707,7 +1704,7 @@ H/
 │   ├── lsp.ts                       # LSP client: spawns language servers (pyright, gopls, etc.), SSE diagnostic streaming, 30+ languages
 │   ├── mcp.ts                       # MCP server: JSON-RPC handler, tool set for external AI clients, stdio + SSE transport
 │   ├── mcp-server.ts                # Standalone MCP server entry point (stdio mode)
-│   ├── memory.ts                    # SQLite persistent memory store (~/.h/store/memory.db): keyword + embedding search, used by agent remember/recall/forget tools
+│   ├── memory.ts                    # File-based persistent memory store (~/.h/memory): keyword search + session/topic logging, used by agent remember/recall/forget tools
 │   ├── cryptoStore.ts               # AES-256-GCM encrypted API key storage (~/.h/store/api-keys.enc)
 │   ├── hPaths.ts                    # Centralized path resolution for ~/.h/ directory structure
 │   ├── fileTracking.ts              # Smart file tracking: auto-detects Git vs fs.watch watcher mode, mid-session Git detection, snapshot/patch file tree context

@@ -24,14 +24,13 @@
     "desktop:pack": "npm run dist:clean && npm run icon:generate && npm run desktop:build-server && npm run desktop:build && electron-builder --win --dir && node scripts/embed-icon.js && electron-builder --win --prepackaged dist/win-unpacked",
     "icon:generate": "node scripts/generate-icon.js",
     "install:all": "npm install && cd client && npm install",
-    "rebuild:electron": "electron-rebuild --only better-sqlite3",
-    "postinstall": "node -e \"try { const { spawnSync } = require('child_process'); const r1 = spawnSync('npx', ['electron-rebuild','--only','better-sqlite3'], { stdio: 'inherit', shell: true }); const r2 = spawnSync('npx', ['electron-rebuild','--only','node-pty'], { stdio: 'inherit', shell: true }); if (r2.status !== 0) { console.warn('node-pty rebuild failed; terminal will fall back to pipe mode.'); } } catch(e) { console.warn('electron-rebuild skipped; terminal will fall back to pipe mode.'); }\" && node scripts/patch-electron-name.js",
+    "rebuild:electron": "electron-rebuild --only node-pty",
+    "postinstall": "node -e \"try { const { spawnSync } = require('child_process'); const r = spawnSync('npx', ['electron-rebuild','--only','node-pty'], { stdio: 'inherit', shell: true }); if (r.status !== 0) { console.warn('node-pty rebuild failed; terminal will fall back to pipe mode.'); } } catch(e) { console.warn('electron-rebuild skipped; terminal will fall back to pipe mode.'); }\" && node scripts/patch-electron-name.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
-    "better-sqlite3": "^11.7.0",
     "dotenv": "^16.4.0",
     "express": "^4.21.0",
     "node-pty": "^1.1.0-beta33",
@@ -47,7 +46,6 @@
     "asar": true,
     "asarUnpack": [
       "node_modules/@esbuild/**/*",
-      "node_modules/better-sqlite3/**/*",
       "node_modules/node-pty/**/*",
       "dist/server/**/*",
       "client/dist/**/*",
@@ -131,7 +129,6 @@
     }
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.12",
     "@types/express": "^5.0.0",
     "@types/node": "^22.0.0",
     "@types/supertest": "^7.2.0",

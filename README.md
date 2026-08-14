@@ -31,7 +31,7 @@ Copilot is a code **assistant** — autocomplete, chat, and inline suggestions. 
 | **Model** | **Agent** — plans, executes end-to-end tasks, iterates on its own errors | **Assistant** — responds to prompts, suggests snippets, requires the user to drive |
 | **Delegation** | `delegate_task` — spawns 11 specialized sub-agents (browser, code-writer, researcher, security-auditor, architect…) with isolated context windows | None — single chat thread |
 | **Live sub-agent UI** | Per-agent color-coded streaming, progress cards, nested todos | None |
-| **Persistent memory** | SQLite-backed cross-session memory (`remember` / `recall` / `forget`) | Per-session chat only |
+| **Persistent memory** | File-based cross-session memory (`remember` / `recall` / `forget`) | Per-session chat only |
 | **Browser automation** | Built-in Electron webview + 16 browser tools (click, type, upload, console, network, DOM) | None |
 | **Terminal control** | `run_in_terminal` — real PTY with agent read/write/kill access | Integrated terminal, no agent access |
 | **Knowledge graph** | Auto-built codebase graph (.kg), symbol-level imports, `read_graph` tool | None |
@@ -77,7 +77,7 @@ Each sub-agent runs in its own isolated context window. The parent agent delegat
 ## Tech Stack
 
 - **Client:** React 18, Vite, Monaco Editor, xterm.js
-- **Server:** Node.js, Express, WebSocket (ws), node-pty, better-sqlite3
+- **Server:** Node.js, Express, WebSocket (ws), node-pty
 - **AI:** DeepSeek API (tool-calling, embeddings, prefix caching)
 - **Desktop:** Electron
 - **LSP:** 30+ language servers (pyright, gopls, rust-analyzer, clangd, jdtls…)
