@@ -17,4 +17,4 @@ jobs:
       - name: Push to Gitee
         run: |
           git remote add gitee "https://Luke-Yong:${{ secrets.GITEE }}@gitee.com/Luke-Yong/Harness.git"
-          git push --mirror --force gitee
+          git push gitee "+refs/heads/*:refs/heads/*" "+refs/tags/*:refs/tags/*"
