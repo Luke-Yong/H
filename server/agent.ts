@@ -110,23 +110,34 @@ export const SUB_AGENT_PROFILES: Record<string, SubAgentConfig> = {
       "browser_navigate", "browser_info", "browser_screenshot", "browser_get_dom",
       "browser_click", "browser_type", "browser_clear", "browser_select",
       "browser_console", "browser_request_errors", "browser_scroll", "browser_wait",
-      "browser_press_key", "write_todos",
+      "browser_press_key", "browser_move_mouse", "browser_right_click", "browser_upload_file",
+      "write_todos",
     ],
     headless: false,
     maxIterations: 100,
     systemPrompt: `You are a browser automation specialist running as a sub-agent. Your job is to interact with a web page and report your findings to the parent agent.
 - BEFORE starting, call write_todos to break the task into steps: navigate, inspect, interact, verify.
-- Use browser_navigate to go to a URL.
+- Use browser_navigate to go to a URL (http/https only).
 - Use browser_info to check the current URL and page title.
-- Use browser_screenshot to get a text snapshot of visible content.
-- Use browser_get_dom to get indexed interactive elements (buttons, inputs, links, forms).
-- Use browser_click to click buttons, links, or activate inputs (by DOM index or x,y).
-- Use browser_type to enter text into input fields (click the field first to activate it).
-- Use browser_clear to clear input fields before typing.
-- Use browser_select to pick an option from dropdown menus.
+- Use browser_get_dom to inspect the page. It returns a positional grid, NOT raw HTML:
+  * First line "V:<width>x<height>" is the viewport size.
+  * Elements are grouped into 9 regions: TL/TC/TR (top), ML/MC/MR (middle), BL/BC/BR (bottom).
+  * Each element line is: INDEX|tag#id[type] "label" FLAGS x,y:WxH ^ancestor
+    - INDEX is the number you pass to browser_click / browser_type / browser_clear / browser_select.
+    - x,y is the element's top-left position in the viewport; WxH is its size. Use these to reason about layout and relative position.
+    - FLAGS: A/A+ means interactive, disabled/checked/readonly/required describe state.
+- Use browser_screenshot to get the same positional grid plus any visible error text. It is text-only, not an image.
+- NEVER try view-source:, reading document.documentElement.outerHTML, or fetching raw HTML — there is no such tool and browser_get_dom already gives you everything you need to locate and act on elements.
+- Re-run browser_get_dom after any click/type/scroll/navigation, because indices can change.
+- Use browser_scroll to reveal content below the fold, then call browser_get_dom again.
+- Use browser_wait to wait for a CSS selector to appear on dynamic pages.
+- Use browser_click to click an element by INDEX (preferred) or by x,y coordinates.
+- Use browser_type to type into an input by INDEX (it focuses the field automatically).
+- Use browser_clear to clear an input before typing a new value.
+- Use browser_select to choose an option in a native <select> by INDEX. For custom dropdowns, click the trigger, wait, then click the option.
 - Use browser_press_key to press keys (Enter, Escape, Tab, arrows).
-- Use browser_scroll to reveal content below the fold.
-- Use browser_wait to wait for specific elements to appear on dynamic pages.
+- Use browser_move_mouse to hover at x,y; use browser_right_click for context menus.
+- Use browser_upload_file to upload files to an <input type=file> by INDEX.
 - Use browser_console / browser_request_errors to check for errors.
 - Update write_todos as you complete each step.
 - After analyzing, return a structured report in plain text: URL, title, key content, what you clicked/typed, results observed, any errors. Do NOT call task_complete or write_summary.`,
@@ -623,16 +634,17 @@ export const TOOLS: ToolDef[] = [
   {
     name: "browser_screenshot",
     description:
-      "Get a text snapshot of the current page: URL, title, visible text content, form inputs, buttons/links, "
-      + "and any visible error messages. Use this instead of a visual screenshot — DeepSeek is text-only "
-      + "so the snapshot returns readable text rather than an image.",
+      "Get a text representation of the current page (NOT an image): URL, title, a positional grid of visible "
+      + "elements (same format as browser_get_dom), and any visible error messages. Use this for a quick overview; "
+      + "use browser_get_dom for the full indexed element list.",
     parameters: { type: "object", properties: {}, required: [] },
   },
   {
     name: "browser_get_dom",
     description:
-      "Get the current page's DOM as a list of indexed, clickable/typable elements. "
-      + "Use this before click/type to find the right element index.",
+      "Get the current page's interactive elements as a positional grid. Each line is "
+      + "INDEX|tag#id[type] \"label\" FLAGS x,y:WxH ^ancestor, grouped into 9 viewport regions (TL..BR). "
+      + "Use the INDEX with browser_click/browser_type/browser_select. Re-run after any page change.",
     parameters: { type: "object", properties: {}, required: [] },
   },
   {
@@ -672,6 +684,144 @@ export const TOOLS: ToolDef[] = [
       "Get the current browser tab URL and page load status. "
       + "Use this to check which URL is currently loaded before navigating or interacting.",
     parameters: { type: "object", properties: {}, required: [] },
+  },
+  {
+    name: "browser_click",
+    description:
+      "Click an interactive element by its DOM index (from browser_get_dom) or by viewport x,y coordinates. "
+      + "Prefer index. The index is the number at the start of each line in browser_get_dom. "
+      + "Re-run browser_get_dom first if the page changed since your last inspection.",
+    parameters: {
+      type: "object",
+      properties: {
+        index: { type: "integer", description: "Element index from browser_get_dom. Use this instead of x,y when possible." },
+        x: { type: "number", description: "Viewport x coordinate to click (only if index is not used)." },
+        y: { type: "number", description: "Viewport y coordinate to click (only if index is not used)." },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "browser_type",
+    description:
+      "Type text into an input or textarea by its DOM index (from browser_get_dom). "
+      + "The field is focused and clicked automatically. Use browser_clear first if you need to replace existing text.",
+    parameters: {
+      type: "object",
+      properties: {
+        index: { type: "integer", description: "Element index of the input/textarea from browser_get_dom." },
+        text: { type: "string", description: "Text to type." },
+      },
+      required: ["index", "text"],
+    },
+  },
+  {
+    name: "browser_clear",
+    description:
+      "Clear the current value of an input or textarea by its DOM index (from browser_get_dom).",
+    parameters: {
+      type: "object",
+      properties: {
+        index: { type: "integer", description: "Element index of the input/textarea from browser_get_dom." },
+      },
+      required: ["index"],
+    },
+  },
+  {
+    name: "browser_select",
+    description:
+      "Select an option in a native <select> by its DOM index, matching by value or visible label. "
+      + "For custom dropdowns (not a native <select>), use browser_click on the trigger, then browser_get_dom to find the option, then browser_click on the option.",
+    parameters: {
+      type: "object",
+      properties: {
+        index: { type: "integer", description: "Element index of the <select> from browser_get_dom." },
+        value: { type: "string", description: "Option value to select." },
+        label: { type: "string", description: "Visible option label to select (used when value is not provided)." },
+      },
+      required: ["index"],
+    },
+  },
+  {
+    name: "browser_scroll",
+    description:
+      "Scroll the page. Pass x,y pixel deltas to scroll by that amount, or to='top'/'bottom' to jump. "
+      + "Use this to reveal content below the fold, then call browser_get_dom again to get fresh indices.",
+    parameters: {
+      type: "object",
+      properties: {
+        x: { type: "number", description: "Horizontal scroll delta in pixels (default 0)." },
+        y: { type: "number", description: "Vertical scroll delta in pixels (default 0)." },
+        to: { type: "string", enum: ["top", "bottom"], description: "Jump to the top or bottom of the page." },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "browser_press_key",
+    description:
+      "Press a key on the currently focused element. Supports Enter, Escape, Tab, Backspace, Delete, Space, and arrow keys.",
+    parameters: {
+      type: "object",
+      properties: {
+        key: { type: "string", description: "Key to press (e.g. Enter, Escape, Tab, ArrowDown)." },
+      },
+      required: ["key"],
+    },
+  },
+  {
+    name: "browser_wait",
+    description:
+      "Wait up to timeoutMs milliseconds for an element matching a CSS selector to appear. "
+      + "Returns the matched element details or NOT_FOUND. Use this for dynamic pages before interacting.",
+    parameters: {
+      type: "object",
+      properties: {
+        selector: { type: "string", description: "CSS selector to wait for." },
+        timeoutMs: { type: "integer", description: "Max time to wait in milliseconds (default 5000)." },
+      },
+      required: ["selector"],
+    },
+  },
+  {
+    name: "browser_move_mouse",
+    description:
+      "Move the mouse pointer to viewport x,y coordinates. Use this to trigger hover/mouseover effects.",
+    parameters: {
+      type: "object",
+      properties: {
+        x: { type: "number", description: "Viewport x coordinate." },
+        y: { type: "number", description: "Viewport y coordinate." },
+      },
+      required: ["x", "y"],
+    },
+  },
+  {
+    name: "browser_right_click",
+    description:
+      "Right-click an element by its DOM index (from browser_get_dom) or by viewport x,y coordinates, opening the context menu.",
+    parameters: {
+      type: "object",
+      properties: {
+        index: { type: "integer", description: "Element index from browser_get_dom." },
+        x: { type: "number", description: "Viewport x coordinate to right-click (only if index is not used)." },
+        y: { type: "number", description: "Viewport y coordinate to right-click (only if index is not used)." },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "browser_upload_file",
+    description:
+      "Upload one or more files to an <input type=file> by its DOM index. paths is an array of absolute file paths.",
+    parameters: {
+      type: "object",
+      properties: {
+        index: { type: "integer", description: "Element index of the file input from browser_get_dom." },
+        paths: { type: "array", items: { type: "string" }, description: "Absolute file paths to upload." },
+      },
+      required: ["index", "paths"],
+    },
   },
   {
     name: "write_summary",
