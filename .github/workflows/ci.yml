@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Install server deps but skip the root postinstall (it runs electron-rebuild
+      # to target Electron's ABI, which breaks native modules under plain Node that
+      # Vitest uses). Rebuild the native modules for Node instead.
+      - name: Install server deps
+        run: |
+          npm ci --ignore-scripts
+          npm rebuild better-sqlite3 node-pty
+
+      - name: Install client deps
+        run: npm ci
+        working-directory: client
+
+      - name: Run tests
+        run: npm test
+
+      - name: Typecheck server
+        run: npx tsc -p tsconfig.json --noEmit
+
+      - name: Typecheck client
+        run: npx tsc --noEmit
+        working-directory: client
