@@ -3637,6 +3637,11 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
                         }
                       }
                       const subPendingTodos = filterPending(subLatestTodosRaw);
+                      let subActiveState: string | null = null;
+                      for (let i = list.length - 1; i >= 0; i--) {
+                        const s = list[i]?.state;
+                        if (s) { subActiveState = s; break; }
+                      }
                       return (
                         <>
                           {subPendingTodos.length > 0 && (
@@ -3665,6 +3670,12 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
                           <div className="console-list" data-agent-marker={subMarker}>
                             {subAgentMessagesToConsoleMessages(msg.subAgentMessages!, msg.id, subMarker).map((m) => renderAgentMessage(m, subMarker))}
                           </div>
+                          {subActiveState && (
+                            <div className="agent-state agent-state-global">
+                              {subActiveState === "thinking" && <span className="agent-spinner" />}
+                              {stateLabel(subActiveState)}
+                            </div>
+                          )}
                         </>
                       );
                     })()}

@@ -1704,6 +1704,11 @@ body.resizing iframe { pointer-events: none; }
   color: var(--text);
 }
 .agent-sub-agent-body > .agent-pending-banner { flex-shrink: 0; }
+.agent-sub-agent-body > .agent-state.agent-state-global {
+  flex-shrink: 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  margin-top: 2px;
+}
 .agent-sub-agent-body > .console-list { flex: 1; min-height: 0; overflow-y: auto; }
 .agent-sub-agent-body > .console-list::-webkit-scrollbar { width: 8px; }
 .agent-sub-agent-body > .console-list::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.18); border-radius: 4px; }
@@ -1850,6 +1855,19 @@ body.resizing iframe { pointer-events: none; }
 .agent-sub-agent-body .agent-md-h4,
 .agent-sub-agent-body .agent-md-h5,
 .agent-sub-agent-body .agent-md-h6 { font-size: 12px; }
+.agent-sub-agent-body .agent-state { font-size: 10px; gap: 5px; padding: 1px 0 3px; }
+.agent-sub-agent-body .agent-state .agent-spinner { width: 10px; height: 10px; border-width: 1.5px; }
+.agent-sub-agent-body .agent-thought { margin: 2px 0; border-radius: 4px; }
+.agent-sub-agent-body .agent-thought-summary { padding: 3px 8px; font-size: 10px; gap: 4px; }
+.agent-sub-agent-body .agent-thought-summary::before { font-size: 9px; width: 11px; }
+.agent-sub-agent-body .agent-thought-body { padding: 5px 8px 6px 20px; font-size: 10px; line-height: 1.4; }
+.agent-sub-agent-body .agent-thought[open] .agent-thought-body { max-height: 180px; }
+.agent-sub-agent-body .agent-todo-card { margin: 2px 0; border-radius: 4px; }
+.agent-sub-agent-body .agent-todo-header { padding: 4px 8px; font-size: 11px; gap: 6px; }
+.agent-sub-agent-body .agent-todo-header .codicon { font-size: 11px; }
+.agent-sub-agent-body .agent-todo-item { padding: 3px 8px; font-size: 11px; gap: 6px; }
+.agent-sub-agent-body .agent-todo-item .codicon { font-size: 11px; }
+.agent-sub-agent-body .agent-todo-text { font-size: 11px; }
 
 /* ── Collapsible nested tool-card inside sub-agent body.
    Borders + icons stay color-coded; text uses main theme colors at full opacity. */
@@ -2609,13 +2627,13 @@ details[open] .agent-thought-summary::before { transform: rotate(90deg); }
    Same visual language as the global pending banner, colors match main theme
    (full contrast, no tinting that makes text unreadable). */
 .agent-pending-banner.agent-pending-banner-sub {
-  margin: 0 0 8px;
-  padding: 6px 8px 8px;
-  border-radius: 5px;
+  margin: 0 0 6px;
+  padding: 4px 6px 6px;
+  border-radius: 4px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-top: 1px solid rgba(255, 255, 255, 0.08);
   background: rgba(0, 0, 0, 0.15);
-  gap: 6px;
+  gap: 5px;
   color: var(--text);
 }
 .agent-pending-todos.agent-pending-todos-sub {
@@ -2627,33 +2645,33 @@ details[open] .agent-thought-summary::before { transform: rotate(90deg); }
   color: var(--text);
 }
 .agent-pending-summary.agent-pending-summary-sub {
-  padding: 5px 10px;
-  font-size: 12px;
-  gap: 7px;
+  padding: 4px 8px;
+  font-size: 11px;
+  gap: 6px;
   border-bottom-color: rgba(255, 255, 255, 0.05);
   background: rgba(255, 255, 255, 0.03);
   color: var(--text);
 }
-.agent-pending-summary.agent-pending-summary-sub::before { font-size: 10px; width: 12px; color: var(--accent); }
+.agent-pending-summary.agent-pending-summary-sub::before { font-size: 9px; width: 11px; color: var(--accent); }
 .agent-pending-summary.agent-pending-summary-sub .codicon-checklist {
-  font-size: 14px;
+  font-size: 12px;
   color: var(--accent);
 }
 .agent-pending-summary.agent-pending-summary-sub .agent-pending-count {
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
   color: var(--text);
 }
-.agent-pending-list.agent-pending-list-sub { padding: 2px 0 4px; margin: 0; color: var(--text); }
+.agent-pending-list.agent-pending-list-sub { padding: 1px 0 2px; margin: 0; color: var(--text); }
 .agent-pending-list.agent-pending-list-sub .agent-todo-item {
-  padding: 4px 10px;
-  font-size: 12px;
+  padding: 3px 8px;
+  font-size: 11px;
   border-left: 1px solid transparent;
-  gap: 7px;
+  gap: 6px;
   color: var(--text);
 }
 .agent-pending-list.agent-pending-list-sub .agent-todo-item .codicon {
-  font-size: 13px;
+  font-size: 11px;
   margin-top: 1px;
   color: var(--text-dim);
 }
