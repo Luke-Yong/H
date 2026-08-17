@@ -34,7 +34,7 @@ Copilot is a code **assistant** — autocomplete, chat, and inline suggestions. 
 | **Persistent memory** | File-based cross-session memory (`remember` / `recall` / `forget`) | Per-session chat only |
 | **Browser automation** | Built-in Electron webview + 16 browser tools (click, type, upload, console, network, DOM) | None |
 | **Terminal control** | `run_in_terminal` — real PTY with agent read/write/kill access | Integrated terminal, no agent access |
-| **Knowledge graph** | Auto-built codebase graph (.kg), symbol-level imports, `read_graph` tool | None |
+| **Knowledge graph** | Auto-built codebase graph (.kg): symbol-level imports, stdlib/third-party classification, unused-import detection, `read_graph` tool (6 query types) | None |
 | **Multi-agent orchestration** | Parent → child agent handoff with streaming summaries | None |
 | **Step-by-step locking** | IDE-enforced todo progression — sub-agents can't skip ahead | None |
 | **Tool count** | 27 built-in primitives | Copilot-only feature set (no browser/terminal/graph) |

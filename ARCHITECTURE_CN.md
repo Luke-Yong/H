@@ -646,9 +646,9 @@ d:\Other Projects\app       → MD5 → f6e5d4c3b2a1
 |------|------|
 | `server/fileTracking.ts` | `FileTrackingService` — 单例，编排 Git 或监视器模式、定期 Git 检测、快照/补丁逻辑 |
 | `server/fileTrackingStore.ts` | `FileTrackingStore` — 轻量级 JSON 缓存（`~/.h/store/file-tracking.json`）用于文件元数据 |
-| `server/knowledgeGraph.ts` | `buildKnowledgeGraph()` — 构建代码库图谱，包含 CONTAINS + IMPORTS 边、`.kg` 序列化、`.txt` 可视化 |
+| `server/knowledgeGraph.ts` | `buildKnowledgeGraph()` — 构建代码库图谱（CONTAINS/EXPORTS/IMPORTS/IMPORTS_SYMBOL 边 + 带 stdlib/local/third-party 分类和未使用导入检测的命名导入记录）、`.kg` 序列化、`.txt` 可视化、`computeWorkspaceFingerprint()` |
 | `~/.h/store/file-tracking.json` | 监视器模式的磁盘元数据缓存 |
-| `~/.h/snapshots/file-tree-snapshot-<hash>.kg` | 每工作区知识图谱 — 节点（目录/文件）+ CONTAINS 边 + 解析的 IMPORTS |
+| `~/.h/snapshots/file-tree-snapshot-<hash>.kg` | 每工作区知识图谱 — dir/file/symbol 节点、CONTAINS/EXPORTS/IMPORTS/IMPORTS_SYMBOL 边、每文件导入记录（分类 + 未使用） |
 | `~/.h/snapshots/file-tree-snapshot-<hash>.txt` | 人类可读的可视化副文件（带导入注释的嵌套树） |
 
 ## 知识图谱
@@ -657,7 +657,7 @@ H 在打开文件夹时构建**代码库知识图谱** — 这是每个文件、
 
 ### Schema
 
-图谱有三种节点类型和四种边类型：
+图谱有三种节点类型、四种边类型和每文件的导入记录：
 
 | 节点类型 | 字段 | 描述 |
 |-----------|-------|------|
@@ -672,9 +672,18 @@ H 在打开文件夹时构建**代码库知识图谱** — 这是每个文件、
 | `IMPORTS` | file → file | 文件级导入（例如 `import './utils'`） |
 | `IMPORTS_SYMBOL` | file → symbol | 精确的符号级导入（例如 `import { foo } from './utils'`） |
 
+每个命名导入还会成为一条 `NamedImport` 记录：`{ fromId, module, names, classification, targetFileId, targetNames, unused }`。`classification` 为 `local` | `stdlib` | `third-party`（stdlib 检测涵盖 Python 标准库模块和 Node.js 内置模块），`unused` 列出从未在导入语句之外被引用的导入名 — 为 `unused_imports` 查询提供支持。
+
 ### 符号解析
 
-对于 TypeScript/JavaScript 文件（`.ts`、`.tsx`、`.mts`、`.cts`），TypeScript 编译器 API 解析 AST 以提取导出：
+符号从 TypeScript/JavaScript 和 Python 源码中解析：
+
+| 语言 | 从…检测 |
+|----------|----------|
+| TS/JS（`.ts`、`.tsx`、`.mts`、`.cts`） | TypeScript 编译器 API AST：`export function/class/const/type/interface/enum`、`export { x }`、`export default` |
+| Python（`.py`、`.pyi`、`.pyx`） | 模块级（第 0 列）`def foo()`、`class Foo:` 以及 `name = value` / `name: Type = value` 绑定 |
+
+AST 检测到的 TS/JS 导出类型：
 
 | 类型 | 从…检测 |
 |------|----------|
@@ -686,17 +695,20 @@ H 在打开文件夹时构建**代码库知识图谱** — 这是每个文件、
 | `enum` | `export enum E {}` |
 | `default` | `export default function/class/expr` |
 
-命名导入（`import { foo, bar } from './module'`）被匹配到目标文件导出，以创建精确的 `IMPORTS_SYMBOL` 边 — 因此图谱确切地知道*哪个符号*依赖于*哪个符号*，而不仅仅是哪些文件。
+命名导入（`import { foo, bar } from './module'`）被匹配到目标文件导出，以创建精确的 `IMPORTS_SYMBOL` 边 — 因此图谱确切地知道*哪个符号*依赖于*哪个符号*，而不仅仅是哪些文件。导入解析支持 JS/TS 的命名、默认、命名空间（`import * as ns`）、`require()`、动态 `import()` 和副作用导入；以及 Python 的 `import` 和 `from … import`（含 `as` 别名）。
 
 ### .kg 格式（磁盘上）
 
 紧凑的边列表格式，位于 `~/.h/snapshots/file-tree-snapshot-<hash>.kg`：
 
 ```
-# Knowledge Graph v2 — D:\Work Projects\H
-# Nodes: 384  Edges: 512
+# Knowledge Graph v3 — D:\Work Projects\H
+# Nodes: 384  Edges: 512  Imports: 120
 # Format: n<id>|<type>|<parentId>||<name>|<kind>
-#   type: dir|file|symbol
+#         e<id>|<fromId>|<toId>|<type>
+#         i<fromId>|<module>|<classification>|<targetFileId>|<names>|<unused>
+#   type: dir|file|symbol  classification: local|stdlib|third-party
+#   names: imported:local pairs (comma-joined)  unused: local names (comma-joined)
 
 n0|dir|||H|
 n1|file|n0||README.md|md
@@ -710,9 +722,14 @@ n7|symbol|n5||FileTrackingService|class
 e0|n0|n1|CONTAINS
 e47|n5|n6|EXPORTS
 e72|n3|n6|IMPORTS_SYMBOL
+
+in3|./fileTracking|local|n5|getFileTrackingService|
+in3|./legacy|local|n9|unusedThing|unusedThing
+in3|fs|stdlib||default:fs|
+in3|express|third-party||default:express|
 ```
 
-每行都是自包含的 — 用 `split("|")` 解析，通过遍历父链重建路径。没有 JSON 开销，可以使用基于行的工具轻松进行 diff。
+每行都是自包含的 — 用 `split("|")` 解析，通过遍历父链重建路径。没有 JSON 开销，可以使用基于行的工具轻松进行 diff。`i` 行携带每文件的导入记录，因此 `imports_of`（带 stdlib/third-party 标签）和 `unused_imports` 等查询可以直接从快照回答，无需重新读取源文件。
 
 ### .txt 可视化（人类可读）
 
@@ -760,13 +777,13 @@ H 和 [Graphify](https://github.com/Graphify-Labs/graphify) 共享相同的核�
 | | H | Graphify |
 |---|---|---|
 | **触发方式** | 始终开启的内置 IDE 功能 | 手动调用的 CLI 技能 (`/graphify`) |
-| **AST 解析** | TypeScript 编译器 API (TS/JS) | Tree-sitter（23 种语言） |
+| **AST 解析** | TypeScript 编译器 API (TS/JS) + Python（def/class/模块级绑定） | Tree-sitter（23 种语言） |
 | **LLM 参与** | 零 — 完全确定性 | 两阶段：确定性 AST + Claude 子 agent 进行语义/概念提取 |
 | **输出格式** | 紧凑的 `.kg` 边列表（Token 优化）+ `.txt` 可视化 | `.graph.html`（交互式）、`.graph.json`（NetworkX）、`GRAPH_REPORT.md` |
 | **多模态** | 仅代码文件 | 代码、PDF、图像、视频、音频、图表 |
 | **社区检测** | 无 | Leiden 聚类 — 按边密度分组子系统 |
 | **置信度标记** | 不适用（一切都是 EXTRACTED） | EXTRACTED / INFERRED / AMBIGUOUS |
-| **查询接口** | `read_graph` 工具 — 5 种查询类型（structure、exports、imports_of、exporters_of、dependents） | Python NetworkX API + CLI |
+| **查询接口** | `read_graph` 工具 — 6 种查询类型（structure、exports、imports_of、exporters_of、dependents、unused_imports） | Python NetworkX API + CLI |
 | **更新模型** | 文件监视器事件触发自动重建（2s 防抖） | SHA256 缓存 — 仅重新运行变更的文件 |
 | **Agent 集成** | 系统提示规则 + 工具注册表 | CLAUDE.md/AGENTS.md 规则 + PreToolUse 钩子（在 grep/glob 之前触发） |
 | **足迹** | 轻量级，极小的 Token 开销 — 始终就绪 | 更重但更丰富 — HTML 可视化、自然语言报告、多格式 |
@@ -907,11 +924,12 @@ Agent 调用 run_in_terminal
 
 | 查询 | 格式 | 描述 | 示例 |
 |-------|------|------|------|
-| **导出** | `exports <file>` | 列出文件导出的所有符号 | `exports server/fileTracking.ts` |
-| **导入来源** | `imports_of <file>` | 列出文件导入的所有符号和文件 | `imports_of client/src/App.tsx` |
+| **结构** | `structure` | 打印完整目录树（目录 + 文件，无符号） | `structure` |
+| **导出** | `exports <file>` | 列出文件导出的所有符号（TS/JS 和 Python） | `exports server/fileTracking.ts` |
+| **导入来源** | `imports_of <file>` | 列出文件导入的所有符号和文件；stdlib/third-party 导入会带标签 | `imports_of client/src/App.tsx` |
 | **导出者** | `exporters_of <symbol>` | 查找哪些文件导出此名称的符号 | `exporters_of getFileTrackingService` |
 | **被依赖者** | `dependents <file>` | 查找哪些文件从此文件导入（反向依赖） | `dependents server/fileTracking.ts` |
-| **结构** | `structure` | 打印完整目录树（目录 + 文件，无符号） | `structure` |
+| **未使用导入** | `unused_imports <file>` | 列出文件中从未被引用的导入 | `unused_imports server/agent.ts` |
 
 ##### 查询详情
 
@@ -923,16 +941,13 @@ getFileTrackingService:function
 TrackingMode:type
 ```
 
-**`imports_of <file>`** — 返回符号级和文件级导入：
+**`imports_of <file>`** — 返回每个导入名称及其来源。stdlib 和 third-party 导入会带标签：
 ```
-client/src/App.tsx imports:
-Symbol-level imports:
-  EditorPane from client/src/panes/EditorPane.tsx
-  StatusBar from client/src/panes/StatusBar.tsx
-File-level imports (3):
-  client/src/App.css
-  client/src/index.css
-  client/src/vite-env.d.ts
+server/agent.ts imports:
+  chatDeepSeekTool from ./deepseek
+  getSnapshotPath from ./hPaths
+  fs from fs [stdlib]
+  express from express [third-party]
 ```
 
 **`exporters_of <symbol>`** — 大小写不敏感符号搜索。当你知道函数名但不知道其位置时很有用：
@@ -949,6 +964,13 @@ client/src/App.tsx
 client/src/panes/StatusBar.tsx
 server/agent.ts
 server/index.ts
+```
+
+**`unused_imports <file>`** — 列出从未在导入语句之外出现的导入名。重构前清理时很有用：
+```
+server/legacy.ts unused imports:
+  unusedThing (from ./legacy)
+  oldHelper (from ./helpers)
 ```
 
 **`structure`** — 完整目录树用于定位。返回排序的路径 — 无嵌套，每行一个路径，以提高 Token 效率：
@@ -971,6 +993,7 @@ H/client/package.json
 | "`initFileTracking` 在哪里被调用？" | `grep` | 跨文件内容搜索 |
 | "谁从 `fileTracking.ts` 导入？" | `read_graph dependents` | 反向依赖 — 仅用 grep 无法实现 |
 | "哪些文件导出名为 `foo` 的函数？" | `read_graph exporters_of` | 符号级查询 — grep 会匹配注释、字符串、调用 |
+| "`agent.ts` 中哪些导入未使用？" | `read_graph unused_imports` | 构建时已跟踪 — grep 无法区分声明与使用 |
 | "在 `server/` 中查找所有 `.ts` 文件" | `list_files` 或 `search_files` | 文件/目录列表 |
 | "这个项目是什么样的？" | `read_graph structure` | 一次调用获取完整树 |
 
@@ -1692,7 +1715,7 @@ H/
 │   ├── hPaths.ts                    # ~/.h/ 目录结构的集中路径解析
 │   ├── fileTracking.ts              # 智能文件追踪：自动检测 Git vs fs.watch 监视器模式、会话中期 Git 检测、快照/补丁文件树上下文
 │   ├── fileTrackingStore.ts         # JSON 支持的文件元数据缓存（~/.h/store/file-tracking.json），供监视器模式使用
-│   ├── knowledgeGraph.ts            # 代码库知识图谱构建器：目录/文件节点、CONTAINS + IMPORTS 边、.kg 序列化、可视化
+│   ├── knowledgeGraph.ts            # 代码库知识图谱构建器：目录/文件/符号节点、CONTAINS/EXPORTS/IMPORTS/IMPORTS_SYMBOL 边、导入分类 + 未使用检测、.kg/.txt 序列化
 │   └── __tests__/
 │       ├── agent.tooldefs.test.ts    # 工具定义 Schema 验证
 │       ├── agent.fs.test.ts          # 文件系统工具执行测试

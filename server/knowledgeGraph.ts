@@ -3,14 +3,18 @@
 //   Nodes: directories, files, and symbols (exports: functions, classes, etc.)
 //   Edges: CONTAINS (structural), IMPORTS (file-level), EXPORTS (file→symbol),
 //          IMPORTS_SYMBOL (precise symbol-level dependency)
+//   Imports: per-file named-import records with stdlib/third-party/local
+//            classification and unused-import detection.
 //
 // Output format (.kg):
 //   # comment
 //   n<id>|<type>|<parent_id>||<name>|<kind>
 //   e<id>|<from_id>|<to_id>|<type>
+//   i<from_id>|<module>|<classification>|<target_file_id>|<names>|<unused>
 //
 //   type: dir | file | symbol
 //   kind: for files = extension (ts, py, ...), for symbols = function|class|const|type|interface|enum|default
+//   classification: local | stdlib | third-party
 //
 // Designed for:
 //   - Token-efficient storage (compact edge list derivative)
@@ -18,6 +22,7 @@
 //   - GNN input: node features (type, kind, name) + edge types
 //   - Path prediction: Markov chain over IMPORTS_SYMBOL edges
 //   - "What file exports function X?" — one-hop EXPORTS edge query
+//   - "Which imports are unused?" — unused-import detection per file
 //
 // Ignored: .env, .gitignore, node_modules, venv, .venv, __pycache__, dist, .git
 
@@ -46,10 +51,31 @@ export interface KGEdge {
   type: EdgeType;
 }
 
+/** How an import target was classified. */
+export type ImportClassification = "local" | "stdlib" | "third-party";
+
+/** A single imported name (the original name plus its local alias/binding). */
+export interface ImportName {
+  imported: string; // name as written after `import`/`from ... import`
+  local: string;    // local binding (alias, or the same as imported)
+}
+
+/** A resolved named-import record attached to a file node. */
+export interface NamedImport {
+  fromId: string;               // importing file node id
+  module: string;               // module path as written
+  names: ImportName[];          // imported names (symbols, or the module itself)
+  classification: ImportClassification;
+  targetFileId: string | null;  // resolved local file id, if any
+  targetNames: string[];        // local names that matched an exported symbol
+  unused: string[];             // local names never referenced outside import lines
+}
+
 export interface KnowledgeGraph {
   rootAbsPath: string;
   nodes: Map<string, KGNode>;  // id -> node
   edges: KGEdge[];
+  imports: NamedImport[];      // named imports (local + external) per file
 }
 
 // ── Constants ──
@@ -206,6 +232,54 @@ function shouldParseImports(ext: string): boolean {
   return IMPORTABLE_EXTS.has("." + ext);
 }
 
+// ── Import classification ──
+
+/** Python standard-library top-level modules (first dotted segment). */
+const PY_STDLIB_MODULES = new Set([
+  "abc", "argparse", "ast", "asyncio", "base64", "bisect", "builtins",
+  "calendar", "cmath", "collections", "concurrent", "configparser", "contextlib",
+  "copy", "csv", "ctypes", "dataclasses", "datetime", "decimal", "difflib",
+  "enum", "functools", "gc", "glob", "gzip", "hashlib", "heapq", "hmac",
+  "html", "http", "importlib", "inspect", "io", "itertools", "json", "keyword",
+  "linecache", "locale", "logging", "lzma", "marshal", "math", "mimetypes",
+  "multiprocessing", "operator", "os", "pathlib", "pickle", "platform", "pprint",
+  "profile", "pstats", "queue", "random", "re", "readline", "resource", "runpy",
+  "secrets", "shlex", "shutil", "signal", "site", "socket", "sqlite3", "ssl",
+  "stat", "statistics", "string", "struct", "subprocess", "sys", "sysconfig",
+  "tempfile", "textwrap", "threading", "time", "timeit", "tkinter", "token",
+  "tokenize", "traceback", "tracemalloc", "types", "typing", "unicodedata",
+  "unittest", "urllib", "uuid", "venv", "warnings", "weakref", "xml", "zipfile",
+  "zipimport", "zlib", "zoneinfo",
+]);
+
+/** Node.js built-in modules. */
+const NODE_BUILTIN_MODULES = new Set([
+  "assert", "async_hooks", "buffer", "child_process", "cluster", "console",
+  "constants", "crypto", "dgram", "diagnostics_channel", "dns", "domain",
+  "events", "fs", "http", "http2", "https", "inspector", "module", "net", "os",
+  "path", "perf_hooks", "process", "punycode", "querystring", "readline", "repl",
+  "stream", "string_decoder", "timers", "tls", "trace_events", "tty", "url",
+  "util", "v8", "vm", "wasi", "worker_threads", "zlib",
+]);
+
+/** Classify an import target as local, stdlib, or third-party. */
+export function classifyImport(module: string, fromFile: string, resolved: boolean): ImportClassification {
+  if (module.startsWith(".") || module.startsWith("/") || module.startsWith("@/")) return "local";
+
+  const ext = path.extname(fromFile).toLowerCase();
+  const top = module.split(/[./]/)[0];
+
+  if (ext === ".py" || ext === ".pyi" || ext === ".pyx") {
+    if (PY_STDLIB_MODULES.has(top)) return "stdlib";
+  } else {
+    if (module.startsWith("node:")) return "stdlib";
+    if (NODE_BUILTIN_MODULES.has(top)) return "stdlib";
+  }
+
+  if (resolved) return "local";
+  return "third-party";
+}
+
 // ── Builder ──
 
 let nodeSeq = 0;
@@ -233,58 +307,89 @@ export function buildKnowledgeGraph(workspacePath: string): KnowledgeGraph {
   const fileNodes: KGNode[] = [];
   walkDir(absRoot, rootId, nodes, edges, fileNodes);
 
-  // Parse imports for all source files
+  // Parse exports first → symbol nodes + EXPORTS edges, indexed for import matching.
+  const symbolIds = new Map<string, Map<string, string>>(); // fileId → (name → symbolId)
   for (const fileNode of fileNodes) {
-    const importEdges = parseImports(fileNode, nodes);
-    edges.push(...importEdges);
-  }
-
-  // Parse exports for TS/JS files → create symbol nodes + EXPORTS edges
-  const exportMap = new Map<string, { node: KGNode; names: Set<string> }>(); // fileId → info
-  for (const fileNode of fileNodes) {
-    const result = parseExports(fileNode, nodes);
+    const result = parseExports(fileNode);
     for (const symNode of result.nodes) {
       nodes.set(symNode.id, symNode);
-      let entry = exportMap.get(fileNode.id);
-      if (!entry) { entry = { node: fileNode, names: new Set() }; exportMap.set(fileNode.id, entry); }
-      entry.names.add(symNode.name);
+      let byName = symbolIds.get(fileNode.id);
+      if (!byName) { byName = new Map(); symbolIds.set(fileNode.id, byName); }
+      byName.set(symNode.name, symNode.id);
     }
     edges.push(...result.edges);
   }
 
-  // Match imports to specific exported symbols → IMPORTS_SYMBOL edges
+  // Parse imports → IMPORTS (file-level), IMPORTS_SYMBOL (precise), and named-import records.
+  const imports: NamedImport[] = [];
   for (const fileNode of fileNodes) {
     if (!shouldParseImports(fileNode.ext)) continue;
     let content: string;
     try { content = fs.readFileSync(fileNode.absPath, "utf-8"); } catch { continue; }
-    const namedImports = extractNamedImports(content, "." + fileNode.ext);
-    for (const { importPath, names } of namedImports) {
-      const target = resolveImportTarget(importPath, fileNode.absPath, nodes);
-      if (!target) continue;
-      const targetExports = exportMap.get(target.id);
-      if (!targetExports) continue;
-      for (const name of names) {
-        if (targetExports.names.has(name)) {
-          // Find the symbol node
-          for (const edge of edges) {
-            if (edge.type === "EXPORTS" && edge.fromId === target.id) {
-              const sym = nodes.get(edge.toId);
-              if (sym && sym.name === name) {
-                edges.push({
-                  id: nextEdgeId(),
-                  fromId: fileNode.id,
-                  toId: sym.id,
-                  type: "IMPORTS_SYMBOL",
-                });
-              }
+
+    const parsed = extractImports(content, "." + fileNode.ext);
+    for (const imp of parsed) {
+      const target = resolveImportTarget(imp.module, fileNode.absPath, nodes);
+      const classification = classifyImport(imp.module, fileNode.absPath, target !== null);
+
+      let targetFileId: string | null = null;
+      const targetNames: string[] = [];
+
+      if (target && target.type === "file") {
+        targetFileId = target.id;
+        edges.push({ id: nextEdgeId(), fromId: fileNode.id, toId: target.id, type: "IMPORTS" });
+        const byName = symbolIds.get(target.id);
+        if (byName) {
+          for (const name of imp.names) {
+            const symId = byName.get(name.imported);
+            if (symId) {
+              edges.push({ id: nextEdgeId(), fromId: fileNode.id, toId: symId, type: "IMPORTS_SYMBOL" });
+              targetNames.push(name.local);
             }
           }
         }
       }
+
+      const unused = imp.names
+        .filter((name) => !isNameUsed(content, name.local))
+        .map((name) => name.local);
+
+      imports.push({
+        fromId: fileNode.id,
+        module: imp.module,
+        names: imp.names,
+        classification,
+        targetFileId,
+        targetNames,
+        unused,
+      });
     }
   }
 
-  return { rootAbsPath: absRoot, nodes, edges };
+  return { rootAbsPath: absRoot, nodes, edges, imports };
+}
+
+/** Lightweight tree fingerprint (file count + latest mtime) for cache invalidation. */
+export function computeWorkspaceFingerprint(workspacePath: string): string {
+  let count = 0;
+  let latestMs = 0;
+  const walk = (dir: string): void => {
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      if (entry.isDirectory() && isIgnoredDir(entry.name)) continue;
+      if (!entry.isDirectory() && isIgnoredFile(entry.name)) continue;
+      const abs = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(abs);
+      } else {
+        count++;
+        try { latestMs = Math.max(latestMs, fs.statSync(abs).mtimeMs); } catch { /* ignore */ }
+      }
+    }
+  };
+  walk(path.resolve(workspacePath));
+  return `${count}:${Math.floor(latestMs)}`;
 }
 
 function walkDir(
@@ -333,62 +438,133 @@ function walkDir(
 
 // ── Import Parser ──
 
-function parseImports(fileNode: KGNode, nodes: Map<string, KGNode>): KGEdge[] {
-  if (!shouldParseImports(fileNode.ext)) return [];
-
-  let content: string;
-  try {
-    content = fs.readFileSync(fileNode.absPath, "utf-8");
-  } catch {
-    return [];
-  }
-
-  const edges: KGEdge[] = [];
-  const imports = extractImports(content, "." + fileNode.ext);
-
-  for (const imp of imports) {
-    const target = resolveImportTarget(imp, fileNode.absPath, nodes);
-    if (target) {
-      edges.push({
-        id: nextEdgeId(),
-        fromId: fileNode.id,
-        toId: target.id,
-        type: "IMPORTS",
-      });
-    }
-  }
-
-  return edges;
+interface ParsedImport {
+  module: string;
+  names: ImportName[];
 }
 
-/** Extract import paths from source content. */
-function extractImports(content: string, ext: string): string[] {
-  const results: string[] = [];
+/** Extract named imports (module + names) from source content. */
+function extractImports(content: string, ext: string): ParsedImport[] {
+  if (ext === ".py" || ext === ".pyi" || ext === ".pyx") {
+    return extractPythonImports(content);
+  }
+  return extractJsImports(content);
+}
 
-  if (ext === ".py") {
-    // Python: import foo, from foo import bar, from .foo import bar
-    const pyRe = /^(?:from\s+(\S+)\s+import|import\s+(\S+))/gm;
-    let m: RegExpExecArray | null;
-    while ((m = pyRe.exec(content)) !== null) {
-      const pkg = (m[1] || m[2]).trim();
-      if (pkg && !pkg.startsWith(".")) results.push(pkg);
+function stripInlineComment(text: string): string {
+  const idx = text.indexOf("#");
+  return (idx >= 0 ? text.slice(0, idx) : text).trim();
+}
+
+function parseImportNames(text: string): ImportName[] {
+  const names: ImportName[] = [];
+  for (const part of text.split(",")) {
+    const p = part.trim();
+    if (!p) continue;
+    const asMatch = p.match(/^([\w.]+)\s+as\s+(\w+)$/);
+    if (asMatch) names.push({ imported: asMatch[1], local: asMatch[2] });
+    else names.push({ imported: p, local: p });
+  }
+  return names;
+}
+
+/** Python: `import a, b as c` and `from X import a, b as c`. */
+function extractPythonImports(content: string): ParsedImport[] {
+  const results: ParsedImport[] = [];
+  for (const raw of content.split(/\r?\n/)) {
+    // Only module-level (column 0) imports; skip indented imports inside functions/classes.
+    if (!raw || /^[ \t]/.test(raw)) continue;
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+
+    let m = line.match(/^from\s+([\.\w]+)\s+import\s+(.+)$/);
+    if (m) {
+      const names = parseImportNames(stripInlineComment(m[2]));
+      if (names.length > 0) results.push({ module: m[1], names });
+      continue;
     }
-  } else {
-    // JS/TS: import ... from '...', require('...'), import('...')
-    const jsRe = /(?:import\s+(?:[\s\S]*?\s+from\s+)?['"]|require\s*\(\s*['"]|import\s*\(\s*['"])([^'"]+)['"]/g;
-    let m: RegExpExecArray | null;
-    while ((m = jsRe.exec(content)) !== null) {
-      const imp = m[1].trim();
-      // Only resolve relative imports or project-local paths
-      if (imp.startsWith(".") || imp.startsWith("/") || !imp.includes("/")) {
-        results.push(imp);
-      } else if (imp.startsWith("@/")) {
-        results.push(imp);
+
+    m = line.match(/^import\s+(.+)$/);
+    if (m) {
+      // `import os, json` → one record per top-level module.
+      for (const name of parseImportNames(stripInlineComment(m[1]))) {
+        results.push({ module: name.imported, names: [name] });
       }
     }
   }
+  return results;
+}
+
+/** JS/TS: named, default, namespace, and bare/dynamic imports. */
+function extractJsImports(content: string): ParsedImport[] {
+  const results: ParsedImport[] = [];
+  let m: RegExpExecArray | null;
+
+  // import { a, b as c } from 'mod'
+  const namedRe = /import\s*\{([^}]+)\}\s*from\s*['"]([^'"]+)['"]/g;
+  while ((m = namedRe.exec(content)) !== null) {
+    const names: ImportName[] = [];
+    for (const part of m[1].split(",")) {
+      const p = part.trim();
+      if (!p) continue;
+      const asMatch = p.match(/^([\w$]+)\s+as\s+([\w$]+)$/);
+      if (asMatch) names.push({ imported: asMatch[1], local: asMatch[2] });
+      else names.push({ imported: p, local: p });
+    }
+    if (names.length > 0) results.push({ module: m[2].trim(), names });
+  }
+
+  // import Default from 'mod' (also `import Default, { x } from 'mod'`)
+  const defaultRe = /import\s+([A-Za-z_$][\w$]*)\s*,?\s*(?:\{[^}]*\})?\s*from\s*['"]([^'"]+)['"]/g;
+  while ((m = defaultRe.exec(content)) !== null) {
+    results.push({ module: m[2].trim(), names: [{ imported: "default", local: m[1] }] });
+  }
+
+  // import * as ns from 'mod'
+  const nsRe = /import\s*\*\s*as\s+([A-Za-z_$][\w$]*)\s*from\s*['"]([^'"]+)['"]/g;
+  while ((m = nsRe.exec(content)) !== null) {
+    results.push({ module: m[2].trim(), names: [{ imported: "*", local: m[1] }] });
+  }
+
+  // require('mod') / import('mod') / side-effect import 'mod'
+  const bareRe = /(?:require\s*\(\s*['"]([^'"]+)['"]\s*\)|import\s*\(\s*['"]([^'"]+)['"]\s*\)|import\s*['"]([^'"]+)['"])/g;
+  while ((m = bareRe.exec(content)) !== null) {
+    const mod = m[1] || m[2] || m[3];
+    if (mod) results.push({ module: mod.trim(), names: [] });
+  }
 
   return results;
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** True if `name` appears as an identifier outside import/from statements. */
+function isNameUsed(content: string, name: string): boolean {
+  if (!name) return true;
+  const identRe = new RegExp(`(?<![A-Za-z0-9_])${escapeRegExp(name)}(?![A-Za-z0-9_])`);
+  let inString = false;
+  for (let raw of content.split(/\r?\n/)) {
+    // Strip trailing inline comments (best-effort).
+    const hashIdx = raw.indexOf("#");
+    if (hashIdx >= 0) raw = raw.slice(0, hashIdx);
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+
+    // Skip docstrings / multi-line strings (triple-quoted).
+    const triples = (raw.match(/"""/g) || []).length + (raw.match(/'''/g) || []).length;
+    if (inString) {
+      if (triples % 2 === 1) inString = false;
+      continue;
+    }
+    if (triples % 2 === 1) { inString = true; continue; }
+
+    // The import statement itself is not a usage.
+    if (/^(?:import\b|from\b|export\b)/.test(trimmed)) continue;
+    if (identRe.test(raw)) return true;
+  }
+  return false;
 }
 
 /** Resolve an import path to a node in the graph. */
@@ -400,11 +576,22 @@ function resolveImportTarget(
   const fromDir = path.dirname(fromFile);
   const candidates: string[] = [];
   const ext = path.extname(fromFile);
+  const isPython = ext === ".py" || ext === ".pyi" || ext === ".pyx";
 
   if (importPath.startsWith(".")) {
-    // Relative import
-    const resolved = path.resolve(fromDir, importPath);
-    candidates.push(resolved);
+    if (isPython) {
+      // Python relative import: leading dots = package levels, remainder = module.
+      let rest = importPath;
+      let levels = 0;
+      while (rest.startsWith(".")) { rest = rest.slice(1); levels++; }
+      if (rest) {
+        const up = "../".repeat(levels - 1);
+        candidates.push(path.resolve(fromDir, up, rest));
+      }
+      // `from . import x` / `from .. import x` → package-level, no single file target.
+    } else {
+      candidates.push(path.resolve(fromDir, importPath));
+    }
   } else if (importPath.startsWith("/")) {
     candidates.push(importPath);
   } else if (importPath.startsWith("@/")) {
@@ -436,17 +623,24 @@ function resolveImportTarget(
   return null;
 }
 
-// ── Export Parser (TypeScript/JavaScript AST) ──
+// ── Export Parser ──
 
 interface ExportResult {
   nodes: KGNode[];
   edges: KGEdge[];
 }
 
-/** Parse exports from a TS/JS file using the TypeScript compiler API. */
-function parseExports(fileNode: KGNode, _nodes: Map<string, KGNode>): ExportResult {
+/** Parse exported symbols from a supported source file into symbol nodes + EXPORTS edges. */
+function parseExports(fileNode: KGNode): ExportResult {
   const ext = "." + fileNode.ext;
-  if (!TS_PARSEABLE_EXTS.has(ext)) return { nodes: [], edges: [] };
+  if (TS_PARSEABLE_EXTS.has(ext)) return parseTsExports(fileNode);
+  if (PY_PARSEABLE_EXTS.has(ext)) return parsePythonExports(fileNode);
+  return { nodes: [], edges: [] };
+}
+
+/** Parse exports from a TS/JS file using the TypeScript compiler API. */
+function parseTsExports(fileNode: KGNode): ExportResult {
+  const ext = "." + fileNode.ext;
 
   let content: string;
   try { content = fs.readFileSync(fileNode.absPath, "utf-8"); } catch { return { nodes: [], edges: [] }; }
@@ -509,6 +703,12 @@ function parseExports(fileNode: KGNode, _nodes: Map<string, KGNode>): ExportResu
 }
 
 const TS_PARSEABLE_EXTS = new Set([".ts", ".tsx", ".mts", ".cts"]);
+const PY_PARSEABLE_EXTS = new Set([".py", ".pyi", ".pyx"]);
+
+/** Whether a file extension has an export parser. */
+export function canParseExports(ext: string): boolean {
+  return TS_PARSEABLE_EXTS.has("." + ext) || PY_PARSEABLE_EXTS.has("." + ext);
+}
 
 function addSymbol(result: ExportResult, fileNode: KGNode, name: string, kind: string): void {
   const id = nextNodeId();
@@ -520,23 +720,45 @@ function addSymbol(result: ExportResult, fileNode: KGNode, name: string, kind: s
   });
 }
 
-/** Extract named imports with their imported names and source path. */
-function extractNamedImports(content: string, _ext: string): Array<{ importPath: string; names: string[] }> {
-  const results: Array<{ importPath: string; names: string[] }> = [];
+/** Parse Python exports: module-level `def`, `class`, and `name = value` bindings. */
+function parsePythonExports(fileNode: KGNode): ExportResult {
+  let content: string;
+  try { content = fs.readFileSync(fileNode.absPath, "utf-8"); } catch { return { nodes: [], edges: [] }; }
 
-  // import { foo, bar } from './module'
-  const namedRe = /import\s*\{([^}]+)\}\s*from\s*['"]([^'"]+)['"]/g;
-  let m: RegExpExecArray | null;
-  while ((m = namedRe.exec(content)) !== null) {
-    const names = m[1].split(",").map((s) => {
-      // Handle "foo as bar" → extract "foo"
-      const asIdx = s.indexOf(" as ");
-      return (asIdx >= 0 ? s.slice(0, asIdx) : s).trim();
-    }).filter(Boolean);
-    results.push({ importPath: m[2].trim(), names });
+  const result: ExportResult = { nodes: [], edges: [] };
+  const seen = new Set<string>();
+
+  for (const line of content.split(/\r?\n/)) {
+    // Only module-level (column 0) definitions; skip indented blocks, comments, decorators.
+    if (!line || /^[ \t]/.test(line)) continue;
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("@")) continue;
+
+    let m: RegExpMatchArray | null;
+
+    m = line.match(/^(?:async\s+)?def\s+(\w+)\s*\(/);
+    if (m) { addPySymbol(result, fileNode, seen, m[1], "function"); continue; }
+
+    m = line.match(/^class\s+(\w+)\b/);
+    if (m) { addPySymbol(result, fileNode, seen, m[1], "class"); continue; }
+
+    // Annotated module-level binding: name: Type = value
+    m = line.match(/^([A-Za-z_]\w*)\s*:\s*[^=\n]+=/);
+    if (m) { addPySymbol(result, fileNode, seen, m[1], "const"); continue; }
+
+    // Plain module-level binding: name = value
+    m = line.match(/^([A-Za-z_]\w*)\s*=/);
+    if (m) addPySymbol(result, fileNode, seen, m[1], "const");
   }
 
-  return results;
+  return result;
+}
+
+function addPySymbol(result: ExportResult, fileNode: KGNode, seen: Set<string>, name: string, kind: string): void {
+  if (name.startsWith("_")) return; // skip private/dunder names
+  if (seen.has(name)) return;
+  seen.add(name);
+  addSymbol(result, fileNode, name, kind);
 }
 
 // ── Serialization ──
@@ -545,11 +767,13 @@ function extractNamedImports(content: string, _ext: string): Array<{ importPath:
 export function serializeGraph(graph: KnowledgeGraph): string {
   const lines: string[] = [];
 
-  lines.push(`# Knowledge Graph v2 — ${graph.rootAbsPath}`);
-  lines.push(`# Nodes: ${graph.nodes.size}  Edges: ${graph.edges.length}`);
+  lines.push(`# Knowledge Graph v3 — ${graph.rootAbsPath}`);
+  lines.push(`# Nodes: ${graph.nodes.size}  Edges: ${graph.edges.length}  Imports: ${graph.imports.length}`);
   lines.push(`# Format: n<id>|<type>|<parentId>||<name>|<kind>`);
   lines.push(`#         e<id>|<fromId>|<toId>|<type>`);
+  lines.push(`#         i<fromId>|<module>|<classification>|<targetFileId>|<names>|<unused>`);
   lines.push(`#   type: dir|file|symbol  kind: ext for files, function|class|const|type|interface|enum|default for symbols`);
+  lines.push(`#   classification: local|stdlib|third-party  names: imported:local pairs, unused: local names`);
   lines.push("");
 
   // Sort nodes for stable output
@@ -575,6 +799,14 @@ export function serializeGraph(graph: KnowledgeGraph): string {
     });
     for (const edge of sortedEdges) {
       lines.push(`e${edge.id.slice(1)}|${edge.fromId}|${edge.toId}|${edge.type}`);
+    }
+  }
+
+  if (graph.imports.length > 0) {
+    lines.push("");
+    for (const imp of graph.imports) {
+      const names = imp.names.map((n) => (n.imported === n.local ? n.local : `${n.imported}:${n.local}`)).join(",");
+      lines.push(`i${imp.fromId}|${imp.module}|${imp.classification}|${imp.targetFileId || ""}|${names}|${imp.unused.join(",")}`);
     }
   }
 

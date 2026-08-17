@@ -669,9 +669,10 @@ export class FileTrackingService {
         if (!line.startsWith("n")) continue;
         const parts = line.split("|");
         if (parts.length < 5) continue;
-        nodeMap.set("n" + parts[0].slice(1), {
+        // id and parentId already carry the "n" prefix in the .kg file
+        nodeMap.set(parts[0], {
           type: parts[1],
-          parentId: "n" + (parts[2] || ""),
+          parentId: parts[2] || "",
           name: parts[4],
         });
       }

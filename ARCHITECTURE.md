@@ -72,7 +72,7 @@ Get a key at [platform.deepseek.com](https://platform.deepseek.com).
 | **Chat History & Preferences** | `localStorage` → mirrored to `~/.h/store/client-state.json` | JSON on disk |
 | **Agent Memory** | `~/.h/memory/user_profile.md`, `~/.h/memory/projects/<slug>/…` | Markdown + JSONL |
 | **File Tracking Metadata** | `~/.h/store/file-tracking.json` | JSON (paths, sizes, checksums; no file contents) |
-| **Knowledge Graph Snapshots** | `~/.h/snapshots/file-tree-snapshot-<hash>.kg` | Edge-list format |
+| **Knowledge Graph Snapshots** | `~/.h/snapshots/file-tree-snapshot-<hash>.kg` | Edge-list + import records (classification, unused) |
 | **Port Discovery** | `%TEMP%/h-ports/express-port`, `vite-port` | Runtime only, not persisted |
 | **Single-instance Lock** | `%TEMP%/H-pid` | PID file |
 
@@ -663,9 +663,9 @@ d:\Other Projects\app       → MD5 → f6e5d4c3b2a1
 |------|------|
 | `server/fileTracking.ts` | `FileTrackingService` — singleton orchestrating Git or watcher mode, periodic Git detection, snapshot/patch logic |
 | `server/fileTrackingStore.ts` | `FileTrackingStore` — lightweight JSON-backed cache (`~/.h/store/file-tracking.json`) for file metadata |
-| `server/knowledgeGraph.ts` | `buildKnowledgeGraph()` — builds codebase graph with CONTAINS + IMPORTS edges, `.kg` serialization, `.txt` visualization |
+| `server/knowledgeGraph.ts` | `buildKnowledgeGraph()` — builds codebase graph (CONTAINS/EXPORTS/IMPORTS/IMPORTS_SYMBOL edges + named-import records with stdlib/local/third-party classification and unused-import detection), `.kg` serialization, `.txt` visualization, `computeWorkspaceFingerprint()` |
 | `~/.h/store/file-tracking.json` | On-disk metadata cache for watcher mode |
-| `~/.h/snapshots/file-tree-snapshot-<hash>.kg` | Per-workspace Knowledge Graph — nodes (dirs/files) + CONTAINS edges + parsed IMPORTS |
+| `~/.h/snapshots/file-tree-snapshot-<hash>.kg` | Per-workspace Knowledge Graph — dir/file/symbol nodes, CONTAINS/EXPORTS/IMPORTS/IMPORTS_SYMBOL edges, per-file import records (classification + unused) |
 | `~/.h/snapshots/file-tree-snapshot-<hash>.txt` | Human-readable visualization sidecar (nested tree with import annotations) |
 
 ## Knowledge Graph
@@ -674,7 +674,7 @@ H builds a **codebase knowledge graph** on folder open — a structured represen
 
 ### Schema
 
-The graph has three node types and four edge types:
+The graph has three node types, four edge types, and a per-file import record:
 
 | Node Type | Field | Description |
 |-----------|-------|-------------|
@@ -689,9 +689,18 @@ The graph has three node types and four edge types:
 | `IMPORTS` | file → file | File-level import (e.g. `import './utils'`) |
 | `IMPORTS_SYMBOL` | file → symbol | Precise symbol-level import (e.g. `import { foo } from './utils'`) |
 
+Each named import also becomes a `NamedImport` record: `{ fromId, module, names, classification, targetFileId, targetNames, unused }`. `classification` is `local` | `stdlib` | `third-party` (stdlib detection covers Python stdlib modules and Node.js built-ins), and `unused` lists imported names never referenced outside import statements — powering the `unused_imports` query.
+
 ### Symbol Parsing
 
-For TypeScript/JavaScript files (`.ts`, `.tsx`, `.mts`, `.cts`), the TypeScript compiler API parses the AST to extract exports:
+Symbols are parsed from TypeScript/JavaScript and Python source:
+
+| Language | Detected from |
+|----------|---------------|
+| TS/JS (`.ts`, `.tsx`, `.mts`, `.cts`) | TypeScript compiler API AST: `export function/class/const/type/interface/enum`, `export { x }`, `export default` |
+| Python (`.py`, `.pyi`, `.pyx`) | Module-level (column 0) `def foo()`, `class Foo:`, and `name = value` / `name: Type = value` bindings |
+
+TS/JS export kinds detected by the AST:
 
 | Kind | Detected from |
 |------|---------------|
@@ -703,17 +712,20 @@ For TypeScript/JavaScript files (`.ts`, `.tsx`, `.mts`, `.cts`), the TypeScript 
 | `enum` | `export enum E {}` |
 | `default` | `export default function/class/expr` |
 
-Named imports (`import { foo, bar } from './module'`) are matched to target file exports to create precise `IMPORTS_SYMBOL` edges — so the graph knows exactly *which symbol* depends on *which symbol*, not just which files.
+Named imports (`import { foo, bar } from './module'`) are matched to target file exports to create precise `IMPORTS_SYMBOL` edges — so the graph knows exactly *which symbol* depends on *which symbol*, not just which files. Imports are parsed as named, default, namespace (`import * as ns`), `require()`, dynamic `import()`, and side-effect imports in JS/TS; `import` and `from … import` (with `as` aliases) in Python.
 
 ### .kg Format (on disk)
 
 A compact edge-list format in `~/.h/snapshots/file-tree-snapshot-<hash>.kg`:
 
 ```
-# Knowledge Graph v2 — D:\Work Projects\H
-# Nodes: 384  Edges: 512
+# Knowledge Graph v3 — D:\Work Projects\H
+# Nodes: 384  Edges: 512  Imports: 120
 # Format: n<id>|<type>|<parentId>||<name>|<kind>
-#   type: dir|file|symbol
+#         e<id>|<fromId>|<toId>|<type>
+#         i<fromId>|<module>|<classification>|<targetFileId>|<names>|<unused>
+#   type: dir|file|symbol  classification: local|stdlib|third-party
+#   names: imported:local pairs (comma-joined)  unused: local names (comma-joined)
 
 n0|dir|||H|
 n1|file|n0||README.md|md
@@ -727,9 +739,14 @@ n7|symbol|n5||FileTrackingService|class
 e0|n0|n1|CONTAINS
 e47|n5|n6|EXPORTS
 e72|n3|n6|IMPORTS_SYMBOL
+
+in3|./fileTracking|local|n5|getFileTrackingService|
+in3|./legacy|local|n9|unusedThing|unusedThing
+in3|fs|stdlib||default:fs|
+in3|express|third-party||default:express|
 ```
 
-Each line is self-contained — parse with `split("|")`, reconstruct paths by walking parent chains. No JSON overhead, trivially diffable with line-based tools.
+Each line is self-contained — parse with `split("|")`, reconstruct paths by walking parent chains. No JSON overhead, trivially diffable with line-based tools. The `i` lines carry per-file import records so queries like `imports_of` (with stdlib/third-party tags) and `unused_imports` can be answered directly from the snapshot without re-reading source files.
 
 ### .txt Visualization (human-readable)
 
@@ -777,13 +794,13 @@ H and [Graphify](https://github.com/Graphify-Labs/graphify) share the same core 
 | | H | Graphify |
 |---|---|---|
 | **Trigger** | Always-on, built-in IDE feature | Manually invoked CLI skill (`/graphify`) |
-| **AST parsing** | TypeScript compiler API (TS/JS) | Tree-sitter (23 languages) |
+| **AST parsing** | TypeScript compiler API (TS/JS) + Python (def/class/module bindings) | Tree-sitter (23 languages) |
 | **LLM involvement** | Zero — purely deterministic | Two-pass: deterministic AST + Claude subagents for semantic/concept extraction |
 | **Output format** | Compact `.kg` edge list (token-optimized) + `.txt` visualization | `.graph.html` (interactive), `.graph.json` (NetworkX), `GRAPH_REPORT.md` |
 | **Multimodal** | Code files only | Code, PDFs, images, video, audio, diagrams |
 | **Community detection** | None | Leiden clustering — groups subsystems by edge density |
 | **Confidence tagging** | N/A (everything is EXTRACTED) | EXTRACTED / INFERRED / AMBIGUOUS |
-| **Query interface** | `read_graph` tool — 5 query types (structure, exports, imports_of, exporters_of, dependents) | Python NetworkX API + CLI |
+| **Query interface** | `read_graph` tool — 6 query types (structure, exports, imports_of, exporters_of, dependents, unused_imports) | Python NetworkX API + CLI |
 | **Update model** | Auto-rebuilds on file watcher events (2s debounce) | SHA256 cache — re-runs only changed files |
 | **Agent integration** | System prompt rule + tool registry | CLAUDE.md/AGENTS.md rules + PreToolUse hooks (fires before grep/glob) |
 | **Footprint** | Lightweight, minimal token overhead — always ready | Heavier but richer — HTML visualizations, plain-language reports, multi-format |
@@ -924,11 +941,12 @@ Agent calls run_in_terminal
 
 | Query | Format | Description | Example |
 |-------|--------|-------------|---------|
-| **Exports** | `exports <file>` | List all symbols exported by a file | `exports server/fileTracking.ts` |
-| **Imports of** | `imports_of <file>` | List all symbols and files imported by a file | `imports_of client/src/App.tsx` |
+| **Structure** | `structure` | Print the full directory tree (dirs + files, no symbols) | `structure` |
+| **Exports** | `exports <file>` | List all symbols exported by a file (TS/JS and Python) | `exports server/fileTracking.ts` |
+| **Imports of** | `imports_of <file>` | List all symbols and files imported by a file; stdlib/third-party imports are tagged | `imports_of client/src/App.tsx` |
 | **Exporters of** | `exporters_of <symbol>` | Find which files export a symbol with this name | `exporters_of getFileTrackingService` |
 | **Dependents** | `dependents <file>` | Find which files import from this file (reverse dependency) | `dependents server/fileTracking.ts` |
-| **Structure** | `structure` | Print the full directory tree (dirs + files, no symbols) | `structure` |
+| **Unused imports** | `unused_imports <file>` | List imports that are never referenced in the file | `unused_imports server/agent.ts` |
 
 ##### Query Details
 
@@ -940,16 +958,13 @@ getFileTrackingService:function
 TrackingMode:type
 ```
 
-**`imports_of <file>`** — Returns both symbol-level and file-level imports:
+**`imports_of <file>`** — Returns each imported name with its source. stdlib and third-party imports carry a tag:
 ```
-client/src/App.tsx imports:
-Symbol-level imports:
-  EditorPane from client/src/panes/EditorPane.tsx
-  StatusBar from client/src/panes/StatusBar.tsx
-File-level imports (3):
-  client/src/App.css
-  client/src/index.css
-  client/src/vite-env.d.ts
+server/agent.ts imports:
+  chatDeepSeekTool from ./deepseek
+  getSnapshotPath from ./hPaths
+  fs from fs [stdlib]
+  express from express [third-party]
 ```
 
 **`exporters_of <symbol>`** — Case-insensitive symbol search. Useful when you know a function name but not its location:
@@ -966,6 +981,13 @@ client/src/App.tsx
 client/src/panes/StatusBar.tsx
 server/agent.ts
 server/index.ts
+```
+
+**`unused_imports <file>`** — Lists imported names that never appear outside import statements. Useful for cleanup before a refactor:
+```
+server/legacy.ts unused imports:
+  unusedThing (from ./legacy)
+  oldHelper (from ./helpers)
 ```
 
 **`structure`** — Full directory tree for orientation. Returns sorted paths — no nesting, just one path per line for token efficiency:
@@ -988,6 +1010,7 @@ H/client/package.json
 | "Where is `initFileTracking` called?" | `grep` | Content search across files |
 | "Who imports from `fileTracking.ts`?" | `read_graph dependents` | Reverse dependency — impossible with grep alone |
 | "What files export a function named `foo`?" | `read_graph exporters_of` | Symbol-level query — grep would match comments, strings, calls |
+| "Which imports are unused in `agent.ts`?" | `read_graph unused_imports` | Tracked at build time — grep can't distinguish declarations from usage |
 | "Find all `.ts` files in `server/`" | `list_files` or `search_files` | File/directory listing |
 | "What does this project look like?" | `read_graph structure` | Full tree in one call |
 
@@ -1524,7 +1547,7 @@ The agent works with a fixed tool registry. To prevent it from inventing tools t
 - **Writing files** → use `write_file` (never `echo >`, `cp`)
 - **Running commands** → use `run_command` for short tasks, `run_in_terminal` for servers (never background with `&` or `nohup`)
 - **Checking diagnostics** → use `read_problems` (reads LSP diagnostics from the Problems tab — instant, no build command needed)
-- **Dependency/structural queries** → use `read_graph` (what exports X? who imports from Y?) — much faster than grep for these
+- **Dependency/structural queries** → use `read_graph` (what exports X? who imports from Y? which imports are unused?) — much faster than grep for these
 - **Starting servers** → use `run_in_terminal` only (never `run_command` for `python app.py`, `npm start`, etc.)
 
 ## MCP (Model Context Protocol)
@@ -1709,7 +1732,7 @@ H/
 │   ├── hPaths.ts                    # Centralized path resolution for ~/.h/ directory structure
 │   ├── fileTracking.ts              # Smart file tracking: auto-detects Git vs fs.watch watcher mode, mid-session Git detection, snapshot/patch file tree context
 │   ├── fileTrackingStore.ts         # JSON-backed file metadata cache (~/.h/store/file-tracking.json) for watcher mode
-│   ├── knowledgeGraph.ts            # Codebase knowledge graph builder: dir/file nodes, CONTAINS + IMPORTS edges, .kg serialization, visualization
+│   ├── knowledgeGraph.ts            # Codebase knowledge graph builder: dir/file/symbol nodes, CONTAINS/EXPORTS/IMPORTS/IMPORTS_SYMBOL edges, import classification + unused detection, .kg/.txt serialization
 │   └── __tests__/
 │       ├── agent.tooldefs.test.ts    # Tool definition schema validation
 │       ├── agent.fs.test.ts          # Filesystem tool execution tests

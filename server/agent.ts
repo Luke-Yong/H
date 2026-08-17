@@ -13,6 +13,7 @@ import { getSnapshotPath } from "./hPaths";
 import { getMemoryStore } from "./memory";
 import { killSession, getLastCreatedSessionId } from "./terminalManager";
 import { getDiagnosticsForRoot } from "./lsp";
+import { canParseExports } from "./knowledgeGraph";
 import fs from "fs";
 import path from "path";
 import os from "os";
@@ -926,18 +927,21 @@ export const TOOLS: ToolDef[] = [
     description:
       "Query the codebase knowledge graph. The graph tracks every file, directory, exported symbol "
       + "(functions, classes, types, etc.), and their relationships (CONTAINS, EXPORTS, IMPORTS, IMPORTS_SYMBOL). "
+      + "Symbols are parsed from TypeScript/JavaScript (AST) and Python (top-level def/class/module-level bindings). "
+      + "Imports are classified as local, stdlib, or third-party, and unused imports are tracked per file. "
       + "Use this for structural/dependency questions — it's faster than grepping or reading files. "
       + "For file contents, use read_file. For content search, use grep. "
       + "Query types:\n"
       + "- 'structure' — print the full directory tree. Use this FIRST for architecture/overview questions ('describe this project', 'what's the project layout?').\n"
       + "- 'exports <file>' — list all symbols exported by a file (functions, classes, consts, types, interfaces, enums)\n"
-      + "- 'imports_of <file>' — list all symbols imported by a file (with their source files)\n"
+      + "- 'imports_of <file>' — list all symbols imported by a file (stdlib/third-party imports are tagged)\n"
       + "- 'exporters_of <symbol>' — find which files export a symbol with this name\n"
-      + "- 'dependents <file>' — find which files import from this file",
+      + "- 'dependents <file>' — find which files import from this file\n"
+      + "- 'unused_imports <file>' — list imports that are never referenced in the file",
     parameters: {
       type: "object",
       properties: {
-        query: { type: "string", description: "Query string in the format '<query_type> <target>'. Examples: 'exports server/fileTracking.ts', 'exporters_of getFileTrackingService', 'imports_of client/src/App.tsx'." },
+        query: { type: "string", description: "Query string in the format '<query_type> <target>'. Examples: 'exports server/fileTracking.ts', 'exporters_of getFileTrackingService', 'imports_of client/src/App.tsx', 'unused_imports server/agent.ts'." },
       },
       required: ["query"],
     },
@@ -1636,22 +1640,24 @@ function runGraphQuery(query: string, projectRoot: string): string {
   const lines = raw.split(/\r?\n/).filter((l) => l && !l.startsWith("#"));
 
   // ── Parse nodes ──
+  // Format: n<id>|<type>|<parentId>||<name>|<kind>  (parentId already carries the "n" prefix)
   const nodes = new Map<string, { type: string; parentId: string; name: string; kind: string }>();
   for (const line of lines) {
     if (!line.startsWith("n")) continue;
     const parts = line.split("|");
     if (parts.length < 6) continue;
-    nodes.set("n" + parts[0].slice(1), {
-      type: parts[1], parentId: parts[2] ? "n" + parts[2] : "", name: parts[4], kind: parts[5],
+    nodes.set(parts[0], {
+      type: parts[1], parentId: parts[2] || "", name: parts[4], kind: parts[5],
     });
   }
 
   // ── Parse edges + build O(1) indexes ──
+  // Format: e<id>|<fromId>|<toId>|<type>
   // fromIndex: key = "TYPE|fromId" → edges
   const fromIndex = new Map<string, Array<{ to: string; type: string }>>();
   // toIndex: key = "TYPE|toId" → fromIds
   const toIndex = new Map<string, string[]>();
-  function indexEdge(key: string, fromId: string, toId: string, type: string): void {
+  function indexEdge(fromId: string, toId: string, type: string): void {
     const fk = type + "|" + fromId;
     let arr = fromIndex.get(fk);
     if (!arr) { arr = []; fromIndex.set(fk, arr); }
@@ -1665,11 +1671,32 @@ function runGraphQuery(query: string, projectRoot: string): string {
     if (!line.startsWith("e")) continue;
     const parts = line.split("|");
     if (parts.length < 4) continue;
-    // e<fromSeq>|<fromId>|<toId>|<type>
-    const fromId = "n" + parts[0].slice(1);
-    const toId = parts[2];
-    const type = parts[3];
-    indexEdge(parts[0], fromId, toId, type);
+    indexEdge(parts[1], parts[2], parts[3]);
+  }
+
+  // ── Parse import records ──
+  // Format: i<fromId>|<module>|<classification>|<targetFileId>|<names>|<unused>
+  // names: comma-joined "imported:local" pairs; unused: comma-joined local names.
+  const imports: Array<{
+    fromId: string; module: string; classification: string;
+    targetFileId: string | null; names: Array<{ imported: string; local: string }>; unused: string[];
+  }> = [];
+  for (const line of lines) {
+    if (!line.startsWith("i")) continue;
+    const parts = line.split("|");
+    if (parts.length < 6) continue;
+    const names = parts[4].split(",").filter(Boolean).map((p) => {
+      const ci = p.indexOf(":");
+      return ci >= 0 ? { imported: p.slice(0, ci), local: p.slice(ci + 1) } : { imported: p, local: p };
+    });
+    imports.push({
+      fromId: parts[0].slice(1),
+      module: parts[1],
+      classification: parts[2],
+      targetFileId: parts[3] || null,
+      names,
+      unused: parts[5].split(",").filter(Boolean),
+    });
   }
 
   // ── Pre-resolve all paths (one recursive walk per node, cached) ──
@@ -1734,8 +1761,13 @@ function runGraphQuery(query: string, projectRoot: string): string {
   if (qType === "exports") {
     const fileId = findFileId(qTarget);
     if (!fileId) return `File not found in graph: ${qTarget}`;
+    const fileNode = nodes.get(fileId);
     const symEdges = fromIndex.get("EXPORTS|" + fileId) || [];
-    if (symEdges.length === 0) return `${resolvePath(fileId)} exports nothing (or is not a TypeScript file).`;
+    if (symEdges.length === 0) {
+      const ext = fileNode ? fileNode.kind : "";
+      if (canParseExports(ext)) return `${resolvePath(fileId)} exports nothing.`;
+      return `${resolvePath(fileId)} exports nothing (no symbol parser for .${ext || "?"} files).`;
+    }
     const syms = symEdges.map((e) => {
       const sym = nodes.get(e.to);
       return sym ? `${sym.name}:${sym.kind}` : "?";
@@ -1753,25 +1785,57 @@ function runGraphQuery(query: string, projectRoot: string): string {
   if (qType === "imports_of") {
     const fileId = findFileId(qTarget);
     if (!fileId) return `File not found in graph: ${qTarget}`;
-    const symImports = fromIndex.get("IMPORTS_SYMBOL|" + fileId) || [];
-    const fileImports = fromIndex.get("IMPORTS|" + fileId) || [];
     const parts: string[] = [];
-    if (symImports.length > 0) {
-      parts.push("Symbol-level imports:");
-      for (const e of symImports) {
-        const sym = nodes.get(e.to);
-        const fpath = sym ? resolvePath(sym.parentId) : "?";
-        parts.push(`  ${sym?.name || "?"} from ${fpath}`);
-      }
-    }
+    // Prefer the named-import records (stdlib/third-party tags); fall back to edges.
+    const fileImports = imports.filter((imp) => imp.fromId === fileId);
     if (fileImports.length > 0) {
-      parts.push(`File-level imports (${fileImports.length}):`);
-      for (const e of fileImports) {
-        parts.push(`  ${resolvePath(e.to)}`);
+      for (const imp of fileImports) {
+        const src = imp.targetFileId ? resolvePath(imp.targetFileId) : imp.module;
+        const tag = imp.classification === "local" ? "" : ` [${imp.classification}]`;
+        if (imp.names.length === 0) {
+          parts.push(`  ${src}${tag}`);
+        } else {
+          for (const name of imp.names) {
+            parts.push(`  ${name.local} from ${src}${tag}`);
+          }
+        }
+      }
+    } else {
+      const symImports = fromIndex.get("IMPORTS_SYMBOL|" + fileId) || [];
+      const fileLevel = fromIndex.get("IMPORTS|" + fileId) || [];
+      if (symImports.length > 0) {
+        parts.push("Symbol-level imports:");
+        for (const e of symImports) {
+          const sym = nodes.get(e.to);
+          const fpath = sym ? resolvePath(sym.parentId) : "?";
+          parts.push(`  ${sym?.name || "?"} from ${fpath}`);
+        }
+      }
+      if (fileLevel.length > 0) {
+        parts.push(`File-level imports (${fileLevel.length}):`);
+        for (const e of fileLevel) {
+          parts.push(`  ${resolvePath(e.to)}`);
+        }
       }
     }
     if (parts.length === 0) return `${resolvePath(fileId)} imports nothing.`;
     return `${resolvePath(fileId)} imports:\n${parts.join("\n")}`;
+  }
+
+  if (qType === "unused_imports" || qType === "unused") {
+    const fileId = findFileId(qTarget);
+    if (!fileId) return `File not found in graph: ${qTarget}`;
+    const unused: string[] = [];
+    for (const imp of imports) {
+      if (imp.fromId !== fileId) continue;
+      for (const name of imp.unused) unused.push(`  ${name} (from ${imp.module})`);
+    }
+    if (unused.length === 0) {
+      return imports.length === 0
+        ? `${resolvePath(fileId)} has no unused imports (graph snapshot has no import records — reopen the folder to rebuild).`
+        : `${resolvePath(fileId)} has no unused imports.`;
+    }
+    return `${resolvePath(fileId)} unused imports:\n${unused.join("\n")}`;
   }
 
   if (qType === "dependents") {
@@ -1794,7 +1858,7 @@ function runGraphQuery(query: string, projectRoot: string): string {
     return `${resolvePath(fileId)} is imported by:\n${depList.join("\n")}`;
   }
 
-  return `Unknown query type '${qType}'. Valid types: 'exports <file>', 'imports_of <file>', 'exporters_of <symbol>', 'dependents <file>', 'structure'.`;
+  return `Unknown query type '${qType}'. Valid types: 'structure', 'exports <file>', 'imports_of <file>', 'exporters_of <symbol>', 'dependents <file>', 'unused_imports <file>'.`;
 }
 
 // ── Memory tools ──
