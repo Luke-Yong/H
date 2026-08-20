@@ -7,6 +7,7 @@ import type { BrowserViewHandle } from "./BrowserView";
 import TerminalPane, { type DebugConsoleEntry, type OutputEntry, type ProblemEntry, type BrowserConsoleEntry } from "./TerminalPane";
 import type { AgentTerminalBridge } from "./AgentTerminalBridge";
 import { VFile, createFile, detectLanguage, fileIconUrl } from "./fileModel";
+import FilePreview, { previewKindOf } from "./FilePreview";
 import { readFileFromHandle, writeFileToHandle } from "./browserFs";
 import { useResizable, ResizeHandle } from "../hooks/useResizable";
 import NameDialog from "./NameDialog";
@@ -146,6 +147,231 @@ function normPath(p: string | undefined | null): string {
   return p.replace(/\\/g, "/").replace(/^([a-zA-Z]):/, (_m, d) => d.toUpperCase() + ":");
 }
 
+// ── Breadcrumb symbol hierarchy ──────────────────────────────────────────────
+// Build a NESTED symbol tree (top level > 2nd level > …) from source structure,
+// so the breadcrumb can show only the symbols enclosing the current scroll line.
+
+interface SymbolNode {
+  name: string;
+  line: number;
+  endLine: number;
+  depth: number;
+  children: SymbolNode[];
+}
+
+// Void HTML elements (no closing tag) — used for markup nesting.
+const HTML_VOID_TAGS = new Set([
+  "area", "base", "br", "col", "embed", "hr", "img", "input",
+  "link", "meta", "param", "source", "track", "wbr",
+]);
+
+function symbolRegexFor(language: string): RegExp | null {
+  const symLangs = new Set([
+    "typescript", "javascript", "python", "go", "rust", "java", "csharp",
+    "c", "cpp", "php", "kotlin", "swift", "ruby",
+  ]);
+  if (symLangs.has(language)) {
+    if (language === "python") return /^\s*(?:async\s+)?(?:def|class)\s+(\w+)/;
+    return new RegExp(
+      "^\\s*(?:export\\s+|default\\s+|abstract\\s+|public\\s+|private\\s+|protected\\s+|static\\s+|async\\s+|declare\\s+)*" +
+      "(?:function\\*?\\s+|class\\s+|interface\\s+|enum\\s+|namespace\\s+)(\\w+)" +
+      "|" +
+      "^\\s*(?:export\\s+)?(?:const|let|var)\\s+(\\w+)\\s*=\\s*(?:async\\s*)?(?:\\([^)]*\\)|[A-Za-z_$][\\w$]*)\\s*=>"
+    );
+  }
+  // CSS-family: selectors and at-rules (e.g. `.card`, `#app`, `@media`, `@keyframes x`)
+  if (language === "css" || language === "scss" || language === "less") {
+    return /^\s*((?:@[\w-]+[^{]*|[.#&:]*[\w-]+(?:[\s>+~,:.#&][\w-]+)*))\s*\{/;
+  }
+  return null;
+}
+
+/** Turn a regex match into a display name (differs per language family). */
+function symbolNameFromMatch(language: string, m: RegExpExecArray): string {
+  let name = (m[1] || m[2] || "").trim();
+  const isCssFamily = language === "css" || language === "scss" || language === "less";
+  if (isCssFamily && name.startsWith("@")) {
+    const parts = name.split(/\s+/);
+    name = parts[0] === "@keyframes" && parts[1] ? `${parts[0]} ${parts[1]}` : parts[0];
+  }
+  return name;
+}
+
+// Match a markup symbol on a line: `tag#id` (id) > `tag.class` (class) > `<style>/<script>/<template>`.
+// Breadcrumb shows these as the HTML outline, e.g. `div.gantt`, `style`, `script`.
+function matchMarkupSymbol(line: string): { name: string } | null {
+  const clean = line.replace(/<!--[\s\S]*?-->/g, "");
+  const reTag = /<([\w-]+)((?:[^<>]*?))\/?\s*>/g;
+  let m: RegExpExecArray | null;
+  while ((m = reTag.exec(clean))) {
+    const full = m[0];
+    if (full.startsWith("</")) continue;
+    const tag = m[1].toLowerCase();
+    const attrs = m[2] || "";
+    const id = /(?:^|\s)id\s*=\s*["']([^"']+)["']/.exec(attrs);
+    if (id) return { name: `${tag}#${id[1]}` };
+    const cls = /(?:^|\s)class\s*=\s*["']([^"']+)["']/.exec(attrs);
+    if (cls) {
+      const first = cls[1].trim().split(/\s+/)[0];
+      if (first) return { name: `${tag}.${first}` };
+    }
+    if (tag === "style" || tag === "script" || tag === "template") {
+      return { name: tag };
+    }
+  }
+  return null;
+}
+
+/** Advance a tag stack over one line of markup (returns the new stack length). */
+function scanMarkupTags(line: string, stack: string[]): number {
+  const clean = line
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/<!DOCTYPE[^>]*>/gi, "");
+  const reTag = /<\/?([\w-]+)([^>]*)>/g;
+  let m: RegExpExecArray | null;
+  while ((m = reTag.exec(clean))) {
+    const full = m[0];
+    const tag = m[1].toLowerCase();
+    const rest = m[2].trim();
+    if (full.startsWith("</")) {
+      const idx = stack.lastIndexOf(tag);
+      if (idx >= 0) stack.splice(idx);
+    } else if (!HTML_VOID_TAGS.has(tag) && !rest.endsWith("/")) {
+      stack.push(tag);
+    }
+  }
+  return stack.length;
+}
+
+// Extract symbols with their nesting depth and line span.
+function buildSymbolTree(content: string, language: string): SymbolNode[] {
+  const isMarkup = language === "html" || language === "xml";
+  const re = isMarkup ? null : symbolRegexFor(language);
+  if (!re && !isMarkup) return [];
+  const lines = content.split("\n");
+  const lastLine = lines.length;
+  const isPy = language === "python";
+
+  const raws: SymbolNode[] = [];
+  const open: SymbolNode[] = [];
+  if (isPy) {
+    let lastCodeIndent = 0;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (/^\s*$/.test(line) || /^\s*#/.test(line)) continue; // blank / comment: no nesting change
+      const indent = (line.match(/^[ \t]*/) || [""])[0];
+      const depth = indent.includes("\t") ? indent.length : Math.round(indent.length / 4);
+      // Dedent closes any symbol at or below this indent.
+      if (depth < lastCodeIndent) {
+        for (const node of open) {
+          if (node.endLine === -1 && node.depth >= depth) node.endLine = i;
+        }
+      }
+      lastCodeIndent = depth;
+      const m = re!.exec(line);
+      if (m) {
+        const node: SymbolNode = { name: symbolNameFromMatch(language, m), line: i + 1, depth, endLine: -1, children: [] };
+        raws.push(node);
+        open.push(node);
+      }
+    }
+  } else if (isMarkup) {
+    const tagStack: string[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const sym = matchMarkupSymbol(line);
+      if (sym) {
+        const node: SymbolNode = {
+          name: sym.name,
+          line: i + 1,
+          depth: tagStack.length,
+          endLine: -1,
+          children: [],
+        };
+        raws.push(node);
+        open.push(node);
+      }
+      const depth = scanMarkupTags(line, tagStack);
+      // A symbol ends when the tag depth returns to its starting depth.
+      for (const node of open) {
+        if (node.endLine === -1 && depth <= node.depth) node.endLine = i + 1;
+      }
+    }
+  } else {
+    let braceDepth = 0;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const startDepth = braceDepth;
+      const m = re!.exec(line);
+      if (m) {
+        const node: SymbolNode = { name: symbolNameFromMatch(language, m), line: i + 1, depth: startDepth, endLine: -1, children: [] };
+        raws.push(node);
+        open.push(node);
+      }
+      const closes = (line.match(/}/g) || []).length;
+      braceDepth += (line.match(/{/g) || []).length - closes;
+      // A symbol ends when the brace depth returns to its starting depth.
+      if (closes > 0) {
+        for (const node of open) {
+          if (node.endLine === -1 && braceDepth <= node.depth) node.endLine = i + 1;
+        }
+      }
+    }
+  }
+  for (const node of open) if (node.endLine === -1) node.endLine = lastLine;
+
+  // Assemble the tree: parent = nearest previous node whose span contains this one.
+  const roots: SymbolNode[] = [];
+  for (let i = 0; i < raws.length; i++) {
+    const n = raws[i];
+    let parent: SymbolNode | null = null;
+    for (let j = i - 1; j >= 0; j--) {
+      const p = raws[j];
+      if (p.line < n.line && p.depth < n.depth && n.line <= p.endLine) { parent = p; break; }
+    }
+    if (parent) parent.children.push(n);
+    else roots.push(n);
+  }
+  return roots;
+}
+
+// Breadcrumb trail at a given line: the nested symbols enclosing it, outermost first.
+function symbolPathAtLine(nodes: SymbolNode[], line: number): SymbolNode[] {
+  const path: SymbolNode[] = [];
+  let cur = nodes;
+  while (cur.length) {
+    const hit = cur.find((n) => line >= n.line && line <= n.endLine);
+    if (!hit) break;
+    path.push(hit);
+    cur = hit.children;
+  }
+  return path;
+}
+
+// Breadcrumb segments for the bar below the editor tabs:
+// project-relative directories > file name > enclosing symbols at the scroll line.
+function breadcrumbFor(
+  file: VFile | undefined,
+  fsBasePath: string,
+  tree: SymbolNode[],
+  line: number
+): { label: string; kind: "dir" | "file" | "symbol"; line?: number }[] {
+  if (!file) return [];
+  const segs: { label: string; kind: "dir" | "file" | "symbol"; line?: number }[] = [];
+  let rel = file.name;
+  if (file._fsPath) {
+    const norm = normPath(file._fsPath);
+    const base = normPath(fsBasePath).replace(/\/+$/, "");
+    rel = base && (norm === base || norm.startsWith(base + "/")) ? norm.slice(base.length + 1) : norm;
+  }
+  const parts = rel.split(/[/\\]/).filter(Boolean);
+  parts.forEach((p, idx) => segs.push({ label: p, kind: idx === parts.length - 1 ? "file" : "dir" }));
+  for (const s of symbolPathAtLine(tree, line)) {
+    segs.push({ label: s.name, kind: "symbol", line: s.line });
+  }
+  return segs;
+}
+
 // Map LSP CompletionItemKind to Monaco CompletionItemKind
 function mapLspKind(kind: number | undefined): number {
   // Monaco kind range: 0..27 (see monaco.languages.CompletionItemKind)
@@ -159,6 +385,8 @@ interface EditorViewHandle {
   setPosition: (position: { lineNumber: number; column: number }) => void;
   revealPositionInCenter: (position: { lineNumber: number; column: number }) => void;
   onDidChangeCursorPosition: (cb: (e: { position: { lineNumber: number; column: number } }) => void) => { dispose: () => void };
+  getVisibleRanges?: () => { startLineNumber: number; endLineNumber: number }[];
+  onDidScrollChange?: (cb: () => void) => { dispose: () => void };
   getModel?: () => any;
   deltaDecorations: (oldDecorations: string[], newDecorations: any[]) => string[];
 }
@@ -240,12 +468,27 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   const agentDiffsRef = useRef(agentDiffs);
   agentDiffsRef.current = agentDiffs;
   const agentDiffDecoRef = useRef<Record<string, string[]>>({}); // fileId → decorationIds
+  // fileId → preview layout ("editor" | "split" | "preview") for previewable files
+  const [previewModeByFile, setPreviewModeByFile] = useState<Record<string, "editor" | "split" | "preview">>({});
+  // fileId → top visible line (breadcrumb follows scroll position)
+  const [crumbLineByFile, setCrumbLineByFile] = useState<Record<string, number>>({});
 
   const handleWelcomeClick = useCallback((fn: () => void) => {
     const now = Date.now();
     if (now - welcomeClickLockRef.current < 800) return;
     welcomeClickLockRef.current = now;
     fn();
+  }, []);
+
+  // Jump the editor to a symbol (breadcrumb click).
+  const goToSymbolLine = useCallback((fileId: string, line: number) => {
+    setActiveFileId(fileId);
+    requestAnimationFrame(() => {
+      const ed = editorByFileIdRef.current[fileId];
+      if (!ed) return;
+      (ed as any).revealPositionInCenter?.({ lineNumber: line, column: 1 });
+      (ed as any).focus?.();
+    });
   }, []);
 
   const handleOpenSettings = useCallback(() => {
@@ -938,6 +1181,16 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   const activeFile = files.find((f) => f.id === activeFileId);
   const activeLanguage = activeFile?.language || "plaintext";
   const activeEncoding = activeFile?._encoding || "UTF-8";
+
+  // Nested symbol tree for the active file (breadcrumb follows scroll position).
+  const activeSymbolTree = useMemo(
+    () => (activeFile ? buildSymbolTree(activeFile.content, activeFile.language) : []),
+    [activeFile?.id, activeFile?.content]
+  );
+  const breadcrumbSegs = useMemo(
+    () => breadcrumbFor(activeFile, fsBasePath, activeSymbolTree, crumbLineByFile[activeFile?.id || ""] || 1),
+    [activeFile, fsBasePath, activeSymbolTree, crumbLineByFile]
+  );
 
   const handleSetLanguage = useCallback((lang: string) => {
     if (!activeFileId) return;
@@ -2323,6 +2576,47 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
             <button className="editor-tab editor-tab-add" onClick={onAddBrowserTab} title="Open browser">+ 🌐</button>
           )}
         </div>
+        {activeFile && (() => {
+          const kind = previewKindOf(activeFile);
+          const mode = previewModeByFile[activeFile.id] || "editor";
+          return (
+            <div className="editor-breadcrumb-bar">
+              <div className="editor-breadcrumb">
+                {breadcrumbSegs.map((seg, i) => (
+                  <span key={i} className="editor-breadcrumb-seg">
+                    {i > 0 && <span className="editor-breadcrumb-sep"><i className="codicon codicon-chevron-right" /></span>}
+                    <button
+                      className={`editor-breadcrumb-item ${seg.kind}`}
+                      title={seg.kind === "dir" ? seg.label : seg.kind === "file" ? seg.label : `Go to ${seg.label} (line ${seg.line})`}
+                      onClick={() => {
+                        if (seg.kind === "file") setActiveFileId(activeFile.id);
+                        else if (seg.kind === "symbol" && seg.line) goToSymbolLine(activeFile.id, seg.line);
+                      }}
+                    >
+                      <i className={`codicon codicon-${seg.kind === "dir" ? "folder" : seg.kind === "file" ? "file-code" : "symbol-method"}`} />
+                      {seg.label}
+                    </button>
+                  </span>
+                ))}
+              </div>
+              <div className="editor-breadcrumb-actions">
+                {kind && (
+                  <div className="editor-preview-toggle">
+                    <button className={mode === "editor" ? "active" : ""} onClick={() => setPreviewModeByFile((p) => ({ ...p, [activeFile.id]: "editor" }))} title="Editor view">
+                      <i className="codicon codicon-code" /> Editor
+                    </button>
+                    <button className={mode === "split" ? "active" : ""} onClick={() => setPreviewModeByFile((p) => ({ ...p, [activeFile.id]: "split" }))} title="Editor and preview side by side">
+                      <i className="codicon codicon-split-horizontal" /> Split
+                    </button>
+                    <button className={mode === "preview" ? "active" : ""} onClick={() => setPreviewModeByFile((p) => ({ ...p, [activeFile.id]: "preview" }))} title="Preview only">
+                      <i className="codicon codicon-eye" /> Preview
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })()}
         <div className="editor-main" style={{ flex: 1, overflow: "hidden" }}>
           {/* ── Agent diff accept/reject banner ── */}
           {agentDiffs[activeFileId] && (
@@ -2411,8 +2705,16 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
                 />
               </div>
             )}
-            {files.map((f) => (
-              <div key={f.id} style={{ display: f.id === activeFileId ? "flex" : "none", height: "100%" }}>
+            {files.map((f) => {
+              const isActive = f.id === activeFileId;
+              const previewable = previewKindOf(f);
+              const mode = previewModeByFile[f.id] || "editor";
+              const showEditor = !previewable || mode !== "preview";
+              const showPreview = !!previewable && mode !== "editor";
+              return (
+              <div key={f.id} style={{ display: isActive ? "flex" : "none", height: "100%" }}>
+                {showEditor && (
+                  <div style={{ flex: 1, height: "100%", minWidth: 0 }}>
                 <Editor
                   height="100%" language={f.language} theme="vs-dark"
                   value={f.content} onChange={(val) => updateFile(f.id, val || "")}
@@ -2458,7 +2760,18 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
                   onMount={(editor) => {
                     const ed = editor as EditorViewHandle;
                     editorByFileIdRef.current[f.id] = ed;
+                    // Breadcrumb follows the top visible line as the user scrolls.
+                    const syncCrumb = () => {
+                      try {
+                        const ranges = ed.getVisibleRanges?.();
+                        const top = ranges && ranges.length ? ranges[0].startLineNumber : undefined;
+                        if (!top) return;
+                        setCrumbLineByFile((prev) => (prev[f.id] === top ? prev : { ...prev, [f.id]: top }));
+                      } catch { /* editor disposed */ }
+                    };
+                    ed.onDidScrollChange?.(syncCrumb);
                     ed.onDidChangeCursorPosition((e: { position: { lineNumber: number; column: number } }) => {
+                      syncCrumb();
                       if (activeFileIdRef.current === f.id) {
                         setCursorPos({ line: e.position.lineNumber, column: e.position.column });
                       }
@@ -2541,8 +2854,16 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
                   onValidate={(markers) => updateProblemMarkers(f.id, markers)}
                   options={{ minimap: { enabled: false }, fontSize: 13, wordWrap: "on", scrollBeyondLastLine: false, automaticLayout: true, tabSize: 2, lineNumbers: "on", renderWhitespace: "selection", glyphMargin: true, overviewRulerLanes: 3, hideCursorInOverviewRuler: true, overviewRulerBorder: false, scrollbar: { vertical: "visible", verticalScrollbarSize: 14, alwaysConsumeMouseWheel: false } }}
                 />
+                  </div>
+                )}
+                {showPreview && (
+                  <div style={{ flex: 1, height: "100%", minWidth: 0, borderLeft: mode === "split" ? "1px solid var(--border)" : "none" }}>
+                    <FilePreview file={f} />
+                  </div>
+                )}
               </div>
-            ))}
+              );
+            })}
           </div>
         </div>
         {terminalVisible && (
