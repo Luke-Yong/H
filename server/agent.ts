@@ -10,7 +10,7 @@
 
 import { chatDeepSeekTool, chatDeepSeekToolStream, type DeepSeekApiUsage } from "./deepseek";
 import { getSnapshotPath } from "./hPaths";
-import { getMemoryStore } from "./memory";
+import { getMemoryContext, getMemoryStore, guessScope, getUserProfileContext } from "./memory";
 import { killSession, getLastCreatedSessionId } from "./terminalManager";
 import { getDiagnosticsForRoot } from "./lsp";
 import { canParseExports } from "./knowledgeGraph";
@@ -81,6 +81,10 @@ export interface AgentState {
   latestProblems?: { errorCount: number; warningCount: number; summary: string };
   /** Cumulative DeepSeek API usage across the current run. */
   apiUsageTotals?: DeepSeekApiUsage & { requestCount: number };
+  /** Relevance-selected memory block for this turn (set by the API layer
+   *  before the loop; consumed by buildSystemPrompt). Falls back to the full
+   *  memory context when absent. */
+  memorySelection?: string;
 }
 
 // ── Step-by-Step Types ──
@@ -1876,7 +1880,14 @@ function runMemoryTool(
     const key = String(params.key || "").trim();
     const value = String(params.value || "");
     const category = String(params.category || "general");
-    const scope = String(params.scope || "project") === "user" ? "user" : "project";
+    const explicitScope = String(params.scope || "").toLowerCase();
+    // Accuracy guard: the model's chosen scope is corrected by deterministic
+    // rules (identity/global facts → user, codebase-specific → project).
+    const guessed = guessScope(key, value);
+    const scope: "user" | "project" =
+      explicitScope === "user" || explicitScope === "project"
+        ? (explicitScope === "user" ? "user" : "project")
+        : (guessed || "project");
     const tagsStr = String(params.tags || "");
     const tags = tagsStr ? tagsStr.split(",").map((t) => t.trim()).filter(Boolean) : [];
 
@@ -2148,7 +2159,7 @@ function buildOpenAiMessages(state: AgentState, context: string): ModelMessage[]
   const promptMessages = state.historySummary
     ? [{ role: "assistant", content: state.historySummary } as AgentMessage, ...state.messages]
     : state.messages;
-  const systemMsg = buildSystemPrompt(promptMessages, context)
+  const systemMsg = buildSystemPrompt(promptMessages, context, state.projectRoot, state.memorySelection)
     + (state.historySummary ? `\n\n### Earlier conversation summary\n${state.historySummary}` : "");
 
   const msgs: ModelMessage[] = [{ role: "system", content: systemMsg }];
@@ -2622,12 +2633,23 @@ function extractToolNames(
 function buildSystemPrompt(
   messages: Array<{ role: string; content: string | null; name?: string }>,
   context: string,
+  projectRoot?: string,
+  memoryBlock?: string,
 ): string {
   // Always include core rules
   const parts: string[] = [CORE_RULES];
 
+  // Always include persistent memory (user profile + project memory) so the
+  // agent knows the user every turn — Trae-style. Read fresh each turn so
+  // edits made via the memory tools are reflected immediately. When the API
+  // layer pre-selected a relevance-ranked subset (state.memorySelection),
+  // use that instead of the full block.
+  const memoryContext = memoryBlock ?? (projectRoot ? getMemoryContext(projectRoot) : "");
+  if (memoryContext) parts.push(`### Persistent Memory (from ~/.h/memory/)\n${memoryContext}`);
+
   // Build a combined text blob from all message content for keyword matching
   let combined = context || "";
+  if (memoryContext) combined += "\n" + memoryContext;
   for (const m of messages) {
     if (m.content) combined += "\n" + m.content;
     if (m.role === "user") combined += "\n" + (m.content || "");
@@ -2665,7 +2687,7 @@ function buildSystemPrompt(
   const result = parts.join("\n\n");
   const totalChars = result.length;
   const estTokens = Math.round(totalChars / 4);
-  console.log(`[ITR] prompt: ${totalChars} chars (~${estTokens} tokens) | ${selectedChunks.length + 1} chunks selected${skippedChunks.length > 0 ? `, ${skippedChunks.length} skipped` : ""}`);
+  console.log(`[ITR] prompt: ${totalChars} chars (~${estTokens} tokens) | ${selectedChunks.length + 1} chunks selected${skippedChunks.length > 0 ? `, ${skippedChunks.length} skipped` : ""}${memoryContext ? " | memory: yes" : " | memory: none"}`);
   if (skippedChunks.length > 0) {
     console.log(`[ITR]   included: ${selectedChunks.join(", ")}`);
     console.log(`[ITR]   skipped:  ${skippedChunks.join(", ")}`);
@@ -2681,7 +2703,13 @@ function buildOpenAiMessagesForSubAgent(
   state: AgentState,
   customSystemPrompt: string,
 ): ModelMessage[] {
-  const msgs: ModelMessage[] = [{ role: "system", content: customSystemPrompt }];
+  // Inject a compact user-profile subset into sub-agent prompts so delegated
+  // tasks also respect cross-project preferences (e.g. response style, brand colors).
+  const profileBlock = getUserProfileContext();
+  const systemPrompt = profileBlock
+    ? `${customSystemPrompt}\n\n### User Profile (auto-injected)\n${profileBlock}`
+    : customSystemPrompt;
+  const msgs: ModelMessage[] = [{ role: "system", content: systemPrompt }];
 
   // Build a map of tool_call_id → content from all tool messages in state.
   // This lets us emit tool responses immediately after their assistant message,

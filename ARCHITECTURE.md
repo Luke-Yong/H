@@ -1248,19 +1248,27 @@ The problem lock ensures the agent cannot declare a task complete while known er
 
 ### Persistent Memory
 
-H includes a **cross-session memory system** backed by plain files. The agent can store key decisions, user preferences, project conventions, and discovered patterns — and recall them in future sessions.
+H includes a **cross-session memory system** backed by plain files (`~/.h/memory/`). The agent can store key decisions, user preferences, project conventions, and discovered patterns — and recall them in future sessions. Stored memory is also **auto-injected into the system prompt every turn**, so the agent always knows the user without needing to call a tool first.
 
 #### How it works
 
 ```
-Agent detects an important fact
-  → calls remember(key, value, category, tags, scope)
+READ (every turn, automatic):
+  user message arrives → /api/chat/agent[/stream]
+    ├─ autoCapturePreference(message)     — writes explicit preferences (best-effort)
+    └─ selectMemoryContext(root, message) — ranks entries (keyword + cached embeddings)
+                                             → state.memorySelection (top-K)
+  buildSystemPrompt(CORE_RULES + memory block + chunks)
+    └─ memory block = memorySelection || getMemoryContext(root)   ← always present
+
+WRITE (explicit):
+  Agent calls remember(key, value, category, tags, scope)
+    ├─ scope = explicit || guessScope(key, value) || "project"
+    └─ key normalized (near-duplicates merge); overwrites logged to history.jsonl
   → written to user_profile.md (scope=user) or projects/<slug>/project_memory.md (scope=project)
 
-Next session:
-  → Agent calls recall(query: "UI framework")
-  → Keyword search over memory files (markdown + JSONL)
-  → Returns ranked results
+MAINTENANCE (async, after each run):
+  runMemoryMaintenance(root) — merges semantic duplicates (embedding cosine > 0.95)
 ```
 
 #### Tools
@@ -1271,30 +1279,47 @@ Next session:
 | `recall` | Search stored memories by keyword or exact key. Also greps `topics.md` and `session_memory_*.jsonl` for matching context. Pass no params to list all memories. |
 | `forget` | Remove a stored memory by its key. Use when a decision is reversed, a preference changes, or stored information becomes outdated. |
 
+#### Write accuracy
+
+- **Scope guard** (`guessScope`): deterministic rules correct the model-chosen scope — identity/global facts (`timezone`, `preferred-model`, `language`, …) are forced to `user`; codebase-specific keys (`api-auth-method`, `server-port`, paths ending in `.ts/.py/…`) are forced to `project`. An explicit `scope` passed by the model wins over the guess.
+- **Key normalization & dedup** (`normalizeKey`): `"Indent Style"` and `"indent-style"` are the same memory — re-remembering with a spelling variant updates the existing entry instead of duplicating.
+- **Overwrite history**: when a value changes, the old value is appended to `history.jsonl` next to the memory file — nothing is silently lost.
+- **Automatic capture** (`autoCapturePreference`): high-precision regex patterns (`I prefer …`, `from now on use …`, `let's use …`) extract explicit preferences from the user message and store them as `pref-*` entries. Repeats are skipped; ordinary conversation is never captured.
+
+#### Relevance-ranked injection
+
+- Each user turn, `selectMemoryContext()` scores every entry against the current message (keyword hits + cosine similarity to a cached per-entry embedding). The top-K (default 6) replace the fixed 4000-char dump in `state.memorySelection`; the prompt builder consumes it synchronously — zero network calls per agent iteration.
+- Entry embeddings are cached and invalidated only when the value changes. If embeddings are unavailable (API/tier), ranking falls back to keyword-only.
+- Sub-agents get a compact user-profile subset (`getUserProfileContext()`, ≤1500 chars) so delegated tasks also respect cross-project preferences.
+
 #### Storage
 
 | Detail | Value |
 |--------|-------|
 | User memory | `~/.h/memory/user_profile.md` (cross-project) |
 | Project memory | `~/.h/memory/projects/<slug>/project_memory.md` (per project) |
+| Overwrite/merge history | `history.jsonl` beside each memory file |
 | Session log | `~/.h/memory/projects/<slug>/<YYYYMMDD>/session_memory_<sessionId>.jsonl` (append-only) |
 | Topics | `~/.h/memory/projects/<slug>/<YYYYMMDD>/topics.md` (goal/progress/summary) |
 | API Keys | AES-256-GCM encrypted file at `~/.h/store/api-keys.enc` (persistent, survives restarts and app updates) |
 | Client State | JSON file at `~/.h/store/client-state.json` — mirrors all browser `localStorage` data (model, chat history, recent paths, open tabs, presets, terminal history) so it survives reinstalls |
-| Retrieval | Keyword search over markdown/jsonl files (grep-style); no embeddings or native database dependency |
+| Retrieval | Keyword scoring + cached-embedding cosine ranking (`generateEmbedding`); keyword-only fallback |
 
 #### When the agent uses memory
 
-- **Proactive storage**: When the user says "let's use X", "I prefer Y", or establishes a project convention, the agent calls `remember` without being asked.
-- **Session startup**: The agent is instructed to `recall` relevant memories at the start of a task to pick up past decisions and preferences.
+- **Proactive storage**: When the user says "let's use X", "I prefer Y", or establishes a project convention, the agent calls `remember` without being asked (`autoCapturePreference` may capture it first).
+- **Every turn**: user profile + project memory are injected into the system prompt automatically — no `recall` needed for stored facts.
+- **Session startup**: `recall` still helps surface older `topics.md` / `session_memory_*.jsonl` context not stored as structured entries.
 - **Memory cleanup**: When preferences change or decisions are reversed, the agent can `forget` outdated entries.
 
 #### Files
 
 | File | Role |
 |------|------|
-| `server/memory.ts` | `MemoryStore` class — file CRUD, keyword search, session/topic logging, global singleton |
-| `server/agent.ts` | `runMemoryTool()` — tool execution handler; wired in both `agentLoop()` and `agentLoopStream()` |
+| `server/memory.ts` | `MemoryStore` (CRUD + keyword search + session/topic logs), `guessScope`, `normalizeKey`, `autoCapturePreference`, `selectMemoryContext`, `runMemoryMaintenance`, raw profile read/write |
+| `server/agent.ts` | `runMemoryTool()`, scope guard in `remember`, memory block in `buildSystemPrompt`, sub-agent injection |
+| `server/index.ts` | Auto-capture + relevance selection before the loop, maintenance after the run, `GET/POST /api/memory/profile` |
+| `client/src/panes/SettingsDialog.tsx` | Settings → Memory tab (edit `user_profile.md`) |
 
 ## Agent Command Catalog
 

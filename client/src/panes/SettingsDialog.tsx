@@ -5,7 +5,7 @@ interface Props {
   onClose: () => void;
 }
 
-type TabId = "model" | "about";
+type TabId = "model" | "memory" | "about";
 
 // ── Model & API Key management ──
 
@@ -123,6 +123,75 @@ function ModelApiTab() {
           </div>
         )}
         <p className="settings-hint">Your API key is encrypted at rest (AES-256-GCM) and never stored in browser localStorage. Get a key at <a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noopener">platform.deepseek.com</a>.</p>
+        {status && <p className={`settings-status ${status.startsWith("Error") ? "settings-status-error" : ""}`}>{status}</p>}
+      </div>
+    </div>
+  );
+}
+
+// ── Memory tab (user profile editor) ──
+// Reads/writes ~/.h/memory/user_profile.md via the server API. Saved content
+// is injected into the agent's system prompt every turn.
+
+function MemoryTab() {
+  const [content, setContent] = useState("");
+  const [loaded, setLoaded] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [status, setStatus] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      const res = await fetch("/api/memory/profile?scope=user");
+      const data = await res.json();
+      setContent(data?.content ?? "");
+    } catch { setContent(""); }
+    finally { setLoaded(true); }
+  }, []);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const save = useCallback(async () => {
+    setSaving(true); setStatus("");
+    try {
+      const res = await fetch("/api/memory/profile", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scope: "user", content }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(String(data?.error || `HTTP ${res.status}`));
+      }
+      setStatus("User profile saved — injected into every agent turn.");
+    } catch (err: any) {
+      setStatus(`Error: ${err.message}`);
+    } finally { setSaving(false); }
+  }, [content]);
+
+  if (!loaded) return <div className="settings-tab-loading">Loading memory...</div>;
+
+  return (
+    <div className="settings-tab-content">
+      <div className="settings-section">
+        <label className="settings-label">User Profile (persistent memory)</label>
+        <textarea
+          className="settings-textarea"
+          rows={16}
+          value={content}
+          onChange={(e) => setContent(e.target.value)}
+          placeholder={'# User Profile\n\n## response-style\n- category: preference\n- tags: communication\n- value: Direct, technical, implementation-focused.'}
+        />
+        <p className="settings-hint">
+          File: <code>~/.h/memory/user_profile.md</code>. Entries follow the format:
+          <code>## key</code> then <code>- category:</code> / <code>- tags:</code> / <code>- value:</code>.
+          Cross-project facts only — project conventions live in <code>project_memory.md</code>.
+        </p>
+        <div className="settings-model-row" style={{ marginTop: 8 }}>
+          <button className="settings-btn settings-btn-primary" onClick={save} disabled={saving}>
+            {saving ? "Saving..." : "Save Profile"}
+          </button>
+          <button className="settings-btn" onClick={() => void load()}>Reload</button>
+        </div>
         {status && <p className={`settings-status ${status.startsWith("Error") ? "settings-status-error" : ""}`}>{status}</p>}
       </div>
     </div>
@@ -267,6 +336,9 @@ export default function SettingsDialog({ open, onClose }: Props) {
           <button className={`settings-tab ${tab === "model" ? "active" : ""}`} onClick={() => setTab("model")}>
             <i className="codicon codicon-server" /> Model &amp; API Key
           </button>
+          <button className={`settings-tab ${tab === "memory" ? "active" : ""}`} onClick={() => setTab("memory")}>
+            <i className="codicon codicon-database" /> Memory
+          </button>
           <button className={`settings-tab ${tab === "about" ? "active" : ""}`} onClick={() => setTab("about")}>
             <i className="codicon codicon-info" /> About
           </button>
@@ -274,6 +346,7 @@ export default function SettingsDialog({ open, onClose }: Props) {
 
         <div className="dialog-body settings-dialog-body">
           {tab === "model" && <ModelApiTab />}
+          {tab === "memory" && <MemoryTab />}
           {tab === "about" && <AboutTab />}
         </div>
       </div>

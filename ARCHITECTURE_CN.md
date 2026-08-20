@@ -1231,19 +1231,27 @@ Agent: task_complete
 
 ### 持久化记忆
 
-H 包含一个基于纯文件的**跨会话记忆系统**。Agent 可以存储关键决策、用户偏好、项目约定和发现的模式 — 并在未来的会话中回忆它们。
+H 包含一个基于纯文件（`~/.h/memory/`）的**跨会话记忆系统**。Agent 可以存储关键决策、用户偏好、项目约定和发现的模式 — 并在未来的会话中回忆它们。已存储的记忆还会**每回合自动注入系统提示词**，Agent 无需先调用任何工具就能始终了解用户。
 
 #### 工作原理
 
 ```
-Agent 检测到重要事实
-  → 调用 remember(key, value, category, tags, scope)
+读取（每回合，自动）：
+  用户消息到达 → /api/chat/agent[/stream]
+    ├─ autoCapturePreference(message)     — 写入显式偏好（尽力而为）
+    └─ selectMemoryContext(root, message) — 对条目排序（关键词 + 缓存 embedding）
+                                             → state.memorySelection（top-K）
+  buildSystemPrompt(CORE_RULES + 记忆块 + 指令块)
+    └─ 记忆块 = memorySelection || getMemoryContext(root)   ← 始终存在
+
+写入（显式）：
+  Agent 调用 remember(key, value, category, tags, scope)
+    ├─ scope = 显式值 || guessScope(key, value) || "project"
+    └─ key 归一化（近似重复自动合并）；覆盖写入记录到 history.jsonl
   → 写入 user_profile.md（scope=user）或 projects/<slug>/project_memory.md（scope=project）
 
-下一会话：
-  → Agent 调用 recall(query: "UI framework")
-  → 对记忆文件（markdown + JSONL）进行关键词搜索
-  → 返回排序结果
+维护（异步，每次运行后）：
+  runMemoryMaintenance(root) — 合并语义重复条目（embedding 余弦 > 0.95）
 ```
 
 #### 工具
@@ -1254,30 +1262,47 @@ Agent 检测到重要事实
 | `recall` | 按关键词或精确键搜索存储的记忆。同时会搜索 `topics.md` 和 `session_memory_*.jsonl` 中的匹配上下文。不传参数则列出所有记忆。 |
 | `forget` | 按其键移除存储的记忆。当决策被撤销、偏好改变或存储的信息过时时使用。 |
 
+#### 写入准确性
+
+- **Scope 守卫**（`guessScope`）：确定性规则纠正模型选择的 scope — 身份/全局事实（`timezone`、`preferred-model`、`language` 等）强制归入 `user`；代码库专属键（`api-auth-method`、`server-port`、以 `.ts/.py/…` 结尾的路径）强制归入 `project`。模型显式传入的 `scope` 优先于猜测结果。
+- **Key 归一化去重**（`normalizeKey`）：`"Indent Style"` 与 `"indent-style"` 视为同一条记忆 — 用拼写变体再次写入会更新现有条目，而不是产生重复。
+- **覆盖历史**：值变更时，旧值追加到记忆文件旁的 `history.jsonl` — 任何信息都不会被静默丢弃。
+- **自动捕获**（`autoCapturePreference`）：高精度正则句式（`I prefer …`、`from now on use …`、`let's use …`）从用户消息中提取显式偏好，以 `pref-*` 前缀的条目存储。重复内容跳过；普通对话永不捕获。
+
+#### 相关性排序注入
+
+- 每个用户回合，`selectMemoryContext()` 依据当前消息对所有条目打分（关键词命中 + 与缓存条目向量的余弦相似度）。top-K（默认 6）替代固定的 4000 字全量注入，写入 `state.memorySelection`；提示词构建同步消费 — 每个 agent 迭代零网络调用。
+- 条目向量按值缓存，仅在值变化时失效。若 embedding 不可用（API/套餐限制），自动降级为纯关键词排序。
+- 子 Agent 获得精简的用户档案子集（`getUserProfileContext()`，≤1500 字符），使委派任务同样遵循跨项目偏好。
+
 #### 存储
 
 | 详情 | 值 |
 |--------|------|
 | 用户记忆 | `~/.h/memory/user_profile.md`（跨项目） |
 | 项目记忆 | `~/.h/memory/projects/<slug>/project_memory.md`（按项目） |
+| 覆盖/合并历史 | 各记忆文件旁的 `history.jsonl` |
 | 会话日志 | `~/.h/memory/projects/<slug>/<YYYYMMDD>/session_memory_<sessionId>.jsonl`（仅追加） |
 | 主题 | `~/.h/memory/projects/<slug>/<YYYYMMDD>/topics.md`（目标/进度/摘要） |
 | API Keys | AES-256-GCM 加密文件位于 `~/.h/store/api-keys.enc`（持久化，在重启和应用更新后仍然存在） |
 | 客户端状态 | JSON 文件位于 `~/.h/store/client-state.json` — 镜像所有浏览器 `localStorage` 数据（模型、聊天历史、最近路径、打开标签页、预设、终端历史），以便在重装后仍然存在 |
-| 检索 | 对 markdown/jsonl 文件进行关键词搜索（grep 式）；无嵌入或原生数据库依赖 |
+| 检索 | 关键词打分 + 缓存 embedding 余弦排序（`generateEmbedding`）；embedding 不可用时回退为纯关键词 |
 
 #### Agent 何时使用记忆
 
-- **主动存储**：当用户说"让我们用 X"，"我更喜欢 Y"，或建立项目约定时，Agent 无需被要求即可调用 `remember`。
-- **会话启动**：Agent 被指示在任务开始时 `recall` 相关记忆，以获取过去的决策和偏好。
+- **主动存储**：当用户说"让我们用 X"，"我更喜欢 Y"，或建立项目约定时，Agent 无需被要求即可调用 `remember`（`autoCapturePreference` 可能先一步完成捕获）。
+- **每回合**：用户档案 + 项目记忆自动注入系统提示词 — 已存储的事实无需 `recall`。
+- **会话启动**：`recall` 仍可用于找回未被结构化存储的旧 `topics.md` / `session_memory_*.jsonl` 上下文。
 - **记忆清理**：当偏好改变或决策被撤销时，Agent 可以 `forget` 过时的条目。
 
 #### 文件
 
 | 文件 | 职责 |
 |------|------|
-| `server/memory.ts` | `MemoryStore` 类 — 文件 CRUD、关键词搜索、会话/主题日志、全局单例 |
-| `server/agent.ts` | `runMemoryTool()` — 工具执行处理程序；在 `agentLoop()` 和 `agentLoopStream()` 中均已连接 |
+| `server/memory.ts` | `MemoryStore`（CRUD + 关键词搜索 + 会话/主题日志）、`guessScope`、`normalizeKey`、`autoCapturePreference`、`selectMemoryContext`、`runMemoryMaintenance`、档案文件原始读写 |
+| `server/agent.ts` | `runMemoryTool()`、`remember` 中的 scope 守卫、`buildSystemPrompt` 中的记忆块、子 Agent 注入 |
+| `server/index.ts` | 循环前的自动捕获 + 相关性选取、运行后的维护、`GET/POST /api/memory/profile` |
+| `client/src/panes/SettingsDialog.tsx` | 设置 → 记忆标签页（编辑 `user_profile.md`） |
 
 ## Agent 命令目录
 

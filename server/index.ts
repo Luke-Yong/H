@@ -5,6 +5,7 @@ import http from "http";
 import https from "https";
 import { WebSocketServer, WebSocket } from "ws";
 import { chatDeepSeek } from "./deepseek";
+import { autoCapturePreference, selectMemoryContext, runMemoryMaintenance, getProfileRaw, setProfileRaw } from "./memory";
 import {
   createSession, writeToSession, resizeSession,
   killSession, killAllInGroup, setLastWsGroupKey, getLastWsGroupKey, getLastCreatedSessionId,
@@ -167,7 +168,18 @@ app.post("/api/chat/agent", async (req, res) => {
       : `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const state = createAgentSession(sessionId, root, message, context || "", Array.isArray(latestTodos) ? latestTodos : null);
 
+    // Memory: capture high-confidence preferences + select relevant entries for this turn.
+    try {
+      const cap = autoCapturePreference(root, message);
+      if (cap) broadcast({ type: "log", data: `Memory: captured "${cap.key}" → ${cap.scope} profile` });
+    } catch { /* best-effort */ }
+    try {
+      state.memorySelection = await selectMemoryContext(root, message, apiKey, 6);
+    } catch { /* embeddings unavailable — fall back to full memory context */ }
+
     const result = await agentLoop(root, state, context || "", { model, apiKey });
+    // Session-end memory maintenance (async, non-blocking).
+    runMemoryMaintenance(root, sessionId, apiKey).catch(() => {});
 
     if (result.phase === "tool_needed") {
       broadcast({ type: "agent_tool", data: { sessionId, tool: result.tool, executedTools: result.executedTools } });
@@ -288,6 +300,15 @@ app.post("/api/chat/agent/stream", async (req, res) => {
       : `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const state = createAgentSession(sessionId, root, message, context || "", Array.isArray(latestTodos) ? latestTodos : null);
 
+    // Memory: capture high-confidence preferences + select relevant entries for this turn.
+    try {
+      const cap = autoCapturePreference(root, message);
+      if (cap) broadcast({ type: "log", data: `Memory: captured "${cap.key}" → ${cap.scope} profile` });
+    } catch { /* best-effort */ }
+    try {
+      state.memorySelection = await selectMemoryContext(root, message, apiKey, 6);
+    } catch { /* embeddings unavailable — fall back to full memory context */ }
+
     // SSE headers
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
@@ -318,6 +339,9 @@ app.post("/api/chat/agent/stream", async (req, res) => {
       await sendAndMaybeYeld(event);
       if (event.type === "browser_tool" || event.type === "permission_required" || event.type === "done" || event.type === "error") break;
     }
+
+    // Session-end memory maintenance (async, non-blocking).
+    runMemoryMaintenance(root, sessionId, apiKey).catch(() => {});
 
     res.end();
   } catch (err) {
@@ -653,6 +677,26 @@ app.delete("/api/chat/agent/sessions/:threadId", (req, res) => {
   }
 });
 app.options("/api/chat/agent/sessions/:threadId", (_req, res) => { res.sendStatus(204); });
+
+// ── Memory profile editing (user_profile.md / project_memory.md) ──
+// Raw markdown read/write so the user can edit their profile directly in the UI.
+app.get("/api/memory/profile", (req, res) => {
+  const scope = req.query.scope === "project" ? "project" : "user";
+  const projectRoot = req.query.projectRoot ? String(req.query.projectRoot) : process.cwd();
+  res.json({ scope, projectRoot, content: getProfileRaw(scope, projectRoot) });
+});
+
+app.post("/api/memory/profile", (req, res) => {
+  const { scope: rawScope, content, projectRoot } = req.body || {};
+  const scope = rawScope === "project" ? "project" : "user";
+  if (typeof content !== "string") return res.status(400).json({ error: "Missing content" });
+  try {
+    setProfileRaw(scope, projectRoot || process.cwd(), content);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
 
 // ── File system API ──
 function safePath(userPath: string): string {

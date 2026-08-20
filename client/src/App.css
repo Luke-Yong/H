@@ -4044,6 +4044,12 @@ body.resizing * { user-select: none; }
   min-width: 0;
 }
 .settings-input:focus { border-color: var(--accent); }
+.settings-textarea {
+  width: 100%; box-sizing: border-box; background: #3c3c3c; border: 1px solid #555;
+  border-radius: 4px; color: var(--text); font-size: 12px; padding: 8px; outline: none;
+  font-family: var(--font-mono, monospace); resize: vertical; line-height: 1.5;
+}
+.settings-textarea:focus { border-color: var(--accent); }
 
 .settings-btn {
   display: flex; align-items: center; gap: 4px;
