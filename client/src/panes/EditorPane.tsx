@@ -1195,9 +1195,13 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     }
 
     // Always re-read from disk (skip handles — those are browser File System API).
+    // readErr holds the message when the disk read fails (e.g. file deleted),
+    // so the fallback below can show a clear error instead of "undefined".
+    let readErr = "";
     if (!handle && !existing?._isNew) {
       try {
         const res = await fetch(`/api/fs/read?path=${encodeURIComponent(resolvedPath)}`);
+        if (!res.ok) throw new Error(`Unable to read file (HTTP ${res.status}): ${resolvedPath}`);
         const data = await res.json();
         let openId = existing?.id || "";
         if (existing) {
@@ -1223,8 +1227,14 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
         }
         setActiveFileId(openId);
         return;
-      } catch {
-        // Read failed — fall through to create tab with error content
+      } catch (err) {
+        // Read failed — fall through to create tab with error content.
+        // Don't clobber an already-open tab's (possibly unsaved) content.
+        if (existing) {
+          setActiveFileId(existing.id);
+          return;
+        }
+        readErr = err instanceof Error ? err.message : String(err);
       }
     }
 
@@ -1238,11 +1248,19 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
       if (handle) {
         f.content = await readFileFromHandle(handle);
         f._fsHandle = handle;
+      } else if (readErr) {
+        f.content = readErr;
       } else {
         const res = await fetch(`/api/fs/read?path=${encodeURIComponent(resolvedPath)}`);
-        const data = await res.json();
-        f.content = data.content;
-        f._encoding = data.encoding || "utf8";
+        if (!res.ok) {
+          let detail = "";
+          try { const e = await res.json(); detail = e?.error || ""; } catch { /* */ }
+          f.content = `Unable to read file (HTTP ${res.status}): ${detail || resolvedPath}`;
+        } else {
+          const data = await res.json();
+          f.content = data.content;
+          f._encoding = data.encoding || "utf8";
+        }
       }
       // Authoritative check against the *latest* tab list to avoid a duplicate
       // when two reads for the same file are in flight (rapid clicks).
