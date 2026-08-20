@@ -28,6 +28,7 @@
   - [多 Agent 委托](#多-agent-委托)
   - [IDE 驱动的分步执行 (强制 Todo)](#ide-驱动的分步执行-强制-todo)
   - [持久化记忆](#持久化记忆)
+  - [客户端状态持久化](#客户端状态持久化)
 - [Agent 命令目录](#agent-命令目录)
 - [按语言排查问题](#按语言排查问题)
 - [MCP (模型上下文协议)](#mcp-模型上下文协议)
@@ -1303,6 +1304,30 @@ H 包含一个基于纯文件（`~/.h/memory/`）的**跨会话记忆系统**。
 | `server/agent.ts` | `runMemoryTool()`、`remember` 中的 scope 守卫、`buildSystemPrompt` 中的记忆块、子 Agent 注入 |
 | `server/index.ts` | 循环前的自动捕获 + 相关性选取、运行后的维护、`GET/POST /api/memory/profile` |
 | `client/src/panes/SettingsDialog.tsx` | 设置 → 记忆标签页（编辑 `user_profile.md`） |
+
+### 客户端状态持久化
+
+所有 `h` 前缀的 `localStorage` 键都会镜像到 `~/.h/store/client-state.json`，使 UI 状态在重装后仍然保留。Agent 控制台按项目文件夹各存一个键 — `h-chat-threads:<规范化路径>` — 这是一个 `ChatThread` 数组，每个线程包含完整对话（`messages`、`thought`、`fileChanges`、`todos`）以及该线程的 `usage`（token 数、上下文限制、回合数）。
+
+#### 写入时机
+
+| 触发 | 延迟 | 位置 |
+|------|------|------|
+| 周期自动保存 | 30 秒 | `stateSync.startAutoSave()` |
+| 应用退出（`beforeunload`） | 立即 | keepalive 请求（正文 ≤64 KB） |
+| 每次 `threads` 变化 | 下一个渲染周期 | threads 持久化 effect → `saveThreads()` + `saveStateNow()` |
+| **Agent 回合结束（`done`）** | ~50 毫秒 | `flushThreadsNow(usage)` — 最终回复 + usage 立即落盘 |
+| Agent 运行被停止 | 立即 | stop 处理器 `saveThreads()` + `saveStateNow()` |
+
+`saveStateNow()` 通过 `POST /api/client/state` 提交整个镜像状态；服务器写入 `~/.h/store/client-state.json`。启动时客户端调用 `GET /api/client/state`，将每个已持久化的键恢复回 `localStorage`。
+
+#### 文件
+
+| 文件 | 职责 |
+|------|------|
+| `client/src/stateSync.ts` | 收集/保存/恢复：`saveState`、`saveStateNow`、`startAutoSave`、`loadPersistedState` |
+| `client/src/panes/AgentConsole.tsx` | `flushThreadsNow(usage)` — 回合结束立即落盘消息 + usage |
+| `server/index.ts` | `GET/POST /api/client/state` → `~/.h/store/client-state.json` |
 
 ## Agent 命令目录
 

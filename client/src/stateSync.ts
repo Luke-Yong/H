@@ -70,10 +70,14 @@ export async function loadPersistedState(): Promise<void> {
     if (!state || Object.keys(state).length === 0) return;
 
     for (const [key, value] of Object.entries(state)) {
-      // Restore all persisted keys — overwrite any stale localStorage
-      // (e.g. from browser cache in Electron dev mode)
+      // Restore only keys the browser does NOT already have. The live
+      // localStorage copy is continuously updated client-side, so it may be
+      // newer than the mirrored file — e.g. the dev server was stopped
+      // (Ctrl+C) before the mirror POST completed. Overwriting it with the
+      // stale file would lose the latest agent turn/usage.
       if (key.startsWith(LOCALSTORAGE_PREFIX)) {
         try {
+          if (localStorage.getItem(key) !== null) continue;
           localStorage.setItem(key, value);
         } catch {}
       }

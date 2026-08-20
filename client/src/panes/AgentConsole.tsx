@@ -835,6 +835,32 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages]); // reload on messages change (files may be created)
 
+  // Latest-message mirror so the turn-end flush can persist the finished turn
+  // (final assistant reply + usage) with the truly current messages.
+  const messagesRef = useRef<ConsoleMessage[]>([]);
+  useEffect(() => { messagesRef.current = messages; });
+
+  // Immediately persist the current thread (messages + optional usage) to
+  // localStorage AND ~/.h/store/client-state.json — used when a turn ends so
+  // usage/turn survive reload without waiting for the debounced periodic save.
+  const flushThreadsNow = useCallback((usage?: UsageStats | null) => {
+    if (!activeThreadId) return;
+    setThreads((prev) => {
+      const idx = prev.findIndex((t) => t.id === activeThreadId);
+      if (idx === -1) return prev;
+      const next = [...prev];
+      const clean = messagesRef.current.map((m) => ({ ...m, state: undefined }));
+      next[idx] = {
+        ...next[idx],
+        ...(clean.length > 0 ? { messages: clean } : {}),
+        ...(usage ? { usage } : {}),
+      };
+      saveThreads(threadKey, next);
+      saveStateNow();
+      return next;
+    });
+  }, [activeThreadId, threadKey]);
+
   // Save current thread whenever messages change (debounced to avoid streaming thrash)
   const threadSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
@@ -1881,6 +1907,8 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
             // Persist usage to thread
             setThreads((prev) => prev.map((t) => t.id === activeThreadId ? { ...t, usage: evt.usage } : t));
           }
+          // Flush the finished turn (final messages + usage) to disk immediately.
+          setTimeout(() => flushThreadsNow(evt.usage), 50);
           onRefreshFs?.();
           setLoading(false);
           return false;
@@ -2352,6 +2380,8 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
             // Persist usage to thread
             setThreads((prev) => prev.map((t) => t.id === activeThreadId ? { ...t, usage: evt.usage } : t));
           }
+          // Flush the finished turn (final messages + usage) to disk immediately.
+          setTimeout(() => flushThreadsNow(evt.usage), 50);
           onRefreshFs?.();
           setLoading(false);
           agentDoneRef.current = true;

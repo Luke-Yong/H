@@ -28,6 +28,7 @@ AI-powered coding agent using DeepSeek.
   - [Multi-Agent Delegation](#multi-agent-delegation)
   - [IDE-Driven Step-by-Step](#ide-driven-step-by-step-execution-force-todo)
   - [Persistent Memory](#persistent-memory)
+  - [Client State Persistence](#client-state-persistence)
 - [Agent Command Catalog](#agent-command-catalog)
 - [Troubleshooting by Language](#troubleshooting-by-language)
 - [MCP (Model Context Protocol)](#mcp-model-context-protocol)
@@ -1320,6 +1321,30 @@ MAINTENANCE (async, after each run):
 | `server/agent.ts` | `runMemoryTool()`, scope guard in `remember`, memory block in `buildSystemPrompt`, sub-agent injection |
 | `server/index.ts` | Auto-capture + relevance selection before the loop, maintenance after the run, `GET/POST /api/memory/profile` |
 | `client/src/panes/SettingsDialog.tsx` | Settings → Memory tab (edit `user_profile.md`) |
+
+### Client State Persistence
+
+All `h`-prefixed `localStorage` keys are mirrored to `~/.h/store/client-state.json` so UI state survives reinstalls. The agent console stores one key per project folder — `h-chat-threads:<normalized-path>` — an array of `ChatThread`, each holding the full conversation (`messages`, `thought`, `fileChanges`, `todos`) plus per-thread `usage` (token counts, context limit, turns).
+
+#### Write triggers
+
+| Trigger | Latency | Where |
+|---------|---------|-------|
+| Periodic auto-save | 30 s | `stateSync.startAutoSave()` |
+| App exit (`beforeunload`) | immediate | keepalive fetch (≤64 KB body) |
+| Every `threads` change | next render | threads persist effect → `saveThreads()` + `saveStateNow()` |
+| **Agent turn ends (`done`)** | ~50 ms | `flushThreadsNow(usage)` — final reply + usage flushed immediately |
+| Agent run stopped | immediate | stop handler `saveThreads()` + `saveStateNow()` |
+
+`saveStateNow()` posts the entire mirrored state via `POST /api/client/state`; the server writes `~/.h/store/client-state.json`. On startup the client calls `GET /api/client/state` and restores every persisted key into `localStorage`.
+
+#### Files
+
+| File | Role |
+|------|------|
+| `client/src/stateSync.ts` | Gather/save/restore: `saveState`, `saveStateNow`, `startAutoSave`, `loadPersistedState` |
+| `client/src/panes/AgentConsole.tsx` | `flushThreadsNow(usage)` — immediate turn-end flush of messages + usage |
+| `server/index.ts` | `GET/POST /api/client/state` → `~/.h/store/client-state.json` |
 
 ## Agent Command Catalog
 
