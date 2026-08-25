@@ -948,6 +948,31 @@ function registerIpc() {
     return result.filePaths?.[0] || "";
   });
 
+  // Capture the browser webview as a base64 PNG. Done in the main process
+  // because the <webview> element's own capturePage throws
+  // "An object could not be cloned" over IPC (structured-clone limitation).
+  ipcMain.handle("h:captureBrowserPage", async (_event, webContentsId) => {
+    try {
+      const wc = webContents.fromId(Number(webContentsId));
+      if (!wc || wc.isDestroyed() || !isBrowserContents(wc)) return null;
+      let image = await wc.capturePage();
+      if (!image || image.isEmpty()) return null;
+      const size = image.getSize();
+      const scale = Math.min(1, 1280 / (size.width || 1), 1024 / (size.height || 1));
+      if (scale < 1) {
+        image = image.resize({
+          width: Math.round(size.width * scale),
+          height: Math.round(size.height * scale),
+        });
+      }
+      const png = image.toPNG();
+      if (!png || png.length === 0) return null;
+      return png.toString("base64");
+    } catch {
+      return null;
+    }
+  });
+
   ipcMain.handle("h:setSitePermissions", async (_event, payload) => {
     const origin = normalizeOrigin(payload?.origin);
     if (!origin) return false;

@@ -19,6 +19,8 @@ interface ConsoleMessage {
   pendingDiff?: { path: string; content: string };
   permissionPrompt?: string;
   sandboxOutput?: string;
+  /** Base64 screenshot image captured by browser_screenshot (rendered as <img> in the tool card). */
+  image?: string;
   /** Original file content captured before a destructive tool runs (for undo/Monaco diff). */
   destructiveOriginal?: string;
   /** Token count for file tools (copied from file-change card). */
@@ -35,6 +37,8 @@ interface ConsoleMessage {
     content: string;
     name?: string;
     reasoning_content?: string;
+    /** Base64 screenshot image captured by browser_screenshot (rendered as <img>). */
+    image?: string;
     /** Tool-call id for tool messages — used to associate a result with its tool call. */
     tool_call_id?: string;
     /** Transient streaming state — same semantics as ConsoleMessage.state. */
@@ -1428,7 +1432,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
         });
       }
     };
-    const completeSubAgentBrowser = (pending: { toolName: string; params: Record<string, unknown>; toolCallId: string; parentCardId: string }, result: string) => {
+    const completeSubAgentBrowser = (pending: { toolName: string; params: Record<string, unknown>; toolCallId: string; parentCardId: string }, result: string, image?: string) => {
       if (!pending.parentCardId) return;
       setMessages((prev) => {
         const next = [...prev];
@@ -1439,7 +1443,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
         const updated = existing.map((sm) => {
           if (!placeholderDone && sm.role === "tool" && sm.name === pending.toolName && typeof sm.content === "string" && sm.content.startsWith("Running ")) {
             placeholderDone = true;
-            return { ...sm, content: result };
+            return { ...sm, content: result, ...(image ? { image } : {}) };
           }
           // Clear the waiting state on the matching tool-call entry so the
           // card stops showing a spinner once the browser action completes.
@@ -1776,7 +1780,16 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
                 // Only override sandboxOutput if the server actually sent one
                 if (evt.toolSandbox != null) patch.sandboxOutput = evt.toolSandbox;
                 if ((evt as any).subAgentMessages) {
-                  patch.subAgentMessages = (evt as any).subAgentMessages;
+                  // Preserve locally-attached screenshot images (browser_screenshot)
+                  // when the server's final sub-agent trace replaces the live cards.
+                  const oldSub = next[idx].subAgentMessages || [];
+                  const newSub = (evt as any).subAgentMessages as any[];
+                  const mergedSub = newSub.map((m: any, i: number) => {
+                    const old = oldSub[i];
+                    if (old && (old as any).image && !m.image) return { ...m, image: (old as any).image };
+                    return m;
+                  });
+                  patch.subAgentMessages = mergedSub;
                   patch.subAgentName = (evt as any).subAgentName;
                 }
                 next[idx] = { ...next[idx], ...patch };
@@ -2694,7 +2707,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
           toolResult = exec.text;
           toolResultImage = exec.image;
         }
-        completeSubAgentBrowser(pendingSubBrowser, toolResult);
+        completeSubAgentBrowser(pendingSubBrowser, toolResult, toolResultImage);
         pendingSubAgentBrowserRef.current = null;
         if (!signal.aborted) {
           await continueStreaming({ sessionId, toolCallId, toolResult, toolResultImage, model: selectedModel, thinking: isThinking, consoleContext: getConsoleContext?.() || "" });
@@ -2717,7 +2730,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
             setMessages((prev) => {
               const next = [...prev];
               const idx = next.findIndex((m) => m.id === lastToolId);
-              if (idx >= 0) next[idx] = { ...next[idx], content: toolResult, state: undefined };
+              if (idx >= 0) next[idx] = { ...next[idx], content: toolResult, image: toolResultImage, state: undefined };
               return next;
             });
           }
@@ -2796,6 +2809,17 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
     abortRef.current?.abort();
     abortRef.current = null;
 
+    // Tell the server to stop the loop and persist any pending todos so the
+    // agent is reminded of outstanding tasks on the next turn.
+    const stopSessionId = threads.find((t) => t.id === activeThreadId)?.sessionId;
+    if (stopSessionId) {
+      fetch("/api/chat/agent/stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: stopSessionId }),
+      }).catch(() => {});
+    }
+
     // Flush pending todos and file-changes to the last assistant message.
     // When the agent is stopped mid-turn, any in_progress todos are reverted
     // to pending (interrupted, not completed) and streaming file-changes are
@@ -2861,7 +2885,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
     }
 
     push({ role: "system", content: "Stopped." });
-  }, [push, messages, agentUsage]);
+  }, [push, messages, agentUsage, threads, activeThreadId]);
 
   const insertHash = useCallback(() => {
     setInput((prev) => prev + "#");
@@ -3896,6 +3920,13 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
                 )}
               </div>
             )}
+            {msg.image && (
+              <img
+                className="agent-tool-card-screenshot"
+                src={msg.image}
+                alt="browser screenshot"
+              />
+            )}
             {msg.content && !msg.sandboxOutput && msg.toolName !== "run_in_terminal" && (
               <>
                 {!collapsedOutputs.has(`${msg.id}-code`) ? (
@@ -4048,10 +4079,11 @@ const getCacheSummary = (usage: UsageStats | null | undefined) => {
             content: m.content || "",
             when: 0,
             agentMarker: subMarker,
+            image: m.image,
           });
           continue;
         }
-        out.push({ id, role: "tool", content: m.content || "", when: 0, agentMarker: subMarker });
+        out.push({ id, role: "tool", content: m.content || "", when: 0, agentMarker: subMarker, image: m.image });
         continue;
       }
       out.push({

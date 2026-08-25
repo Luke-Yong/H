@@ -459,6 +459,8 @@ type BrowserGuest = HTMLElement & {
   reload?: () => void;
   loadURL?: (url: string) => void;
   executeJavaScript?: (code: string, userGesture?: boolean) => Promise<unknown>;
+  /** Electron webview: numeric id usable with webContents.fromId in main. */
+  getWebContentsId?: () => number;
 };
 
 function isUrlLike(input: string): boolean {
@@ -2063,68 +2065,147 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     `);
   }, [evalInPage]);
 
-  // Capture the visible page as a base64 PNG via DOM rasterization (SVG
-  // foreignObject → canvas). Styles are inlined (same-origin stylesheets fetched
-  // through the proxy) and images are converted to data URLs so the canvas is
-  // not tainted. Returns a "data:image/png;base64,..." string, or an "Error: ..."
-  // string on failure (callers fall back to the text-only grid).
+  // Capture the visible page as a base64 PNG. On desktop this captures the
+  // Electron webview in the main process (webContents.capturePage via the
+  // hDesktop IPC bridge — the <webview> element's own capturePage throws
+  // "An object could not be cloned" over IPC). In web mode (iframe) it falls
+  // back to DOM rasterization (SVG foreignObject → canvas), inlining page
+  // CSS/images through the same-origin reverse proxy and retrying in a
+  // taint-safe mode if the canvas is blocked. Returns a
+  // "data:image/png;base64,..." string, or an "Error: ..." string on failure.
   const captureScreenshotImage = useCallback(async (): Promise<string> => {
+    // ── Desktop: main-process webview capture (no taint possible) ──
+    const desktop = (window as any).hDesktop;
+    const wv = getWebview() as (BrowserGuest & { getWebContentsId?: () => number }) | null;
+    if (wv && typeof wv.getWebContentsId === "function" && desktop && typeof desktop.captureBrowserPage === "function") {
+      try {
+        const b64 = await desktop.captureBrowserPage(wv.getWebContentsId());
+        if (b64) return "data:image/png;base64," + b64;
+      } catch { /* fall through to DOM rasterization */ }
+    }
+
+    // ── Web / fallback: DOM rasterization (full → safe) ──
     return evalInPage(`
       (() => {
-        const MAX_W = 1280, MAX_H = 1024, MAX_CSS = 120000, MAX_IMGS = 20;
+        const MAX_W = 1280, MAX_H = 1024, MAX_CSS = 150000, MAX_IMGS = 24, MAX_HTML = 600000;
         const vw = Math.min(document.documentElement.clientWidth || window.innerWidth || 1280, MAX_W);
         const vh = Math.min(window.innerHeight || document.documentElement.clientHeight || 800, MAX_H);
 
-        // 1. Collect inline <style> and fetch same-origin <link rel=stylesheet>
-        const styleParts = [];
-        try {
-          document.querySelectorAll('style').forEach(function (s) { if (s.textContent) styleParts.push(s.textContent); });
-        } catch (e) {}
-        const links = Array.prototype.slice.call(document.querySelectorAll('link[rel="stylesheet"]'));
-        const fetchCss = Promise.all(links.map(function (link) {
-          const href = link.href || '';
-          if (!href) return Promise.resolve('');
-          return fetch(href, { credentials: 'include' })
-            .then(function (r) { return r.ok ? r.text() : ''; })
-            .catch(function () { return ''; });
-        })).then(function (texts) { return texts.join('\\n'); });
+        // Resolve any URL (relative or absolute) through the same-origin proxy.
+        const proxyUrl = function (u) {
+          try { return '/_browser?url=' + encodeURIComponent(new URL(u, document.baseURI).href); }
+          catch (e) { return null; }
+        };
+        const fetchText = function (u) {
+          return fetch(u, { credentials: 'include' }).then(function (r) { return r.ok ? r.text() : ''; }).catch(function () { return ''; });
+        };
+        const fetchDataUrl = function (u) {
+          return fetch(u, { credentials: 'include' }).then(function (r) { return r.ok ? r.blob() : null; })
+            .then(function (b) {
+              if (!b) return null;
+              return new Promise(function (res) {
+                const fr = new FileReader();
+                fr.onload = function () { res(String(fr.result)); };
+                fr.onerror = function () { res(null); };
+                fr.readAsDataURL(b);
+              });
+            })
+            .catch(function () { return null; });
+        };
 
-        return fetchCss
-          .then(function (linkCss) {
+        // mode: 'full' (inline everything through the proxy) or 'safe' (strip
+        // every external reference so the canvas can never be tainted).
+        const build = function (mode) {
+          // 1. Styles: inline <style> blocks + proxied <link rel=stylesheet>.
+          const styleParts = [];
+          try { document.querySelectorAll('style').forEach(function (s) { if (s.textContent) styleParts.push(s.textContent); }); } catch (e) {}
+          const links = Array.prototype.slice.call(document.querySelectorAll('link[rel="stylesheet"]'));
+          const fetchCss = Promise.all(links.map(function (link) {
+            const href = link.href || '';
+            if (!href) return Promise.resolve('');
+            const p = proxyUrl(href);
+            return p ? fetchText(p) : Promise.resolve('');
+          })).then(function (texts) { return texts.join('\\n'); });
+
+          return fetchCss.then(function (linkCss) {
             styleParts.push(linkCss);
             let css = styleParts.join('\\n');
+            if (mode === 'full') {
+              // Rewrite external url()/@import references to same-origin proxy URLs.
+              css = css.replace(/(url\\(\\s*['"]?)([^'")]+)(['"]?\\s*\\))/gi, function (m, pre, u, post) {
+                const p = proxyUrl(u.trim());
+                return p ? pre + p + post : 'none';
+              });
+              css = css.replace(/@import\\s+['"]([^'"]+)['"]/gi, function (m, u) {
+                const p = proxyUrl(u.trim());
+                return p ? '@import url(' + p + ');' : m;
+              });
+            } else {
+              css = css.replace(/url\\([^)]*\\)/gi, 'none').replace(/@import\\s+[^;]+;/gi, '');
+            }
             if (css.length > MAX_CSS) css = css.slice(0, MAX_CSS);
 
-            // 2. Clone the document; drop elements that can't render or could
-            //    leak the viewport (scripts, iframes, video, canvases, links).
+            // 2. Clone the document; drop elements that can't render or that
+            //    would leak the viewport (scripts, iframes, video, canvases, links, base).
             const clone = document.documentElement.cloneNode(true);
-            clone.querySelectorAll('script, iframe, video, audio, canvas, link, meta, noscript, object, embed').forEach(function (el) { el.remove(); });
+            clone.querySelectorAll('script, iframe, video, audio, canvas, link, meta, noscript, object, embed, base').forEach(function (el) { el.remove(); });
 
-            // 3. Inline <img> srcs as data URLs (capped) to avoid canvas taint.
+            // 2b. Neutralize any remaining element that can still fetch an external
+            //     resource and thereby taint the canvas (image inputs, inline SVG refs,
+            //     picture/source, legacy background attributes).
+            clone.querySelectorAll('input[type="image"]').forEach(function (el) { el.removeAttribute('src'); el.removeAttribute('srcset'); });
+            clone.querySelectorAll('svg image, svg use, svg feImage').forEach(function (el) {
+              const h = el.getAttribute('href') || el.getAttribute('xlink:href') || '';
+              if (h && !h.startsWith('#') && !h.startsWith('data:')) {
+                el.removeAttribute('href');
+                el.removeAttribute('xlink:href');
+              }
+            });
+            clone.querySelectorAll('[background]').forEach(function (el) { el.removeAttribute('background'); });
+            if (mode === 'safe') {
+              clone.querySelectorAll('picture, source, track').forEach(function (el) { el.remove(); });
+            }
+
+            // 3. Images: inline via proxy (full) or replace with placeholders (safe).
             const imgs = Array.prototype.slice.call(clone.querySelectorAll('img'));
             const pending = [];
-            let converted = 0;
-            for (let i = 0; i < imgs.length && converted < MAX_IMGS; i++) {
-              const img = imgs[i];
-              const src = img.getAttribute('src') || img.currentSrc || '';
-              if (!src || src.startsWith('data:')) continue;
-              pending.push(fetch(src, { credentials: 'include' })
-                .then(function (r) { return r.ok ? r.blob() : null; })
-                .then(function (blob) {
-                  if (!blob) return;
-                  return new Promise(function (res) {
-                    const fr = new FileReader();
-                    fr.onload = function () { img.setAttribute('src', String(fr.result)); res(); };
-                    fr.onerror = function () { res(); };
-                    fr.readAsDataURL(blob);
-                  });
-                })
-                .catch(function () {}));
-              converted++;
+            if (mode === 'full') {
+              let converted = 0;
+              for (let i = 0; i < imgs.length && converted < MAX_IMGS; i++) {
+                const img = imgs[i];
+                const src = img.getAttribute('src') || img.currentSrc || '';
+                if (!src || src.startsWith('data:')) continue;
+                const p = proxyUrl(src);
+                if (!p) { img.remove(); continue; }
+                pending.push(fetchDataUrl(p).then(function (d) {
+                  if (d) img.setAttribute('src', d);
+                  else img.remove();
+                }));
+                converted++;
+              }
+            } else {
+              imgs.forEach(function (img) {
+                const alt = (img.getAttribute('alt') || '').trim();
+                const box = document.createElement('div');
+                box.style.cssText = 'display:inline-block;min-width:24px;min-height:24px;background:#e9e9e9;border:1px dashed #aaa;color:#777;font-size:11px;padding:2px 4px;box-sizing:border-box;vertical-align:middle;';
+                box.textContent = alt ? '[img: ' + alt + ']' : '[image]';
+                if (img.parentNode) img.parentNode.replaceChild(box, img);
+              });
             }
 
             return Promise.all(pending).then(function () {
-              const html = clone.outerHTML;
+              // 4. Serialize to SVG, then back to a Blob (avoids data-URL size limits).
+              let html = clone.outerHTML;
+              if (mode === 'full') {
+                // Inline style attributes can hold url() refs too — proxy them.
+                html = html.replace(/url\\(\\s*['"]?([^'")]+)['"]?\\s*\\)/gi, function (m, u) {
+                  const p = proxyUrl(u.trim());
+                  return p ? 'url(' + p + ')' : 'none';
+                });
+              } else {
+                html = html.replace(/url\\([^)]*\\)/gi, 'none');
+              }
+              if (html.length > MAX_HTML) html = html.slice(0, MAX_HTML);
               const esc = function (s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;'); };
               const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + vw + '" height="' + vh + '">'
                 + '<style>' + esc(css) + '</style>'
@@ -2132,27 +2213,45 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
                 + '<div xmlns="http://www.w3.org/1999/xhtml" style="overflow:hidden;width:' + vw + 'px;height:' + vh + 'px">'
                 + esc(html)
                 + '</div></foreignObject></svg>';
-              return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+              return new Blob([svg], { type: 'image/svg+xml' });
             });
-          })
-          .then(function (svgUrl) {
-            return new Promise(function (resolve) {
-              const img = new Image();
-              const canvas = document.createElement('canvas');
-              canvas.width = vw;
-              canvas.height = vh;
-              const ctx = canvas.getContext('2d');
-              img.onload = function () {
-                try {
-                  ctx.drawImage(img, 0, 0, vw, vh);
-                  resolve(canvas.toDataURL('image/png'));
-                } catch (e) {
-                  resolve('Error: screenshot rasterization failed (cross-origin resources tainted the canvas): ' + (e && e.message ? e.message : e));
-                }
-              };
-              img.onerror = function () { resolve('Error: screenshot rasterization failed (SVG image could not load)'); };
-              img.src = svgUrl;
-            });
+          });
+        };
+
+        const render = function (blob) {
+          return new Promise(function (resolve) {
+            const url = URL.createObjectURL(blob);
+            const img = new Image();
+            const canvas = document.createElement('canvas');
+            canvas.width = vw; canvas.height = vh;
+            const ctx = canvas.getContext('2d');
+            img.onload = function () {
+              try {
+                ctx.drawImage(img, 0, 0, vw, vh);
+                resolve(canvas.toDataURL('image/png'));
+              } catch (e) {
+                resolve('__TAINT__');
+              } finally {
+                URL.revokeObjectURL(url);
+              }
+            };
+            img.onerror = function () { URL.revokeObjectURL(url); resolve('Error: screenshot rasterization failed (SVG could not be rendered)'); };
+            img.src = url;
+          });
+        };
+
+        return build('full')
+          .then(render)
+          .then(function (r) {
+            if (r === '__TAINT__') {
+              // Full render was tainted — retry with external resources stripped.
+              return build('safe').then(render).then(function (r2) {
+                return r2 === '__TAINT__'
+                  ? 'Error: page rasterization was blocked by the canvas taint policy even after stripping external resources'
+                  : r2;
+              });
+            }
+            return r;
           })
           .catch(function (e) { return 'Error: screenshot capture failed: ' + (e && e.message ? e.message : e); });
       })()

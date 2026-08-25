@@ -1949,11 +1949,13 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     switch (toolName) {
       case "browser_screenshot": {
         const text = await bv.getPageSnapshot();
-        // Capture the real page image for vision-capable models (or the vision
-        // bridge for non-vision models). On failure, keep the text grid only.
-        const img = await bv.captureScreenshotImage().catch(() => "");
+        // Capture the real page image (primary). On failure, keep the text grid
+        // and surface the reason so the agent/user knows the image path failed.
+        const img = await bv.captureScreenshotImage().catch(() => "Error: capture threw");
         const image = img && img.startsWith("data:image/") && !img.startsWith("data:image/svg") ? img : undefined;
-        return { text, image };
+        if (image) return { text, image };
+        const reason = img && img.startsWith("Error:") ? img.replace(/^Error:\s*/, "").slice(0, 200) : "no image captured";
+        return { text: `[Screenshot image unavailable: ${reason} — text grid used]\n${text}` };
       }
       case "browser_get_dom": return done(await bv.getIndexedDom());
       case "browser_type": await bv.typeIntoElement(Number(params.index || 0), String(params.text || "")); return done(`Typed "${params.text}" into element.`);

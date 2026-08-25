@@ -152,7 +152,8 @@ app.post("/api/chat", async (req, res) => {
 });
 
 // ── Agentic chat (tool-calling loop) ──
-import { createAgentSession, getAgentSession, addToolResult, addToolResultStream, deleteAgentSession, agentLoop, agentLoopStream, agentLoopStepByStep, runFsTool, storeCommandOutput, summarizeCommandResult, resumeSubAgent, contentToDisplayString, type AgentState, type AgentResponse, type AgentSseEvent } from "./agent";
+import { createAgentSession, getAgentSession, addToolResult, addToolResultStream, deleteAgentSession, stopAgentSession, agentLoop, agentLoopStream, agentLoopStepByStep, runFsTool, storeCommandOutput, summarizeCommandResult, resumeSubAgent, contentToDisplayString, type AgentState, type AgentResponse, type AgentSseEvent } from "./agent";
+import { getMemoryStore } from "./memory";
 
 app.post("/api/chat/agent", async (req, res) => {
   const { message, context, projectRoot, model, sessionId: clientSessionId, latestTodos } = req.body || {};
@@ -346,9 +347,17 @@ app.post("/api/chat/agent/stream", async (req, res) => {
     };
 
     const modelOpts = { model, apiKey };
-    for await (const event of agentLoopStream(root, state, context || "", sessionId, modelOpts)) {
-      await sendAndMaybeYeld(event);
-      if (event.type === "browser_tool" || event.type === "permission_required" || event.type === "done" || event.type === "error") break;
+    // If the client disconnects (abort / tab close), stop the loop server-side
+    // so it doesn't keep burning tokens, and persist any pending todos.
+    const onStreamAbort = () => stopAgentSession(sessionId);
+    req.on("close", onStreamAbort);
+    try {
+      for await (const event of agentLoopStream(root, state, context || "", sessionId, modelOpts)) {
+        await sendAndMaybeYeld(event);
+        if (event.type === "browser_tool" || event.type === "permission_required" || event.type === "done" || event.type === "error") break;
+      }
+    } finally {
+      req.removeListener("close", onStreamAbort);
     }
 
     // Session-end memory maintenance (async, non-blocking).
@@ -406,9 +415,15 @@ app.post("/api/chat/agent/stream/stepbystep", async (req, res) => {
     };
 
     const modelOpts = { model, apiKey };
-    for await (const event of agentLoopStepByStep(root, state, context || "", sessionId, modelOpts)) {
-      await sendAndMaybeYeld(event);
-      if (event.type === "done" || event.type === "error") break;
+    const onStreamAbort = () => stopAgentSession(sessionId);
+    req.on("close", onStreamAbort);
+    try {
+      for await (const event of agentLoopStepByStep(root, state, context || "", sessionId, modelOpts)) {
+        await sendAndMaybeYeld(event);
+        if (event.type === "done" || event.type === "error") break;
+      }
+    } finally {
+      req.removeListener("close", onStreamAbort);
     }
 
     res.end();
@@ -556,9 +571,15 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
         })),
       } as AgentSseEvent);
       const continueContext = typeof consoleContext === "string" ? consoleContext : "";
-      for await (const event of agentLoopStream(state.projectRoot, state, continueContext, sessionId, { model, apiKey })) {
-        await sendAndMaybeYeld(event);
-        if (event.type === "browser_tool" || event.type === "done" || event.type === "error") break;
+      const onStreamAbort = () => stopAgentSession(sessionId);
+      req.on("close", onStreamAbort);
+      try {
+        for await (const event of agentLoopStream(state.projectRoot, state, continueContext, sessionId, { model, apiKey })) {
+          await sendAndMaybeYeld(event);
+          if (event.type === "browser_tool" || event.type === "done" || event.type === "error") break;
+        }
+      } finally {
+        req.removeListener("close", onStreamAbort);
       }
       return res.end();
     }
@@ -640,9 +661,15 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
     };
 
     const continueContext = typeof consoleContext === "string" ? consoleContext : "";
-    for await (const event of agentLoopStream(state.projectRoot, state, continueContext, sessionId, { model, apiKey })) {
-      await sendAndMaybeYeld(event);
-      if (event.type === "browser_tool" || event.type === "done" || event.type === "error") break;
+    const onStreamAbort = () => stopAgentSession(sessionId);
+    req.on("close", onStreamAbort);
+    try {
+      for await (const event of agentLoopStream(state.projectRoot, state, continueContext, sessionId, { model, apiKey })) {
+        await sendAndMaybeYeld(event);
+        if (event.type === "browser_tool" || event.type === "done" || event.type === "error") break;
+      }
+    } finally {
+      req.removeListener("close", onStreamAbort);
     }
 
     res.end();
@@ -739,6 +766,20 @@ app.delete("/api/chat/agent/sessions/:threadId", (req, res) => {
   }
 });
 app.options("/api/chat/agent/sessions/:threadId", (_req, res) => { res.sendStatus(204); });
+
+// ── Stop an agent turn ──
+// The client aborts the SSE stream and calls this so the server stops the loop
+// and persists any pending todos for the next turn.
+app.post("/api/chat/agent/stop", (req, res) => {
+  try {
+    const { sessionId } = req.body || {};
+    if (!sessionId) return res.status(400).json({ error: "Missing sessionId" });
+    const result = stopAgentSession(String(sessionId));
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
+});
 
 // ── Memory profile editing (user_profile.md / project_memory.md) ──
 // Raw markdown read/write so the user can edit their profile directly in the UI.
@@ -2374,6 +2415,10 @@ app.use("/_browser", (req, res, next) => {
   const reqHeaders = { ...req.headers };
   delete reqHeaders.referer;
   delete reqHeaders.referrer;
+  // Request uncompressed responses — the proxy re-emits bodies through string
+  // buffers (HTML injection / JSON formatting / screenshot CSS+image inlining),
+  // which would corrupt gzip-compressed content.
+  delete reqHeaders["accept-encoding"];
 
   const proxyReq = client.request(
     targetUrl,
@@ -2451,6 +2496,14 @@ body{background:#1e1e1e;color:#d4d4d4;font:13px/1.5 'Cascadia Code','Fira Code',
           }
         });
       } else {
+        // Binary content — pipe through byte-for-byte. String buffering (below)
+        // would corrupt binary, which breaks screenshot image/font inlining.
+        const ct = String(headers["content-type"] || "");
+        if (/^(image|font|audio|video|application\/octet-stream|application\/pdf|application\/wasm|application\/vnd)/i.test(ct)) {
+          res.writeHead(proxyRes.statusCode || 200, headers);
+          proxyRes.pipe(res);
+          return;
+        }
         // For unrecognized content types, sniff the body for JSON to avoid
         // rendering raw JSON as plain text (which may appear as white screen if
         // the content contains angle brackets interpreted as HTML tags).
@@ -2598,6 +2651,12 @@ export function getListenPortStart(): number { return EXPRESS_DEFAULT_PORT; }
 export function getListenPortRange(): number { return EXPRESS_PORT_RANGE; }
 
 if (process.env.NODE_ENV !== "test") {
+  // Materialize the file-based memory layout (~/.h/memory/user_profile.md, …)
+  // at startup so the profile exists before the first agent turn.
+  try {
+    getMemoryStore();
+  } catch { /* memory init is best-effort */ }
+
   // Env override for explicit port (useful for deployments)
   const explicitPort = process.env.H_PORT ? parseInt(process.env.H_PORT, 10) : 0;
   if (explicitPort > 0) {

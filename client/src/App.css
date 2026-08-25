@@ -1785,6 +1785,18 @@ body.resizing iframe { pointer-events: none; }
   overflow: hidden;
 }
 .agent-tool-card.streaming { border-color: rgba(0, 122, 204, 0.3); }
+/* Browser screenshot image shown inside a browser_screenshot tool card */
+.agent-tool-card-screenshot {
+  display: block;
+  max-width: 100%;
+  max-height: 420px;
+  margin: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+  cursor: zoom-in;
+  object-fit: contain;
+  background: #111;
+}
 .agent-tool-card-header {
   display: flex; align-items: center; gap: 6px;
   padding: 5px 10px; font-size: 11px; color: var(--text-dim);

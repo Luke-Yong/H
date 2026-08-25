@@ -79,6 +79,9 @@ export interface AgentState {
   agentTerminalSessions?: { sessionId: string; groupKey: string; command: string }[];
   /** Latest todo list from write_todos — used to detect incomplete tasks at task_complete. */
   latestTodos?: { id: string; text: string; status: string; agentMarker?: string }[];
+  /** Set when the user stops this session's turn mid-run; loops break at the next
+   *  boundary and pending todos are persisted for the next turn. */
+  stopped?: boolean;
   /** Latest validated summary submitted via write_summary. Required before task_complete. */
   latestSummary?: string;
   /** Latest problems from read_problems — used to block task_complete if unaddressed errors remain. */
@@ -2212,7 +2215,10 @@ function buildOpenAiMessages(state: AgentState, context: string): ModelMessage[]
           role: "assistant",
           content: null,
           tool_calls: calls,
-          ...(message.reasoning_content ? { reasoning_content: message.reasoning_content } : {}),
+          // DeepSeek thinking mode (default-enabled) requires reasoning_content
+          // on EVERY assistant message once tool calls are in play — pass back
+          // the stored reasoning, or an empty string, so the API never 400s.
+          reasoning_content: message.reasoning_content ?? "",
         });
         // Emit tool responses immediately after the assistant message,
         // ensuring DeepSeek's required message ordering.
@@ -2229,13 +2235,17 @@ function buildOpenAiMessages(state: AgentState, context: string): ModelMessage[]
         msgs.push({
           role: "assistant",
           content: message.content,
-          ...(message.reasoning_content ? { reasoning_content: message.reasoning_content } : {}),
+          reasoning_content: message.reasoning_content ?? "",
         });
       }
       continue;
     }
 
-    msgs.push(message);
+    msgs.push(
+      message.role === "assistant"
+        ? { ...message, reasoning_content: message.reasoning_content ?? "" }
+        : message,
+    );
   }
 
   return msgs;
@@ -2758,7 +2768,9 @@ function buildOpenAiMessagesForSubAgent(
           role: "assistant",
           content: null,
           tool_calls: calls,
-          ...(m.reasoning_content ? { reasoning_content: m.reasoning_content } : {}),
+          // DeepSeek thinking mode requires reasoning_content on every assistant
+          // message once tool calls are in play — pass back or use empty string.
+          reasoning_content: m.reasoning_content ?? "",
         });
         // Emit tool responses immediately after the assistant message,
         // ensuring DeepSeek's required message ordering.
@@ -2775,7 +2787,7 @@ function buildOpenAiMessagesForSubAgent(
         msgs.push({
           role: "assistant",
           content: m.content,
-          ...(m.reasoning_content ? { reasoning_content: m.reasoning_content } : {}),
+          reasoning_content: m.reasoning_content ?? "",
         });
       }
       continue;
@@ -2783,7 +2795,7 @@ function buildOpenAiMessagesForSubAgent(
     msgs.push({
       role: m.role as "user" | "assistant",
       content: m.content,
-      ...(m.reasoning_content ? { reasoning_content: m.reasoning_content } : {}),
+      reasoning_content: m.role === "assistant" ? m.reasoning_content ?? "" : undefined,
     });
   }
 
@@ -3496,6 +3508,7 @@ export async function* agentLoopStepByStep(
     yield { type: "error", error: "No server API key configured. Set DEEPSEEK_API_KEY on the server." };
     return;
   }
+  state.stopped = false; // fresh run — a stop request only applies to the running turn
 
   const MAX_PLANNING_ITERS = 5;
   const MODEL_CONTEXT_LIMIT = 128_000;
@@ -3524,6 +3537,10 @@ export async function* agentLoopStepByStep(
   yield { type: "text", text: "Planning phase — breaking down the task into steps...\n" };
 
   for (let iter = 0; iter < MAX_PLANNING_ITERS; iter++) {
+    if (isStopped(state)) {
+      yield { type: "done", reply: "Stopped by user.", usage: makeUsage(state.iteration) };
+      return;
+    }
     state.iteration++;
     const openaiMessages: ModelMessage[] = [
       { role: "system", content: PLANNING_SYSTEM_PROMPT },
@@ -3532,12 +3549,12 @@ export async function* agentLoopStepByStep(
         if (m.role === "assistant" && m.name) {
           try {
             const calls = JSON.parse(contentToDisplayString(m.content));
-            return { role: "assistant", content: null, tool_calls: calls, ...rc(m.reasoning_content) };
+            return { role: "assistant", content: null, tool_calls: calls, reasoning_content: m.reasoning_content ?? "" };
           } catch {
-            return { role: "assistant", content: m.content };
+            return { role: "assistant", content: m.content, reasoning_content: m.reasoning_content ?? "" };
           }
         }
-        return { role: m.role as "user" | "assistant", content: m.content };
+        return { role: m.role as "user" | "assistant", content: m.content, reasoning_content: m.role === "assistant" ? m.reasoning_content ?? "" : undefined };
       }),
     ];
 
@@ -3622,6 +3639,10 @@ export async function* agentLoopStepByStep(
         const allResults: { text: string; status: string; result: string }[] = [];
 
         for (let stepIdx = 0; stepIdx < lockedTodos.length; stepIdx++) {
+          if (isStopped(state)) {
+            yield { type: "done", reply: "Stopped by user.", allStepResults: allResults, usage: makeUsage(state.iteration) };
+            return;
+          }
           const todo = lockedTodos[stepIdx];
           todo.status = "in_progress";
           state.currentStepIndex = stepIdx;
@@ -3729,6 +3750,9 @@ export async function agentLoop(
   if (!apiKey) {
     return { phase: "done", reply: "No server API key configured. Set DEEPSEEK_API_KEY on the server." };
   }
+  if (isStopped(state)) {
+    return { phase: "done", reply: "Stopped by user.", messages: state.messages };
+  }
   state.iteration++;
 
   if (state.iteration > MAX_ITERATIONS) {
@@ -3752,6 +3776,7 @@ export async function agentLoop(
 
     let browserBreakIdx = -1;
     for (let i = 0; i < toolCalls.length; i++) {
+      if (isStopped(state)) break; // user interrupted — don't run more tools
       const tc = toolCalls[i];
       const fnName = tc.function.name;
       const params = (() => { try { return JSON.parse(tc.function.arguments); } catch { return {}; } })();
@@ -3998,6 +4023,7 @@ export async function* agentLoopStream(
     yield { type: "error", error: "No server API key configured. Set DEEPSEEK_API_KEY on the server." };
     return;
   }
+  state.stopped = false; // fresh run — a stop request only applies to the running turn
   const MAX_ITERS = 200;
 
   // Dynamic instruction retrieval — rebuilt each iteration as conversation evolves
@@ -4042,6 +4068,7 @@ export async function* agentLoopStream(
     reasoning ? { reasoning_content: reasoning } : {};
 
   for (let iter = 0; iter < MAX_ITERS; iter++) {
+    if (isStopped(state)) break; // user interrupted this turn
     state.iteration++;
     turnsSinceTodoUpdate++;
     const openaiMessages = buildMessages();
@@ -4105,6 +4132,7 @@ export async function* agentLoopStream(
     let subAgentBrowserContext: { parentToolCallId: string; agentType: string } | null = null;
 
     for (let i = 0; i < finalToolCalls.length; i++) {
+      if (isStopped(state)) break; // user interrupted — don't run more tools
       const tc = finalToolCalls[i];
       const fnName = tc.function.name;
       const params = (() => { try { return JSON.parse(tc.function.arguments); } catch { return {}; } })();
@@ -4552,6 +4580,63 @@ export function deleteAgentSession(sessionId: string): boolean {
   return agentSessions.delete(sessionId);
 }
 
+// ── Stop handling ──
+// The user can stop a turn mid-run (client aborts the SSE stream and calls the
+// stop endpoint). The running loop breaks at its next boundary and any pending
+// todos are persisted to the file-based memory store so the next turn can
+// notify the agent of what remains.
+
+export interface StopAgentResult {
+  ok: boolean;
+  pendingTodos: { id: string; text: string; status: string }[];
+}
+
+export function stopAgentSession(sessionId: string): StopAgentResult {
+  const state = agentSessions.get(sessionId);
+  if (!state) return { ok: false, pendingTodos: [] };
+  state.stopped = true;
+  persistPendingTodos(state);
+  return { ok: true, pendingTodos: pendingTodosOf(state) };
+}
+
+function pendingTodosOf(state: AgentState): { id: string; text: string; status: string }[] {
+  return (state.latestTodos || [])
+    .filter((t) => t.status !== "completed" && t.status !== "cancelled")
+    .map((t) => ({ id: t.id, text: t.text, status: t.status }));
+}
+
+function persistPendingTodos(state: AgentState): void {
+  const pending = pendingTodosOf(state);
+  if (pending.length === 0) return;
+  try {
+    getMemoryStore().persistPendingTodos(state.projectRoot, state.sessionId || sessionIdOf(state), pending);
+  } catch { /* best-effort */ }
+}
+
+// The in-memory session map is keyed by the session id; fall back to the
+// legacy key format if state.sessionId was never set.
+function sessionIdOf(state: AgentState): string {
+  for (const [k, s] of agentSessions) {
+    if (s === state) return k;
+  }
+  return "session";
+}
+
+/** Rehydrate pending todos persisted by a previous (stopped) turn. */
+function restorePendingTodos(state: AgentState): void {
+  try {
+    const persisted = getMemoryStore().loadPendingTodos(state.projectRoot, state.sessionId || sessionIdOf(state));
+    if (persisted && persisted.length > 0) {
+      state.latestTodos = persisted.map((t) => ({ ...t, agentMarker: "main" }));
+    }
+  } catch { /* best-effort */ }
+}
+
+/** Stop the loop if the user interrupted this turn. */
+function isStopped(state: AgentState): boolean {
+  return state.stopped === true;
+}
+
 // ── Command output cache ──
 // Stores full raw output from run_command so the agent can re-read with pagination/filter.
 // Keyed by incrementing sequence number returned in the tool result.
@@ -4596,12 +4681,18 @@ export function createAgentSession(sessionId: string, projectRoot: string, userM
     prev.latestSummary = undefined;
     prev.pendingSubAgent = undefined;
     prev.apiUsageTotals = undefined;
+    prev.stopped = false; // a new turn — clear any previous stop request
     // If caller provided seed todos (fresh scan from persisted messages),
     // use them only if the in-memory state has lost its latestTodos
     // (e.g. a stale session survived but with no todo state).
     if (!prev.latestTodos || prev.latestTodos.length === 0) {
       if (seedTodos && seedTodos.length > 0) prev.latestTodos = [...seedTodos];
       else prev.latestTodos = extractLatestTodosFromMessages(prev.messages);
+      // Fallback: rehydrate pending todos persisted when a previous turn was
+      // stopped — so the agent is notified of outstanding tasks on this turn.
+      if (!prev.latestTodos || prev.latestTodos.length === 0) {
+        restorePendingTodos(prev);
+      }
     }
     prev.messages.push({ role: "user", content: userMessage });
     agentSessions.set(sessionId, prev);
@@ -4622,6 +4713,9 @@ export function createAgentSession(sessionId: string, projectRoot: string, userM
   // re-hydrated full message history including write_todos calls.
   if (seedTodos && seedTodos.length > 0) {
     state.latestTodos = [...seedTodos];
+  } else {
+    // Fresh session — fall back to todos persisted by a stopped turn.
+    restorePendingTodos(state);
   }
   agentSessions.set(sessionId, state);
   logSessionUserMessage(projectRoot, sessionId, userMessage);

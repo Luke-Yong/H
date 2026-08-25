@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld("hDesktop", {
   browserPreloadUrl,
   openFolder: () => ipcRenderer.invoke("h:openFolder"),
   openFile: () => ipcRenderer.invoke("h:openFile"),
+  captureBrowserPage: (webContentsId) => ipcRenderer.invoke("h:captureBrowserPage", webContentsId),
   onBrowserOpenUrl: (callback) => {
     if (typeof callback !== "function") return () => {};
     const listener = (_event, url) => callback(url);

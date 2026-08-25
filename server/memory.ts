@@ -206,6 +206,17 @@ function writeEntries(file: string, scope: MemoryScope, entries: MemoryEntry[]):
   fs.writeFileSync(file, serializeMemoryFile(scope, entries), "utf-8");
 }
 
+/** Create a memory file with its header if it does not exist yet. */
+function ensureMemoryFile(file: string, scope: MemoryScope): void {
+  try {
+    if (!fs.existsSync(file)) {
+      fs.writeFileSync(file, HEADERS[scope] + "\n\n", "utf-8");
+    }
+  } catch {
+    // Best-effort — must never break the agent loop.
+  }
+}
+
 // ── Keyword helpers ──
 
 function entryMatches(entry: MemoryEntry, q: string): boolean {
@@ -233,6 +244,9 @@ export class MemoryStore {
   constructor() {
     ensureDir(MEMORY_DIR);
     ensureDir(PROJECTS_DIR);
+    // Materialize the cross-project profile so it exists even before the first
+    // memory is stored (Trae layout: user_profile.md is always present).
+    ensureMemoryFile(USER_PROFILE_FILE, "user");
   }
 
   /** Store or update a memory. `scope` selects user_profile.md vs project_memory.md.
@@ -343,6 +357,7 @@ export class MemoryStore {
   /** Append a message-level event to the current session's JSONL log. */
   appendSession(projectRoot: string, sessionId: string, event: Record<string, unknown>): void {
     try {
+      ensureMemoryFile(projectMemoryFile(projectRoot), "project");
       const file = sessionFile(projectRoot, sessionId);
       ensureDir(path.dirname(file));
       const line = JSON.stringify({ ts: new Date().toISOString(), ...event });
@@ -355,6 +370,7 @@ export class MemoryStore {
   /** Append a topic-level note to today's topics.md. */
   appendTopics(projectRoot: string, markdown: string): void {
     try {
+      ensureMemoryFile(projectMemoryFile(projectRoot), "project");
       const file = topicsFile(projectRoot);
       ensureDir(path.dirname(file));
       if (!fs.existsSync(file)) {
@@ -364,6 +380,43 @@ export class MemoryStore {
     } catch {
       // Topic logging is best-effort and must never break the agent loop.
     }
+  }
+
+  /** Persist a pending-todo list so an interrupted turn can be resumed later. */
+  persistPendingTodos(projectRoot: string, sessionId: string, todos: Array<{ id: string; text: string; status: string }>): void {
+    try {
+      if (!todos || todos.length === 0) return;
+      this.appendSession(projectRoot, sessionId, { type: "pending_todos", todos });
+      this.appendTopics(
+        projectRoot,
+        `## Pending tasks (interrupted turn)\n\n${todos.map((t) => `- [${t.status}] ${t.text}`).join("\n")}\n\n`,
+      );
+    } catch {
+      // Best-effort — must never break the agent loop.
+    }
+  }
+
+  /** Read the most recent persisted pending-todo list for a session. */
+  loadPendingTodos(projectRoot: string, sessionId: string): Array<{ id: string; text: string; status: string }> | null {
+    const file = sessionFile(projectRoot, sessionId);
+    let last: Array<{ id: string; text: string; status: string }> | null = null;
+    try {
+      const lines = readFileSafe(file).split(/\r?\n/);
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const obj = JSON.parse(line);
+          if (obj?.type === "pending_todos" && Array.isArray(obj.todos) && obj.todos.length > 0) {
+            last = obj.todos.map((t: any) => ({
+              id: String(t?.id || ""),
+              text: String(t?.text || ""),
+              status: String(t?.status || "pending"),
+            }));
+          }
+        } catch { /* skip malformed lines */ }
+      }
+    } catch { /* no file yet */ }
+    return last;
   }
 
   private allEntries(projectRoot: string): MemoryEntry[] {
