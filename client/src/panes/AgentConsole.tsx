@@ -148,7 +148,7 @@ interface Props {
   getConsoleContext?: () => string;
   /** Pre-fetch file tree context before each agent run (called by parent via EditorPane). */
   refreshFileTreeContext?: () => Promise<void>;
-  executeBrowserAction?: (name: string, params: Record<string, unknown>) => Promise<string>;
+  executeBrowserAction?: (name: string, params: Record<string, unknown>) => Promise<{ text: string; image?: string }>;
   getProjectFiles?: () => Promise<string[]>;
   getFsBasePath?: () => string;
   /** Reflect a file change in the editor (open tab, set content). */
@@ -2688,13 +2688,16 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
         // Browser tool issued by a paused sub-agent: execute it in the shared
         // browser bridge, then resume the sub-agent with the same toolCallId.
         let toolResult = "Tool not available.";
+        let toolResultImage: string | undefined;
         if (executeBrowserAction) {
-          toolResult = await executeBrowserAction(pendingSubBrowser.toolName, pendingSubBrowser.params || {});
+          const exec = await executeBrowserAction(pendingSubBrowser.toolName, pendingSubBrowser.params || {});
+          toolResult = exec.text;
+          toolResultImage = exec.image;
         }
         completeSubAgentBrowser(pendingSubBrowser, toolResult);
         pendingSubAgentBrowserRef.current = null;
         if (!signal.aborted) {
-          await continueStreaming({ sessionId, toolCallId, toolResult, model: selectedModel, thinking: isThinking, consoleContext: getConsoleContext?.() || "" });
+          await continueStreaming({ sessionId, toolCallId, toolResult, toolResultImage, model: selectedModel, thinking: isThinking, consoleContext: getConsoleContext?.() || "" });
         } else {
           agentDoneRef.current = true;
         }
@@ -2704,8 +2707,11 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
         const isBrowser = toolData?.name?.startsWith("browser_");
         if (isBrowser) {
           let toolResult = "Tool not available.";
+          let toolResultImage: string | undefined;
           if (executeBrowserAction) {
-            toolResult = await executeBrowserAction(toolData!.name, toolData!.params || {});
+            const exec = await executeBrowserAction(toolData!.name, toolData!.params || {});
+            toolResult = exec.text;
+            toolResultImage = exec.image;
           }
           if (lastToolId) {
             setMessages((prev) => {
@@ -2716,7 +2722,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
             });
           }
           if (!signal.aborted) {
-            await continueStreaming({ sessionId, toolCallId, toolResult, model: selectedModel, thinking: isThinking, consoleContext: getConsoleContext?.() || "" });
+            await continueStreaming({ sessionId, toolCallId, toolResult, toolResultImage, model: selectedModel, thinking: isThinking, consoleContext: getConsoleContext?.() || "" });
           } else {
             agentDoneRef.current = true;
           }

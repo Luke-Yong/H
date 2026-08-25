@@ -8,7 +8,7 @@
 //
 // Conversation state is held in memory keyed by session id.
 
-import { chatDeepSeekTool, chatDeepSeekToolStream, type DeepSeekApiUsage } from "./deepseek";
+import { chatDeepSeekTool, chatDeepSeekToolStream, type DeepSeekApiUsage, type MessageContentPart } from "./deepseek";
 import { getSnapshotPath } from "./hPaths";
 import { getMemoryContext, getMemoryStore, guessScope, getUserProfileContext } from "./memory";
 import { killSession, getLastCreatedSessionId } from "./terminalManager";
@@ -36,7 +36,8 @@ export interface ToolCall {
 
 export interface AgentMessage {
   role: "user" | "assistant" | "tool";
-  content: string;
+  /** Plain text, or an array of content blocks (e.g. text + image_url for vision models). */
+  content: string | MessageContentPart[];
   tool_call_id?: string;
   name?: string;
   /** DeepSeek reasoning_content that must be passed back in subsequent requests. */
@@ -131,7 +132,7 @@ export const SUB_AGENT_PROFILES: Record<string, SubAgentConfig> = {
     - INDEX is the number you pass to browser_click / browser_type / browser_clear / browser_select.
     - x,y is the element's top-left position in the viewport; WxH is its size. Use these to reason about layout and relative position.
     - FLAGS: A/A+ means interactive, disabled/checked/readonly/required describe state.
-- Use browser_screenshot to get the same positional grid plus any visible error text. It is text-only, not an image.
+- Use browser_screenshot to get the same positional grid plus any visible error text. If your model can see images, the result includes a real screenshot image; otherwise a text description of the screenshot is appended.
 - NEVER try view-source:, reading document.documentElement.outerHTML, or fetching raw HTML — there is no such tool and browser_get_dom already gives you everything you need to locate and act on elements.
 - Re-run browser_get_dom after any click/type/scroll/navigation, because indices can change.
 - Use browser_scroll to reveal content below the fold, then call browser_get_dom again.
@@ -639,9 +640,11 @@ export const TOOLS: ToolDef[] = [
   {
     name: "browser_screenshot",
     description:
-      "Get a text representation of the current page (NOT an image): URL, title, a positional grid of visible "
-      + "elements (same format as browser_get_dom), and any visible error messages. Use this for a quick overview; "
-      + "use browser_get_dom for the full indexed element list.",
+      "Get a visual snapshot of the current page: URL, title, a positional grid of visible "
+      + "elements (same format as browser_get_dom), and any visible error messages. "
+      + "When the active model is vision-capable the snapshot also includes the actual page image; "
+      + "for non-vision models a text description of the screenshot is appended automatically. "
+      + "Use this for a quick overview; use browser_get_dom for the full indexed element list.",
     parameters: { type: "object", properties: {}, required: [] },
   },
   {
@@ -1979,11 +1982,21 @@ const IMPORTANT_OUTPUT_RE = /(error|warning|failed|failure|exception|traceback|c
 
 type ModelMessage = {
   role: string;
-  content: string | null;
+  content: string | null | MessageContentPart[];
   tool_call_id?: string;
   tool_calls?: any[];
   reasoning_content?: string;
 };
+
+/** Extract the plain-text portion of a message for display/logging (image blocks dropped). */
+export function contentToDisplayString(content: string | MessageContentPart[]): string {
+  if (typeof content === "string") return content;
+  return content
+    .filter((block): block is TextContentBlockLike => block.type === "text")
+    .map((block) => (block as { text: string }).text)
+    .join("\n");
+}
+type TextContentBlockLike = { type: "text"; text: string };
 
 function clipText(text: string, maxChars: number): string {
   const normalized = text.replace(/\s+/g, " ").trim();
@@ -2024,7 +2037,7 @@ function mergeHistorySummary(existingSummary: string | undefined, compactedMessa
     if (previous) lines.push(`Earlier summary: ${previous}`);
   }
   for (const message of compactedMessages) {
-    const content = clipText(message.content || "", 220);
+    const content = clipText(contentToDisplayString(message.content), 220);
     if (!content) continue;
     lines.push(`${message.role === "user" ? "User" : "Assistant"}: ${content}`);
   }
@@ -2169,7 +2182,7 @@ function buildOpenAiMessages(state: AgentState, context: string): ModelMessage[]
   // regardless of where the tool message appears in state.messages order.
   // DeepSeek requires each assistant(tool_calls) to be immediately followed
   // by tool messages for all its tool_call_ids — no intervening messages.
-  const toolResults = new Map<string, string>();
+  const toolResults = new Map<string, string | MessageContentPart[]>();
   for (const message of state.messages) {
     if (message.role === "tool") {
       const toolId = message.tool_call_id;
@@ -2190,7 +2203,7 @@ function buildOpenAiMessages(state: AgentState, context: string): ModelMessage[]
 
     if (message.role === "assistant" && message.name) {
       try {
-        const calls: Array<{ id?: string }> = JSON.parse(message.content);
+        const calls: Array<{ id?: string }> = JSON.parse(contentToDisplayString(message.content));
         const ids = calls.map((call) => call.id).filter(Boolean) as string[];
         msgs.push({
           role: "assistant",
@@ -2609,7 +2622,7 @@ function countTriggers(text: string, triggers: string[]): number {
 
 /** Extract tool names from assistant messages that contain tool_calls JSON. */
 function extractToolNames(
-  messages: Array<{ role: string; content: string | null; name?: string }>,
+  messages: Array<{ role: string; content: string | null | MessageContentPart[]; name?: string }>,
 ): string[] {
   const names: string[] = [];
   for (const m of messages) {
@@ -2618,7 +2631,7 @@ function extractToolNames(
     } else if (m.role === "assistant" && m.content) {
       // Try parsing tool_calls JSON from content
       try {
-        const calls = JSON.parse(m.content);
+        const calls = JSON.parse(contentToDisplayString(m.content));
         if (Array.isArray(calls)) {
           for (const c of calls) {
             if (c.function?.name) names.push(c.function.name);
@@ -2631,7 +2644,7 @@ function extractToolNames(
 }
 
 function buildSystemPrompt(
-  messages: Array<{ role: string; content: string | null; name?: string }>,
+  messages: Array<{ role: string; content: string | null | MessageContentPart[]; name?: string }>,
   context: string,
   projectRoot?: string,
   memoryBlock?: string,
@@ -2716,7 +2729,7 @@ function buildOpenAiMessagesForSubAgent(
   // regardless of where the tool message appears in state.messages order.
   // DeepSeek requires each assistant(tool_calls) to be immediately followed
   // by tool messages for all its tool_call_ids — no intervening messages.
-  const toolResults = new Map<string, string>();
+  const toolResults = new Map<string, string | MessageContentPart[]>();
   for (const m of state.messages) {
     if (m.role === "tool") {
       const id = m.tool_call_id;
@@ -2736,7 +2749,7 @@ function buildOpenAiMessagesForSubAgent(
     }
     if (m.role === "assistant" && m.name) {
       try {
-        const calls: Array<{ id?: string }> = JSON.parse(m.content);
+        const calls: Array<{ id?: string }> = JSON.parse(contentToDisplayString(m.content));
         const ids = calls.map((call) => call.id).filter(Boolean) as string[];
         msgs.push({
           role: "assistant",
@@ -3117,7 +3130,7 @@ export async function resumeSubAgent(
   subState: AgentState,
   config: SubAgentConfig,
   toolCallId: string,
-  toolResult: string,
+  toolResult: string | MessageContentPart[],
   modelOpts: { model?: string; apiKey: string },
 ): Promise<SubAgentResult> {
   const maxIter = config.maxIterations || 15;
@@ -3488,7 +3501,7 @@ export async function* agentLoopStepByStep(
         if (m.role === "tool") return { role: "tool", content: m.content, tool_call_id: m.tool_call_id };
         if (m.role === "assistant" && m.name) {
           try {
-            const calls = JSON.parse(m.content);
+            const calls = JSON.parse(contentToDisplayString(m.content));
             return { role: "assistant", content: null, tool_calls: calls, ...rc(m.reasoning_content) };
           } catch {
             return { role: "assistant", content: m.content };
@@ -4421,7 +4434,7 @@ export async function* agentLoopStream(
           subAgentName: cfg.name,
           subAgentMessages: subResult!.subState.messages.map((m: AgentMessage) => ({
             role: m.role,
-            content: m.content || "",
+            content: contentToDisplayString(m.content),
             name: m.name,
             reasoning_content: m.reasoning_content,
             tool_call_id: m.tool_call_id,
@@ -4494,7 +4507,7 @@ export async function* agentLoopStream(
 }
 
 // Helper to add a tool result and get state for continuation
-export function addToolResultStream(sessionId: string, toolCallId: string, result: string): AgentState | undefined {
+export function addToolResultStream(sessionId: string, toolCallId: string, result: string | MessageContentPart[]): AgentState | undefined {
   const session = agentSessions.get(sessionId);
   if (!session) return undefined;
   session.messages.push({ role: "tool", content: result, tool_call_id: toolCallId });
@@ -4651,7 +4664,7 @@ export function getAgentSession(sessionId: string): AgentState | undefined {
   return agentSessions.get(sessionId);
 }
 
-export function addToolResult(sessionId: string, toolCallId: string, result: string): void {
+export function addToolResult(sessionId: string, toolCallId: string, result: string | MessageContentPart[]): void {
   const session = agentSessions.get(sessionId);
   if (!session) return;
   session.messages.push({ role: "tool", content: result, tool_call_id: toolCallId });

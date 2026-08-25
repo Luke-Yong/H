@@ -40,7 +40,7 @@ export interface EditorPaneHandle {
   /** Pre-fetch the file tree context from the backend. Call before getConsoleContext()
    *  to ensure the latest full/patch file tree is included in the snapshot. */
   fetchFileTreeContext: () => Promise<void>;
-  executeBrowserAction: (toolName: string, params: Record<string, unknown>) => Promise<string>;
+  executeBrowserAction: (toolName: string, params: Record<string, unknown>) => Promise<{ text: string; image?: string }>;
   getProjectFiles: () => Promise<string[]>;
   getFsBasePath: () => string;
   getActiveFilePath: () => string | null;
@@ -1907,14 +1907,17 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   }, [problemEntries, debugEntries, outputEntries, browserConsoleMap, activeBrowserTabId, browserTabs, files, activeFileId, activeFile, dirtyFiles, gitChanges]);
 
   // Execute a browser tool on behalf of the agent.
-  const executeBrowserAction = useCallback(async (toolName: string, params: Record<string, unknown>): Promise<string> => {
+  // Returns the text result plus (for browser_screenshot) the captured page image.
+  const executeBrowserAction = useCallback(async (toolName: string, params: Record<string, unknown>): Promise<{ text: string; image?: string }> => {
+    const done = (text: string): { text: string; image?: string } => ({ text });
+
     // browser_navigate doesn't need an existing loaded page — it creates/opens a tab
     if (toolName === "browser_navigate") {
       const url = String(params.url || "");
       let parsed: URL;
-      try { parsed = new URL(url); } catch { return `Blocked: invalid URL "${url}".`; }
+      try { parsed = new URL(url); } catch { return done(`Blocked: invalid URL "${url}".`); }
       if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-        return `Blocked: only http/https URLs are allowed (got "${parsed.protocol}").`;
+        return done(`Blocked: only http/https URLs are allowed (got "${parsed.protocol}").`);
       }
       if (browserTabs.length === 0) {
         onBrowserNewTabFromLink?.(url);
@@ -1930,9 +1933,9 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
         await new Promise(r => setTimeout(r, 100));
       }
       if (browserViewRef.current) {
-        return `Navigating to ${url}. Browser ready.`;
+        return done(`Navigating to ${url}. Browser ready.`);
       }
-      return `Navigating to ${url} (browser view still initializing — call browser_info to confirm).`;
+      return done(`Navigating to ${url} (browser view still initializing — call browser_info to confirm).`);
     }
 
     // For tools that need a loaded page, wait briefly for browser view to be ready
@@ -1942,34 +1945,41 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
       // was just created by browser_navigate. Return clear guidance.
       return null;
     })();
-    if (!bv) return "Browser not available. Use browser_navigate first to open a URL, then retry this tool.";
+    if (!bv) return done("Browser not available. Use browser_navigate first to open a URL, then retry this tool.");
     switch (toolName) {
-      case "browser_screenshot": return bv.getPageSnapshot();
-      case "browser_get_dom": return bv.getIndexedDom();
-      case "browser_type": await bv.typeIntoElement(Number(params.index || 0), String(params.text || "")); return `Typed "${params.text}" into element.`;
-      case "browser_clear": return bv.clearElement(Number(params.index || 0));
+      case "browser_screenshot": {
+        const text = await bv.getPageSnapshot();
+        // Capture the real page image for vision-capable models (or the vision
+        // bridge for non-vision models). On failure, keep the text grid only.
+        const img = await bv.captureScreenshotImage().catch(() => "");
+        const image = img && img.startsWith("data:image/") && !img.startsWith("data:image/svg") ? img : undefined;
+        return { text, image };
+      }
+      case "browser_get_dom": return done(await bv.getIndexedDom());
+      case "browser_type": await bv.typeIntoElement(Number(params.index || 0), String(params.text || "")); return done(`Typed "${params.text}" into element.`);
+      case "browser_clear": return done(await bv.clearElement(Number(params.index || 0)));
       case "browser_wait": {
         const selector = String(params.selector || "");
-        if (!selector) return "Error: selector is required.";
+        if (!selector) return done("Error: selector is required.");
         const timeout = Number(params.timeoutMs) || 5000;
-        return bv.waitForElement(selector, timeout);
+        return done(await bv.waitForElement(selector, timeout));
       }
       case "browser_click":
-        if (params.index != null) return bv.clickElement(Number(params.index));
-        return bv.clickCoords(Number(params.x || 0), Number(params.y || 0));
+        if (params.index != null) return done(await bv.clickElement(Number(params.index)));
+        return done(await bv.clickCoords(Number(params.x || 0), Number(params.y || 0)));
       case "browser_right_click":
-        if (params.index != null) return bv.rightClickElement(Number(params.index));
-        return bv.rightClick(Number(params.x || 0), Number(params.y || 0));
-      case "browser_move_mouse": return bv.moveMouse(Number(params.x || 0), Number(params.y || 0));
-      case "browser_scroll": return bv.scrollPage(Number(params.x || 0), Number(params.y || 0), params.to as string | undefined);
-      case "browser_press_key": return bv.pressKey(String(params.key || ""));
-      case "browser_upload_file": return bv.uploadFile(Number(params.index || 0), (params.paths as string[]) || []);
-      case "browser_console": return bv.getConsoleEntries();
-      case "browser_request_errors": return bv.getRequestErrors();
-      case "browser_info": return bv.getInfo();
-      case "browser_select": return bv.selectOption(Number(params.index || 0), params.value as string | undefined, params.label as string | undefined);
-      case "read_problems": return getConsoleContext();
-      default: return `Unknown browser tool: ${toolName}`;
+        if (params.index != null) return done(await bv.rightClickElement(Number(params.index)));
+        return done(await bv.rightClick(Number(params.x || 0), Number(params.y || 0)));
+      case "browser_move_mouse": return done(await bv.moveMouse(Number(params.x || 0), Number(params.y || 0)));
+      case "browser_scroll": return done(await bv.scrollPage(Number(params.x || 0), Number(params.y || 0), params.to as string | undefined));
+      case "browser_press_key": return done(await bv.pressKey(String(params.key || "")));
+      case "browser_upload_file": return done(await bv.uploadFile(Number(params.index || 0), (params.paths as string[]) || []));
+      case "browser_console": return done(await bv.getConsoleEntries());
+      case "browser_request_errors": return done(await bv.getRequestErrors());
+      case "browser_info": return done(bv.getInfo());
+      case "browser_select": return done(await bv.selectOption(Number(params.index || 0), params.value as string | undefined, params.label as string | undefined));
+      case "read_problems": return done(getConsoleContext());
+      default: return done(`Unknown browser tool: ${toolName}`);
     }
   }, [browserTabs, activeBrowserTabId, onBrowserNewTabFromLink, onBrowserTabUpdateUrl]);
 

@@ -893,7 +893,7 @@ Agent 调用 run_in_terminal
 | `browser_navigate` | 仅子 agent | 导航到 URL（仅 http/https）。如果不存在浏览器标签页则创建新标签页，否则导航活动标签页。在返回前等待浏览器视图挂载（最多 2 秒）。 |
 | `browser_info` | 仅子 agent | 获取当前浏览器标签页状态：URL、页面标题、加载状态和打开的标签页数量。 |
 | **观察**（只读） |||
-| `browser_screenshot` | 仅子 agent | 获取页面概览：URL、标题和标准化的位置稳定网格（`V:WxH`、`XX\|N` 分段头、`NN\|tag#id[type] "label" FLAGS x,y:WxH ^ctx` 每行）。上限为 500 个元素、80K 字符。在密集页面（>400 个展示元素）上，网格自动分割为水平区域（`Band 1/3 y:0-600` 等），以便 agent 一次处理一个区域。包含可见错误文本。 |
+| `browser_screenshot` | 仅子 agent | 获取页面概览：URL、标题和标准化的位置稳定网格（`V:WxH`、`XX\|N` 分段头、`NN\|tag#id[type] "label" FLAGS x,y:WxH ^ctx` 每行）。上限为 500 个元素、80K 字符。在密集页面（>400 个展示元素）上，网格自动分割为水平区域（`Band 1/3 y:0-600` 等），以便 agent 一次处理一个区域。包含可见错误文本。当当前模型支持视觉（如 `deepseek-v4-flash-vision-exp`）时，结果还会携带真实页面截图（base64 图片）；不支持视觉的模型则由 flash 视觉模型描述截图并将文本描述附加到结果中。 |
 | `browser_get_dom` | 仅子 agent | 获取标准化的位置稳定网格格式的完整索引 DOM。与 `browser_screenshot` 相同的严格字段格式。上限为 3,000 个元素、120K 字符。在密集页面上，自动分割为水平区域（>400 时为 2，>800 时为 3，>1,200 时为 4），跨区域使用全局索引，以便点击/输入引用保持正确。索引按从上到下、从左到右排序（纯几何）。标志：`A`=可点击、`A+`=可交互、`disabled`、`checked`、`readonly`、`required`。折叠/隐藏/被遮挡的元素被过滤掉。 |
 | `browser_console` | 仅子 agent | 获取最后 50 条控制台条目（日志、警告、错误、对话框）以检查 JS 错误 |
 | `browser_request_errors` | 仅子 agent | 获取失败的网络请求（4xx/5xx/CORS）以验证 API 调用和资源加载 |

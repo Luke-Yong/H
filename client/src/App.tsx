@@ -899,7 +899,7 @@ export default function App() {
             onGoalChange={setGoal}
             getConsoleContext={() => editorRef.current?.getConsoleContext() || ""}
             refreshFileTreeContext={() => editorRef.current?.fetchFileTreeContext() ?? Promise.resolve()}
-            executeBrowserAction={(name, params) => editorRef.current?.executeBrowserAction(name, params) ?? Promise.resolve("Browser not available")}
+            executeBrowserAction={(name, params) => editorRef.current?.executeBrowserAction(name, params) ?? Promise.resolve({ text: "Browser not available" })}
             getProjectFiles={() => editorRef.current?.getProjectFiles() ?? Promise.resolve([])}
             getFsBasePath={() => editorRef.current?.getFsBasePath() || ""}
             refreshEditor={(files) => editorRef.current?.applyAiFiles(files)}

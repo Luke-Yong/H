@@ -1,4 +1,4 @@
-﻿import fs from "fs";
+import fs from "fs";
 import path from "path";
 import { createHash } from "crypto";
 
@@ -10,6 +10,60 @@ export interface DeepSeekApiUsage {
   totalTokens: number;
   promptCacheHitTokens: number;
   promptCacheMissTokens: number;
+}
+
+// ── Vision support ──
+// DeepSeek's first multimodal model (deepseek-v4-flash-vision-exp, released
+// 2026-08-21) accepts images via OpenAI-compatible content blocks. All other
+// DeepSeek models remain text-only, so screenshot results are bridged through
+// this model (see describeScreenshot) when the active model cannot see.
+
+export const VISION_MODEL = "deepseek-v4-flash-vision-exp";
+
+/** True when the configured model can take image input directly. */
+export function modelSupportsVision(model?: string): boolean {
+  return !!model && /vision/i.test(model);
+}
+
+export interface ImageContentBlock {
+  type: "image_url";
+  image_url: { url: string; detail?: string };
+}
+export interface TextContentBlock {
+  type: "text";
+  text: string;
+}
+export type MessageContentPart = TextContentBlock | ImageContentBlock;
+
+// Prompt used when a non-vision model needs a screenshot described for it.
+const VISION_BRIDGE_PROMPT = `You are the "eyes" of a coding agent that cannot see images. Describe this webpage screenshot so the agent can reason about its visual state.
+
+Report:
+- Overall layout (header/sidebar/main/footer, grids, spacing) and visual density.
+- Visible text: headings, labels, buttons, links, and their approximate position (top/left/center/right/bottom).
+- UI state: active/hovered/selected/focused elements, toggles, checkboxes, dropdowns, loading spinners, modals, disabled buttons.
+- Any visible error messages, warnings, or empty states.
+- Anything visually broken: overlapping elements, clipping, misalignment, blank areas, broken images.
+
+Be concise and factual. Do NOT invent content that is not visible. Use short bullet lines.`;
+
+export async function describeScreenshot(apiKey: string, imageDataUrl: string, gridText: string): Promise<string> {
+  const res = await deepseekFetch(apiKey, {
+    model: VISION_MODEL,
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: `${VISION_BRIDGE_PROMPT}\n\nPage URL/title from browser_screenshot:\n${gridText.slice(0, 3000)}` },
+          { type: "image_url", image_url: { url: imageDataUrl } },
+        ],
+      },
+    ],
+    temperature: 0.1,
+    max_tokens: 1000,
+  });
+  const data: any = await res.json();
+  return String(data.choices?.[0]?.message?.content || "").trim() || "(vision model returned no description)";
 }
 
 function computeCacheContextId(systemContent: string | null | undefined): string | undefined {
@@ -189,12 +243,12 @@ export interface ToolCallResult {
 }
 
 export async function chatDeepSeekTool(
-  messages: Array<{ role: string; content: string | null; tool_calls?: any[]; tool_call_id?: string; name?: string }>,
+  messages: Array<{ role: string; content: string | null | MessageContentPart[]; tool_calls?: any[]; tool_call_id?: string; name?: string }>,
   tools: Array<{ name: string; description: string; parameters: Record<string, unknown> }>,
   opts?: { model?: string; apiKey: string },
 ): Promise<ToolCallResult> {
   const sysMsg = messages.find((m) => m.role === "system");
-  const cacheCtx = computeCacheContextId(sysMsg?.content);
+  const cacheCtx = computeCacheContextId(typeof sysMsg?.content === "string" ? sysMsg.content : undefined);
 
   const res = await deepseekFetch(opts?.apiKey || "", {
     model: opts?.model || "",
@@ -291,13 +345,13 @@ async function* parseSSE(response: Response): AsyncGenerator<any> {
 }
 
 export async function* chatDeepSeekToolStream(
-  messages: Array<{ role: string; content: string | null; tool_calls?: any[]; tool_call_id?: string; name?: string }>,
+  messages: Array<{ role: string; content: string | null | MessageContentPart[]; tool_calls?: any[]; tool_call_id?: string; name?: string }>,
   tools: Array<{ name: string; description: string; parameters: Record<string, unknown> }>,
   opts: { model?: string; apiKey: string },
 ): AsyncGenerator<StreamChunk> {
   // Compute cache context ID from the system message (prefix for DeepSeek's KV cache)
   const sysMsg = messages.find((m) => m.role === "system");
-  const cacheCtx = computeCacheContextId(sysMsg?.content);
+  const cacheCtx = computeCacheContextId(typeof sysMsg?.content === "string" ? sysMsg.content : undefined);
 
   const res = await deepseekFetch(opts.apiKey, {
     model: opts.model || "",

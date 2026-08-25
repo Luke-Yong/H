@@ -18,6 +18,8 @@ export interface BrowserViewHandle {
   typeIntoElement: (index: number, text: string) => Promise<string>;
   /** Get a text snapshot of the page: URL, title, visible text, form elements, buttons. */
   getPageSnapshot: () => Promise<string>;
+  /** Capture the visible page as a base64 PNG data URL (for vision-capable models). */
+  captureScreenshotImage: () => Promise<string>;
   /** Navigate to a URL in the current tab. */
   navigateTo: (url: string) => Promise<void>;
   /** Wait for an element matching a CSS selector to appear. Returns first match or empty. */
@@ -1871,6 +1873,11 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
       const win = getIframe()?.contentWindow as any;
       if (win) {
         const result = (win as any).eval?.(code);
+        // eval in the iframe returns a Promise for async scripts — await it so
+        // waitForElement / captureScreenshotImage work in web (non-Electron) mode.
+        if (result && typeof result.then === "function") {
+          return String(await result);
+        }
         return String(result ?? "");
       }
     } catch (e: any) { return `Error: ${e?.message || e}`; }
@@ -2052,6 +2059,102 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
         }
 
         return lines.join('\\n');
+      })()
+    `);
+  }, [evalInPage]);
+
+  // Capture the visible page as a base64 PNG via DOM rasterization (SVG
+  // foreignObject → canvas). Styles are inlined (same-origin stylesheets fetched
+  // through the proxy) and images are converted to data URLs so the canvas is
+  // not tainted. Returns a "data:image/png;base64,..." string, or an "Error: ..."
+  // string on failure (callers fall back to the text-only grid).
+  const captureScreenshotImage = useCallback(async (): Promise<string> => {
+    return evalInPage(`
+      (() => {
+        const MAX_W = 1280, MAX_H = 1024, MAX_CSS = 120000, MAX_IMGS = 20;
+        const vw = Math.min(document.documentElement.clientWidth || window.innerWidth || 1280, MAX_W);
+        const vh = Math.min(window.innerHeight || document.documentElement.clientHeight || 800, MAX_H);
+
+        // 1. Collect inline <style> and fetch same-origin <link rel=stylesheet>
+        const styleParts = [];
+        try {
+          document.querySelectorAll('style').forEach(function (s) { if (s.textContent) styleParts.push(s.textContent); });
+        } catch (e) {}
+        const links = Array.prototype.slice.call(document.querySelectorAll('link[rel="stylesheet"]'));
+        const fetchCss = Promise.all(links.map(function (link) {
+          const href = link.href || '';
+          if (!href) return Promise.resolve('');
+          return fetch(href, { credentials: 'include' })
+            .then(function (r) { return r.ok ? r.text() : ''; })
+            .catch(function () { return ''; });
+        })).then(function (texts) { return texts.join('\\n'); });
+
+        return fetchCss
+          .then(function (linkCss) {
+            styleParts.push(linkCss);
+            let css = styleParts.join('\\n');
+            if (css.length > MAX_CSS) css = css.slice(0, MAX_CSS);
+
+            // 2. Clone the document; drop elements that can't render or could
+            //    leak the viewport (scripts, iframes, video, canvases, links).
+            const clone = document.documentElement.cloneNode(true);
+            clone.querySelectorAll('script, iframe, video, audio, canvas, link, meta, noscript, object, embed').forEach(function (el) { el.remove(); });
+
+            // 3. Inline <img> srcs as data URLs (capped) to avoid canvas taint.
+            const imgs = Array.prototype.slice.call(clone.querySelectorAll('img'));
+            const pending = [];
+            let converted = 0;
+            for (let i = 0; i < imgs.length && converted < MAX_IMGS; i++) {
+              const img = imgs[i];
+              const src = img.getAttribute('src') || img.currentSrc || '';
+              if (!src || src.startsWith('data:')) continue;
+              pending.push(fetch(src, { credentials: 'include' })
+                .then(function (r) { return r.ok ? r.blob() : null; })
+                .then(function (blob) {
+                  if (!blob) return;
+                  return new Promise(function (res) {
+                    const fr = new FileReader();
+                    fr.onload = function () { img.setAttribute('src', String(fr.result)); res(); };
+                    fr.onerror = function () { res(); };
+                    fr.readAsDataURL(blob);
+                  });
+                })
+                .catch(function () {}));
+              converted++;
+            }
+
+            return Promise.all(pending).then(function () {
+              const html = clone.outerHTML;
+              const esc = function (s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;'); };
+              const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + vw + '" height="' + vh + '">'
+                + '<style>' + esc(css) + '</style>'
+                + '<foreignObject width="100%" height="100%">'
+                + '<div xmlns="http://www.w3.org/1999/xhtml" style="overflow:hidden;width:' + vw + 'px;height:' + vh + 'px">'
+                + esc(html)
+                + '</div></foreignObject></svg>';
+              return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+            });
+          })
+          .then(function (svgUrl) {
+            return new Promise(function (resolve) {
+              const img = new Image();
+              const canvas = document.createElement('canvas');
+              canvas.width = vw;
+              canvas.height = vh;
+              const ctx = canvas.getContext('2d');
+              img.onload = function () {
+                try {
+                  ctx.drawImage(img, 0, 0, vw, vh);
+                  resolve(canvas.toDataURL('image/png'));
+                } catch (e) {
+                  resolve('Error: screenshot rasterization failed (cross-origin resources tainted the canvas): ' + (e && e.message ? e.message : e));
+                }
+              };
+              img.onerror = function () { resolve('Error: screenshot rasterization failed (SVG image could not load)'); };
+              img.src = svgUrl;
+            });
+          })
+          .catch(function (e) { return 'Error: screenshot capture failed: ' + (e && e.message ? e.message : e); });
       })()
     `);
   }, [evalInPage]);
@@ -2391,9 +2494,9 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   }, [evalInPage]);
 
   useImperativeHandle(ref, () => ({
-    evalInPage, getIndexedDom, clickElement, typeIntoElement, clearElement, clickCoords, moveMouse, rightClick, rightClickElement, scrollPage, pressKey, uploadFile, getPageSnapshot, navigateTo,
+    evalInPage, getIndexedDom, clickElement, typeIntoElement, clearElement, clickCoords, moveMouse, rightClick, rightClickElement, scrollPage, pressKey, uploadFile, getPageSnapshot, captureScreenshotImage, navigateTo,
     waitForElement, getConsoleEntries, getRequestErrors, getInfo, selectOption,
-  }), [evalInPage, getIndexedDom, clickElement, typeIntoElement, clearElement, clickCoords, moveMouse, rightClick, rightClickElement, scrollPage, pressKey, uploadFile, getPageSnapshot, navigateTo,
+  }), [evalInPage, getIndexedDom, clickElement, typeIntoElement, clearElement, clickCoords, moveMouse, rightClick, rightClickElement, scrollPage, pressKey, uploadFile, getPageSnapshot, captureScreenshotImage, navigateTo,
     waitForElement, getConsoleEntries, getRequestErrors, getInfo, selectOption]);
 
   return (

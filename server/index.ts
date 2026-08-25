@@ -4,7 +4,7 @@ import { createServer } from "http";
 import http from "http";
 import https from "https";
 import { WebSocketServer, WebSocket } from "ws";
-import { chatDeepSeek } from "./deepseek";
+import { chatDeepSeek, modelSupportsVision, describeScreenshot, VISION_MODEL, type MessageContentPart } from "./deepseek";
 import { autoCapturePreference, selectMemoryContext, runMemoryMaintenance, getProfileRaw, setProfileRaw } from "./memory";
 import {
   createSession, writeToSession, resizeSession,
@@ -152,7 +152,7 @@ app.post("/api/chat", async (req, res) => {
 });
 
 // ── Agentic chat (tool-calling loop) ──
-import { createAgentSession, getAgentSession, addToolResult, addToolResultStream, deleteAgentSession, agentLoop, agentLoopStream, agentLoopStepByStep, runFsTool, storeCommandOutput, summarizeCommandResult, resumeSubAgent, type AgentState, type AgentResponse, type AgentSseEvent } from "./agent";
+import { createAgentSession, getAgentSession, addToolResult, addToolResultStream, deleteAgentSession, agentLoop, agentLoopStream, agentLoopStepByStep, runFsTool, storeCommandOutput, summarizeCommandResult, resumeSubAgent, contentToDisplayString, type AgentState, type AgentResponse, type AgentSseEvent } from "./agent";
 
 app.post("/api/chat/agent", async (req, res) => {
   const { message, context, projectRoot, model, sessionId: clientSessionId, latestTodos } = req.body || {};
@@ -202,7 +202,7 @@ app.post("/api/chat/agent", async (req, res) => {
 });
 
 app.post("/api/chat/agent/continue", async (req, res) => {
-  const { sessionId, toolCallId, toolResult, projectRoot, model } = req.body || {};
+  const { sessionId, toolCallId, toolResult, projectRoot, model, toolResultImage } = req.body || {};
   if (!sessionId || !toolCallId || toolResult === undefined) {
     return res.status(400).json({ error: "Missing sessionId, toolCallId, or toolResult" });
   }
@@ -213,12 +213,17 @@ app.post("/api/chat/agent/continue", async (req, res) => {
     const state = getAgentSession(sessionId);
     if (!state) return res.status(404).json({ error: "Session not found" });
 
+    const screenshotImage = typeof toolResultImage === "string" && toolResultImage.trim()
+      ? toolResultImage
+      : undefined;
+
     // ── Sub-agent resume: if a sub-agent was paused waiting for a browser tool ──
     if (state.pendingSubAgent) {
       const psa = state.pendingSubAgent;
       state.pendingSubAgent = undefined;
+      const preparedResult = await prepareBrowserScreenshotResult(model, apiKey, String(toolResult), screenshotImage);
       const subResult = await resumeSubAgent(
-        psa.subState, psa.config, toolCallId, String(toolResult),
+        psa.subState, psa.config, toolCallId, preparedResult,
         { model, apiKey },
       );
       if (subResult.phase === "browser_tool") {
@@ -256,7 +261,7 @@ app.post("/api/chat/agent/continue", async (req, res) => {
       return res.json({ phase: "done", reply: result.reply, messages: result.messages });
     }
 
-    addToolResult(sessionId, toolCallId, String(toolResult));
+    addToolResult(sessionId, toolCallId, await prepareBrowserScreenshotResult(model, apiKey, String(toolResult), screenshotImage));
     broadcast({ type: "agent_tool_result", data: { sessionId, toolCallId, toolResult: String(toolResult).slice(0, 500) } });
 
     const result = await agentLoop(projectRoot || state.projectRoot, state, "", { model, apiKey });
@@ -411,8 +416,31 @@ app.post("/api/chat/agent/stream/stepbystep", async (req, res) => {
   }
 });
 
+// ── Browser screenshot vision handling ──
+// browser_screenshot results include an optional page image. If the active model
+// can see images, return the text grid + image as content blocks. Otherwise
+// describe the screenshot with the flash vision model and append the description.
+async function prepareBrowserScreenshotResult(
+  model: string | undefined,
+  apiKey: string,
+  gridText: string,
+  imageDataUrl: string | undefined,
+): Promise<string | MessageContentPart[]> {
+  if (!imageDataUrl) return gridText;
+  if (modelSupportsVision(model)) {
+    return [
+      { type: "text", text: gridText },
+      { type: "image_url", image_url: { url: imageDataUrl } },
+    ];
+  }
+  const description = await describeScreenshot(apiKey, imageDataUrl, gridText).catch(
+    () => "(screenshot could not be described by the vision model)",
+  );
+  return `${gridText}\n\n[Visual snapshot — described by ${VISION_MODEL}]\n${description}`;
+}
+
 app.post("/api/chat/agent/stream/continue", async (req, res) => {
-  const { sessionId, toolCallId, toolResult, permissionGranted, model, thinking, consoleContext } = req.body || {};
+  const { sessionId, toolCallId, toolResult, permissionGranted, model, thinking, consoleContext, toolResultImage } = req.body || {};
   if (!sessionId || !toolCallId) {
     return res.status(400).json({ error: "Missing sessionId or toolCallId" });
   }
@@ -422,6 +450,11 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
   try {
     const state = getAgentSession(sessionId);
     if (!state) return res.status(404).json({ error: "Session not found" });
+
+    // Optional page image from a browser_screenshot execution (base64 data URL).
+    const screenshotImage = typeof toolResultImage === "string" && toolResultImage.trim()
+      ? toolResultImage
+      : undefined;
 
     // ── Step 1: Handle permission Allow/Deny or browser tool results ──
     let cmdResult: string | null = null;
@@ -433,8 +466,9 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
     if (state.pendingSubAgent && !(state.pendingPermission && state.pendingPermission.toolCallId === toolCallId)) {
       const psa = state.pendingSubAgent;
       state.pendingSubAgent = undefined;
+      const preparedResult = await prepareBrowserScreenshotResult(model, apiKey, String(toolResult || ""), screenshotImage);
       const subResult = await resumeSubAgent(
-        psa.subState, psa.config, toolCallId, String(toolResult),
+        psa.subState, psa.config, toolCallId, preparedResult,
         { model, apiKey },
       );
       if (subResult.phase === "browser_tool") {
@@ -491,7 +525,7 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
       sendEvent({ type: "tool_end", toolName: "delegate_task", toolResult: resultText, toolParams: {},
         subAgentName: psa.config.name,
         subAgentMessages: subResult.subState.messages.map((m: any) => ({
-          role: m.role, content: m.content || "", name: m.name, reasoning_content: m.reasoning_content, tool_call_id: m.tool_call_id,
+          role: m.role, content: contentToDisplayString(m.content ?? ""), name: m.name, reasoning_content: m.reasoning_content, tool_call_id: m.tool_call_id,
         })),
       } as AgentSseEvent);
       const continueContext = typeof consoleContext === "string" ? consoleContext : "";
@@ -542,7 +576,8 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
       }
     } else {
       // Browser tool result (or other non-permission continue)
-      addToolResultStream(sessionId, toolCallId, String(toolResult || ""));
+      const preparedResult = await prepareBrowserScreenshotResult(model, apiKey, String(toolResult || ""), screenshotImage);
+      addToolResultStream(sessionId, toolCallId, preparedResult);
     }
     broadcast({ type: "agent_tool_result", data: { sessionId, toolCallId, toolResult: String(toolResult || cmdResult || "").slice(0, 500) } });
 
