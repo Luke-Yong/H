@@ -8,7 +8,7 @@
 //
 // Conversation state is held in memory keyed by session id.
 
-import { chatDeepSeekTool, chatDeepSeekToolStream, type DeepSeekApiUsage, type MessageContentPart } from "./deepseek";
+import { chatDeepSeekTool, chatDeepSeekToolStream, modelSupportsVision, VISION_MODEL, type DeepSeekApiUsage, type MessageContentPart } from "./deepseek";
 import { getSnapshotPath } from "./hPaths";
 import { getMemoryContext, getMemoryStore, guessScope, getUserProfileContext } from "./memory";
 import { killSession, getLastCreatedSessionId } from "./terminalManager";
@@ -63,6 +63,9 @@ export interface AgentState {
     config: SubAgentConfig;
     task: string;
     agentType: string;
+    /** Model the sub-agent runs on (may differ from the parent's when the
+     *  browser agent auto-uses the vision model). Used on resume. */
+    model?: string;
     /** The parent's delegate_task tool call ID — pushed to state only when sub-agent is done. */
     parentToolCallId: string;
     parentToolArgs: string;
@@ -132,7 +135,8 @@ export const SUB_AGENT_PROFILES: Record<string, SubAgentConfig> = {
     - INDEX is the number you pass to browser_click / browser_type / browser_clear / browser_select.
     - x,y is the element's top-left position in the viewport; WxH is its size. Use these to reason about layout and relative position.
     - FLAGS: A/A+ means interactive, disabled/checked/readonly/required describe state.
-- Use browser_screenshot to get the same positional grid plus any visible error text. If your model can see images, the result includes a real screenshot image; otherwise a text description of the screenshot is appended.
+- Use browser_screenshot to get the same positional grid plus any visible error text. You run on a vision-capable model, so the result also includes the actual page image — use it to assess visual layout, styling, spacing, and on-screen UI state directly. If no image is present, use the grid and any error text.
+- Prefer browser_screenshot (with its image) over browser_get_dom for a quick visual overview; use browser_get_dom when you need exact indices to interact.
 - NEVER try view-source:, reading document.documentElement.outerHTML, or fetching raw HTML — there is no such tool and browser_get_dom already gives you everything you need to locate and act on elements.
 - Re-run browser_get_dom after any click/type/scroll/navigation, because indices can change.
 - Use browser_scroll to reveal content below the fold, then call browser_get_dom again.
@@ -640,11 +644,10 @@ export const TOOLS: ToolDef[] = [
   {
     name: "browser_screenshot",
     description:
-      "Get a visual snapshot of the current page: URL, title, a positional grid of visible "
-      + "elements (same format as browser_get_dom), and any visible error messages. "
-      + "When the active model is vision-capable the snapshot also includes the actual page image; "
-      + "for non-vision models a text description of the screenshot is appended automatically. "
-      + "Use this for a quick overview; use browser_get_dom for the full indexed element list.",
+      "Get a visual snapshot of the current page: the actual page image (primary), plus URL and title. "
+      + "The positional text grid is used only as a fallback when the image cannot be captured or the "
+      + "vision API fails. For non-vision models, a text description of the screenshot is produced by "
+      + "the flash vision model instead. Use this for a quick overview; use browser_get_dom for the full indexed element list.",
     parameters: { type: "object", properties: {}, required: [] },
   },
   {
@@ -2996,6 +2999,17 @@ async function* runSubAgentStream(
   return { phase: "done", success: false, summary: `Sub-agent reached max iterations (${maxIter}).`, iterations: maxIter, subState };
 }
 
+// The dedicated browser sub-agent does all screenshot observation, so it
+// automatically runs on the vision-capable flash model — no user setup needed.
+// If the user's active model already supports vision, keep it for consistency.
+export function resolveSubAgentModel(agentType: string | undefined, parentModel?: string): string | undefined {
+  if (agentType === "browser" && !modelSupportsVision(parentModel)) {
+    console.log(`[sub-agent] browser agent auto-uses ${VISION_MODEL} (parent model ${parentModel || "(none)"} is not vision-capable)`);
+    return VISION_MODEL;
+  }
+  return parentModel;
+}
+
 async function runSubAgent(
   parentState: AgentState,
   task: string,
@@ -3132,12 +3146,18 @@ export async function resumeSubAgent(
   toolCallId: string,
   toolResult: string | MessageContentPart[],
   modelOpts: { model?: string; apiKey: string },
+  /** Plain-text fallback (e.g. the positional grid) to retry with if the first
+   *  attempt — which may carry a screenshot image for a vision model — fails
+   *  before any other state is added. */
+  fallbackToolResult?: string,
 ): Promise<SubAgentResult> {
   const maxIter = config.maxIterations || 15;
 
   // Push the browser tool result
   subState.messages.push({ role: "tool", content: toolResult, tool_call_id: toolCallId });
+  const baseMessageCount = subState.messages.length;
 
+  try {
   const allowedSet = config.tools ? new Set(config.tools) : null;
   const subTools = config.headless
     ? TOOLS.filter((t) => (allowedSet ? allowedSet.has(t.name) : true) && !t.name.startsWith("browser_") && t.name !== "run_in_terminal" && t.name !== "task_complete" && t.name !== "write_summary")
@@ -3239,6 +3259,16 @@ export async function resumeSubAgent(
   }
 
   return { phase: "done", success: false, summary: `Sub-agent reached max iterations (${maxIter}).`, iterations: maxIter, subState };
+  } catch (err) {
+    // The vision API (or the model call carrying the screenshot image) failed
+    // before anything else was added. Retry once with the plain-text grid so
+    // the agent still gets page information.
+    if (subState.messages.length === baseMessageCount && fallbackToolResult !== undefined) {
+      subState.messages.pop();
+      return resumeSubAgent(subState, config, toolCallId, fallbackToolResult, modelOpts);
+    }
+    throw err;
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -3881,13 +3911,15 @@ export async function agentLoop(
       if (fnName === "delegate_task") {
         const agentType = String(params.agent_type || "code-search");
         const cfg = SUB_AGENT_PROFILES[agentType] || SUB_AGENT_PROFILES["code-search"];
-        const subResult = await runSubAgent(state, String(params.task || ""), cfg, { model: modelOpts?.model, apiKey: apiKey! }, agentType);
+        const subModel = resolveSubAgentModel(agentType, modelOpts?.model);
+        const subResult = await runSubAgent(state, String(params.task || ""), cfg, { model: subModel, apiKey: apiKey! }, agentType);
         if (subResult.phase === "browser_tool") {
           state.pendingSubAgent = {
             subState: subResult.subState,
             config: cfg,
             task: String(params.task || ""),
             agentType,
+            model: subModel,
             parentToolCallId: tc.id,
             parentToolArgs: tc.function.arguments,
             parentReasoning: reasoningContent ?? undefined,
@@ -4377,7 +4409,8 @@ export async function* agentLoopStream(
         yield { type: "tool_start", toolName: fnName, toolParams: params, toolCallId: tc.id, agentMarker: agentType };
         
         // Run sub-agent with live streaming — each tool call yields a tool_start/tool_end
-        const streamResult = runSubAgentStream(state, String(params.task || ""), cfg, agentType, { model: modelOpts?.model, apiKey: apiKey! });
+        const subModel = resolveSubAgentModel(agentType, modelOpts?.model);
+        const streamResult = runSubAgentStream(state, String(params.task || ""), cfg, agentType, { model: subModel, apiKey: apiKey! });
         
         let subResult: SubAgentResult;
         // Forward all sub-agent events to the frontend
@@ -4408,6 +4441,7 @@ export async function* agentLoopStream(
             config: cfg,
             task: String(params.task || ""),
             agentType,
+            model: subModel,
             parentToolCallId: tc.id,
             parentToolArgs: tc.function.arguments,
             parentReasoning: finalReasoning ?? undefined,

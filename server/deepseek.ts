@@ -47,14 +47,14 @@ Report:
 
 Be concise and factual. Do NOT invent content that is not visible. Use short bullet lines.`;
 
-export async function describeScreenshot(apiKey: string, imageDataUrl: string, gridText: string): Promise<string> {
+export async function describeScreenshot(apiKey: string, imageDataUrl: string, pageHeader: string): Promise<string> {
   const res = await deepseekFetch(apiKey, {
     model: VISION_MODEL,
     messages: [
       {
         role: "user",
         content: [
-          { type: "text", text: `${VISION_BRIDGE_PROMPT}\n\nPage URL/title from browser_screenshot:\n${gridText.slice(0, 3000)}` },
+          { type: "text", text: `${VISION_BRIDGE_PROMPT}\n\nPage URL/title from browser_screenshot:\n${pageHeader}` },
           { type: "image_url", image_url: { url: imageDataUrl } },
         ],
       },
