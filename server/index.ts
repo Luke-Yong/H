@@ -231,8 +231,9 @@ app.post("/api/chat/agent/continue", async (req, res) => {
       const subResult = await resumeSubAgent(
         psa.subState, psa.config, toolCallId, preparedResult,
         { model: subModel, apiKey },
-        // If the vision model rejects the image, retry once with the text grid.
-        Array.isArray(preparedResult) ? gridText : undefined,
+        // If the vision model rejects the image, retry once with the text
+        // header (URL/title) so the agent still knows which page this is.
+        Array.isArray(preparedResult) ? extractScreenshotHeader(gridText) : undefined,
       );
       if (subResult.phase === "browser_tool") {
         // Sub-agent needs another browser tool — re-store and yield again
@@ -439,15 +440,16 @@ app.post("/api/chat/agent/stream/stepbystep", async (req, res) => {
 });
 
 // ── Browser screenshot vision handling ──
-// browser_screenshot results include an optional page image. The image is the
-// primary output: vision-capable models receive it directly, and non-vision
-// models get a text description from the flash vision model. The positional
-// text grid is used ONLY when no image is available or the vision API fails.
+// browser_screenshot results include the page image. The image is the primary
+// output: vision-capable models receive it directly, and non-vision models get
+// a text description from the flash vision model. There is no text-grid
+// fallback anymore — if no image is available, the raw tool text (URL/title
+// header or an error) is returned as-is.
 
-/** Pull the short "URL: ... / Title: ..." header out of the text grid. */
+/** Pull the short "URL: ... / Title: ... / Screenshot: WxH" header out of the tool result text. */
 function extractScreenshotHeader(gridText: string): string {
-  const lines = gridText.split("\n").filter((l) => /^(URL|Title):/.test(l.trim()));
-  return lines.length > 0 ? lines.slice(0, 2).join("\n") : "Page screenshot";
+  const lines = gridText.split("\n").filter((l) => /^(URL|Title|Screenshot):/.test(l.trim()));
+  return lines.length > 0 ? lines.slice(0, 3).join("\n") : "Page screenshot";
 }
 
 async function prepareBrowserScreenshotResult(
@@ -456,23 +458,22 @@ async function prepareBrowserScreenshotResult(
   gridText: string,
   imageDataUrl: string | undefined,
 ): Promise<string | MessageContentPart[]> {
-  if (!imageDataUrl) return gridText; // no image captured — text grid fallback
+  if (!imageDataUrl) return gridText; // no image captured — return the tool's text as-is
   const header = extractScreenshotHeader(gridText);
   if (modelSupportsVision(model)) {
     // The model can see the page image — send it directly with only a short
-    // URL/title header so it knows which page this is. No text grid.
+    // URL/title header so it knows which page this is.
     return [
       { type: "text", text: header },
       { type: "image_url", image_url: { url: imageDataUrl } },
     ];
   }
   // Non-vision model — describe the screenshot with the flash vision model.
-  // The text grid is used ONLY if that call fails.
   try {
     const description = await describeScreenshot(apiKey, imageDataUrl, header);
     return `[Visual snapshot — described by ${VISION_MODEL}]\n${header}\n${description}`;
   } catch {
-    return gridText;
+    return header;
   }
 }
 
@@ -511,8 +512,9 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
       const subResult = await resumeSubAgent(
         psa.subState, psa.config, toolCallId, preparedResult,
         { model: subModel, apiKey },
-        // If the vision model rejects the image, retry once with the text grid.
-        Array.isArray(preparedResult) ? gridText : undefined,
+        // If the vision model rejects the image, retry once with the text
+        // header (URL/title) so the agent still knows which page this is.
+        Array.isArray(preparedResult) ? extractScreenshotHeader(gridText) : undefined,
       );
       if (subResult.phase === "browser_tool") {
         state.pendingSubAgent = { ...psa, subState: subResult.subState };

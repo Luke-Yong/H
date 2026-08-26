@@ -893,22 +893,21 @@ Agent 调用 run_in_terminal
 | `browser_navigate` | 仅子 agent | 导航到 URL（仅 http/https）。如果不存在浏览器标签页则创建新标签页，否则导航活动标签页。在返回前等待浏览器视图挂载（最多 2 秒）。 |
 | `browser_info` | 仅子 agent | 获取当前浏览器标签页状态：URL、页面标题、加载状态和打开的标签页数量。 |
 | **观察**（只读） |||
-| `browser_screenshot` | 仅子 agent | 获取当前页面的视觉快照。主要负载是真实页面截图（base64 图片）；位置稳定文本网格（`V:WxH`、`XX\|N` 分段头、`NN\|tag#id[type] "label" FLAGS x,y:WxH ^ctx` 每行，上限 500 个元素 / 80K 字符，密集页面自动分割为水平区域）仅作为兜底使用——当无法截图或视觉 API 失败时才生成。浏览器子 agent 自动使用 `deepseek-v4-flash-vision-exp`（无需用户配置），因此可以原生看到图片。其他不支持视觉的子 agent 类型（如 `frontend-specialist`）则由 flash 视觉模型描述截图并返回文本描述。 |
-| `browser_get_dom` | 仅子 agent | 获取标准化的位置稳定网格格式的完整索引 DOM。与 `browser_screenshot` 相同的严格字段格式。上限为 3,000 个元素、120K 字符。在密集页面上，自动分割为水平区域（>400 时为 2，>800 时为 3，>1,200 时为 4），跨区域使用全局索引，以便点击/输入引用保持正确。索引按从上到下、从左到右排序（纯几何）。标志：`A`=可点击、`A+`=可交互、`disabled`、`checked`、`readonly`、`required`。折叠/隐藏/被遮挡的元素被过滤掉。 |
+| `browser_screenshot` | 仅子 agent | 获取当前页面的视觉快照。结果是实际页面图片（base64 PNG，上限 1280×1024）加一个简短头部 — URL、标题，以及一行定义坐标空间的 `Screenshot: WxH`。浏览器子 agent 自动使用 `deepseek-v4-flash-vision-exp`（无需用户配置），因此可以原生看到图片，并通过指向图片中的坐标来交互。其他不支持视觉的子 agent 类型（如 `frontend-specialist`）则由 flash 视觉模型描述截图并返回文本描述。不再有文本网格 — 图片是唯一输出。 |
 | `browser_console` | 仅子 agent | 获取最后 50 条控制台条目（日志、警告、错误、对话框）以检查 JS 错误 |
 | `browser_request_errors` | 仅子 agent | 获取失败的网络请求（4xx/5xx/CORS）以验证 API 调用和资源加载 |
 | **交互**（仅子 agent） |||
-| `browser_click` | **仅子 agent** | 按 DOM 索引或像素坐标点击。分发完整的指针/鼠标事件序列。 |
-| `browser_type` | **仅子 agent** | 按 DOM 索引向输入框输入文本 — 先点击，清除，然后用逼真的键盘事件输入 |
-| `browser_clear` | **仅子 agent** | 按 DOM 索引清除输入元素的值 |
-| `browser_select` | **仅子 agent** | 按值或标签从 `<select>` 下拉菜单中选择选项 |
+| `browser_click` | **仅子 agent** | 按截图图片的 x,y 坐标点击（头部的 `Screenshot: WxH` 确定像素空间；渲染器会缩放到视口坐标）。分发完整的指针/鼠标事件序列。 |
+| `browser_type` | **仅子 agent** | 点击截图图片 x,y 处的输入框/文本域并输入文本 — 先点击，清除，然后用逼真的键盘事件输入 |
+| `browser_clear` | **仅子 agent** | 清除截图图片 x,y 处输入框/文本域的值 |
+| `browser_select` | **仅子 agent** | 按值或标签选择截图图片 x,y 处原生 `<select>` 的选项 |
 | `browser_scroll` | **仅子 agent** | 按像素或滚动到页面顶部/底部 |
 | `browser_press_key` | **仅子 agent** | 在活动元素上按下键盘按键（Enter、Escape、Tab、方向键等） |
 | `browser_wait` | **仅子 agent** | 等待匹配 CSS 选择器的元素出现（每 200ms 轮询，默认 5 秒超时） |
 | **鼠标 / 文件上传** |||
-| `browser_move_mouse` | **仅子 agent** | 将光标移动到 x,y — 触发悬停效果而不点击 |
-| `browser_right_click` | **仅子 agent** | 在 x,y 处右键点击 — 分发 contextmenu 事件 |
-| `browser_upload_file` | **仅子 agent** | 通过绝对路径设置文件输入的文件 |
+| `browser_move_mouse` | **仅子 agent** | 将光标移动到截图图片 x,y — 触发悬停效果而不点击 |
+| `browser_right_click` | **仅子 agent** | 在截图图片 x,y 处右键点击 — 分发 contextmenu 事件 |
+| `browser_upload_file` | **仅子 agent** | 通过绝对路径设置文件输入的文件 — 传入文件输入在截图中的 x,y，或省略以使用页面上的第一个文件输入 |
 
 ### 诊断
 
@@ -1046,12 +1045,12 @@ H 支持**子 agent 委托** — 主 agent 可以生成专门的子 agent 来隔
 
 | 配置文件 | 工具 | 迭代次数 | 描述 |
 |---------|------|----------|------|
-| `browser` | `browser_navigate`、`browser_info`、`browser_screenshot`、`browser_get_dom`、`browser_click`、`browser_type`、`browser_clear`、`browser_select`、`browser_press_key`、`browser_console`、`browser_request_errors`、`browser_scroll`、`browser_wait`、`browser_move_mouse`、`browser_right_click`、`browser_upload_file` | 100 | 完整浏览器自动化 — 无限轮次用于密集测试。导航、点击、输入、滚动、填写表单、检查 DOM/控制台/网络。 |
+| `browser` | `browser_navigate`、`browser_info`、`browser_screenshot`、`browser_click`、`browser_type`、`browser_clear`、`browser_select`、`browser_press_key`、`browser_console`、`browser_request_errors`、`browser_scroll`、`browser_wait`、`browser_move_mouse`、`browser_right_click`、`browser_upload_file` | 100 | 完整浏览器自动化 — 无限轮次用于密集测试。导航、截图（像素图片）、按图片坐标点击/输入、滚动、填写表单、检查控制台/网络。 |
 | `code-search` | `read_file`、`list_files`、`search_files`、`grep`、`read_graph` | 20 | 只读代码探索。查找文件、读取代码、报告发现。从不编辑。 |
 | `code-writer` | 完整文件系统 + `run_command`、`read_problems`、`read_graph` | 50 | 实现功能或修复 Bug。读取、编辑、构建和验证。 |
 | `researcher` | `read_file`、`list_files`、`search_files`、`grep`、`run_command`、`read_graph` | 25 | 探索代码库回答问题。报告文件路径和行号。 |
 | `planner` | `read_file`、`list_files`、`search_files`、`grep`、`read_graph`、`write_todos` | 25 | 分析项目并创建结构化的分步计划。输出包含有序、可操作步骤的 todo 列表。 |
-| `frontend-specialist` | 完整文件系统 + `run_command`、`read_problems`、`read_graph`、`browser_screenshot`、`browser_get_dom`、`browser_console`、`browser_request_errors` | 50 | 实现 UI 功能和组件。在浏览器中可视化验证更改。 |
+| `frontend-specialist` | 完整文件系统 + `run_command`、`read_problems`、`read_graph`、`browser_screenshot`、`browser_console`、`browser_request_errors` | 50 | 实现 UI 功能和组件。在浏览器中可视化验证更改。 |
 | `backend-specialist` | 完整文件系统 + `run_command`、`read_problems`、`read_graph` | 50 | 实现 API 路由、服务和数据库逻辑。关注服务器端模式和数据完整性。 |
 | `security-auditor` | `read_file`、`list_files`、`search_files`、`grep`、`run_command`、`read_graph`、`read_problems` | 30 | 审核代码漏洞。运行安全扫描，报告发现及严重性和修复建议。从不编辑。 |
 | `architect-analyst` | `read_file`、`list_files`、`search_files`、`grep`、`read_graph` | 25 | 分析项目架构、依赖图和模块结构。报告架构问题和建议。从不编辑。 |
@@ -1065,7 +1064,7 @@ H 支持**子 agent 委托** — 主 agent 可以生成专门的子 agent 来隔
 | **上下文隔离** | 每个子 agent 拥有自己的 `AgentState` — 消息不会污染父 agent 的上下文 |
 | **工具白名单** | 子 agent 仅接收其配置文件指定的工具（例如 code-search 永远不能写文件） |
 | **无头执行** | 所有非浏览器子 agent 完全在服务器端运行 — 没有浏览器或终端工具。frontend-specialist 具有只读浏览器工具用于可视化验证。 |
-| **浏览器委托** | 父 agent 没有浏览器工具 — 连只读的也没有。所有浏览器交互（导航、检查 DOM、截图、检查控制台/网络、点击、输入、滚动）通过 `delegate_task agent_type: "browser"` 的浏览器子 agent 进行。这保持主 agent 上下文的清洁，并强制结构化委托。 |
+| **浏览器委托** | 父 agent 没有浏览器工具 — 连只读的也没有。所有浏览器交互（导航、截图、检查控制台/网络、点击、输入、滚动）通过 `delegate_task agent_type: "browser"` 的浏览器子 agent 进行。这保持主 agent 上下文的清洁，并强制结构化委托。 |
 | **实时流式传输** | 子 agent 工具调用实时流式传输到 UI，作为彩色工具卡片实时显示。父 agent 在委托期间显示为暂停状态。子 agent 文本事件被过滤 — 仅显示 tool_start/tool_end 卡片，防止消息污染。 |
 | **结果汇总** | 子 agent 结果在返回给父 agent 之前被压缩，保留上下文预算 |
 | **并行性** | 不支持 — 子 agent 顺序运行。每个必须在下一个开始前完成，以管理 RAM 使用。Agent 应为独立的子任务多次调用 `delegate_task`。 |
@@ -1104,23 +1103,20 @@ Agent: delegate_task task="查找项目中所有与认证相关的代码。
 
 → [浏览器 Agent] browser_navigate http://localhost:3000/login
   → 渲染器执行 → 页面加载
-→ [浏览器 Agent] browser_get_dom
-  → 渲染器返回标准化的位置稳定网格中的索引元素
-    (V:WxH、XX|N 分段、A/A+ 标志)
-    在密集页面上，分割为区域如 "Band 1/2 y:0-450"
-    以便 agent 一次读取一个区域。
-→ [浏览器 Agent] browser_click index=12  (带 A+ 标志的邮箱输入框)
-  → 渲染器点击 → 输入框获得焦点
-→ [浏览器 Agent] browser_type index=12 text="admin"
-  → 渲染器输入 → "admin" 已输入
-→ [浏览器 Agent] browser_click index=15  (密码输入框)
-→ [浏览器 Agent] browser_type index=15 text="pass123"
-→ [浏览器 Agent] browser_click index=18  (带 A+ 标志的登录按钮)
 → [浏览器 Agent] browser_screenshot
-  → 渲染器返回 URL、标题、区域分割网格
-    （如果视口密集则自动分割为区域），
-    以及过滤的错误文本
-  → 在 Band 2, Middle-Center 部分看到 "Welcome, admin!"
+  → 渲染器返回页面图片 + 头部
+    （URL、标题、"Screenshot: WxH" 图片尺寸）
+  → agent 在图片中看到登录表单
+→ [浏览器 Agent] browser_click x=320 y=180  (它看到的邮箱输入框)
+  → 渲染器缩放到视口坐标 → 输入框获得焦点
+→ [浏览器 Agent] browser_type x=320 y=180 text="admin"
+  → 渲染器输入 → "admin" 已输入
+→ [浏览器 Agent] browser_click x=320 y=240  (密码输入框)
+→ [浏览器 Agent] browser_type x=320 y=240 text="pass123"
+→ [浏览器 Agent] browser_click x=280 y=300  (登录按钮)
+→ [浏览器 Agent] browser_screenshot
+  → 渲染器返回页面图片 + 头部
+  → 在图片中看到 "Welcome, admin!" 渲染出来
 
 → [浏览器 Agent] 在 10 轮内完成。
   登录测试：成功。已导航到登录页面，
@@ -1494,7 +1490,7 @@ Agent 知道如何诊断和修复每种语言栈的错误。以下是指引 — 
 | 语法检查（所有文件） | `run_command` | `python -m compileall .` |
 | 运行测试 | `run_command` | `python -m pytest` |
 | 安装依赖 | `run_command` | `pip install -r requirements.txt` 或 `pip install <pkg>` |
-| Flask/Django 运行时错误 | `browser_screenshot` 或 `browser_get_dom` | Flask 调试模式在浏览器中显示完整 traceback；带位置桶和 `A`/`A+` 标志的标准化网格有助于区分导航 chrome 与实际错误面板 |
+| Flask/Django 运行时错误 | `browser_screenshot` | Flask 调试模式在浏览器中显示完整 traceback；截图图片让视觉模型直接读取 traceback，并区分导航 chrome 与实际错误面板 |
 | 后端 HTTP 错误 | `browser_request_errors` | 检查 500 错误和 CORS 问题 |
 | 查找函数定义位置 | `grep` | `def <name>` 或 `class <Name>` |
 | 读取堆栈跟踪 | `read_file` | 在 traceback 中的行号打开失败文件 |
@@ -1562,7 +1558,7 @@ Agent 知道如何诊断和修复每种语言栈的错误。以下是指引 — 
 
 1. **启动服务器**（`run_in_terminal`）— 用户必须允许
 2. **检查构建错误**（`run_command`）— 通过 `edit_file` / `write_file` 修复
-3. **验证页面加载**（`browser_info` → `browser_screenshot` / `browser_get_dom`，然后使用标准化网格、位置桶和 `A`/`A+` 标志定位正确元素）
+3. **验证页面加载**（`browser_info` → `browser_screenshot`，然后使用截图图片定位元素并按坐标点击/输入）
 4. **检查浏览器运行时错误**（`browser_console`、`browser_request_errors`）
 5. **在进行修复前读取相关源文件**（`read_file`）
 6. **进行精确编辑**（`edit_file` — 仅发送变更的行）
@@ -1793,7 +1789,7 @@ H/
 │       │   ├── AgentConsole.tsx     # Agent 聊天 UI：流式消息、diff 预览、授权提示、带 agent 颜色编码的工具卡片、markdown 渲染
 │       │   ├── TerminalPane.tsx     # xterm.js 终端：WebSocket 支持的 PTY、Ctrl+点击链接、回滚、agent 桥接
 │       │   ├── FilesPanel.tsx       # 文件资源管理器树：虚拟文件 + 后端 FsEntry、创建/重命名/删除
-│       │   ├── BrowserView.tsx      # 嵌入式浏览器：iframe 代理、getIndexedDom/clickElement/typeIntoElement agent API、DOM 索引辅助函数
+│       │   ├── BrowserView.tsx      # 嵌入式浏览器：iframe 代理、基于坐标的 agent API（像素截图 + 按 x,y 点击/输入）、无 DOM 索引
 │       │   ├── MenuBar.tsx          # 下拉菜单：文件、编辑、视图、运行、帮助，带键盘快捷键
 │       │   ├── StatusBar.tsx        # 状态栏：光标位置、编码、缩进、语言、LSP 错误、记忆数量
 │       │   ├── ScmPanel.tsx         # 源码控制：git 状态、提交日志、fetch/pull/push、diff

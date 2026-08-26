@@ -910,22 +910,21 @@ Agent calls run_in_terminal
 | `browser_navigate` | Sub-agent only | Navigate to a URL (http/https only). Creates a new browser tab if none exists, or navigates the active tab. Waits for the browser view to mount before returning (up to 2s). |
 | `browser_info` | Sub-agent only | Get current browser tab state: URL, page title, load status, and open tab count. |
 | **Observation** (read-only) |||
-| `browser_screenshot` | Sub-agent only | Get a visual snapshot of the current page. The primary payload is the actual page screenshot (base64 image); the positional text grid (`V:WxH`, `XX\|N` section headers, `NN\|tag#id[type] "label" FLAGS x,y:WxH ^ctx` per line, capped at 500 elements / 80K chars, with horizontal bands on dense pages) is used ONLY as a fallback when no image can be captured or the vision API fails. The browser sub-agent runs on `deepseek-v4-flash-vision-exp` automatically (no user setup), so it sees the image natively. For other sub-agent types that lack vision (e.g. `frontend-specialist`), the flash vision model describes the screenshot and the text description is returned. |
-| `browser_get_dom` | Sub-agent only | Get the full indexed DOM in a standardized position-stable grid. Same rigid field format as `browser_screenshot`. Capped at 3,000 elements, 120K chars. On dense pages, auto-splits into horizontal bands (2 at >400, 3 at >800, 4 at >1,200) with global indices across bands so click/type references remain correct. Indices sorted top-to-bottom, left-to-right (pure geometry). Flags: `A`=clickable, `A+`=interactive, `disabled`, `checked`, `readonly`, `required`. Collapsed/hidden/occluded elements are filtered out. |
+| `browser_screenshot` | Sub-agent only | Get a visual snapshot of the current page. The result is the actual page image (base64 PNG, capped at 1280×1024) plus a short header — URL, title, and a `Screenshot: WxH` line that defines the coordinate space. The browser sub-agent runs on `deepseek-v4-flash-vision-exp` automatically (no user setup), so it sees the image natively and interacts by pointing at coordinates in the image. For other sub-agent types that lack vision (e.g. `frontend-specialist`), the flash vision model describes the screenshot and the text description is returned. There is no text grid — the image is the only output. |
 | `browser_console` | Sub-agent only | Get the last 50 console entries (log, warn, error, dialogs) to check for JS errors |
 | `browser_request_errors` | Sub-agent only | Get failed network requests (4xx/5xx/CORS) to verify API calls and resource loads |
 | **Interaction** (sub-agent only) |||
-| `browser_click` | **Sub-agent only** | Click by DOM index or pixel coordinates. Dispatches full pointer/mouse event sequence. |
-| `browser_type` | **Sub-agent only** | Type text into an input by DOM index — clicks first, clears, then types with realistic keyboard events |
-| `browser_clear` | **Sub-agent only** | Clear the value of an input element by DOM index |
-| `browser_select` | **Sub-agent only** | Select an option from a `<select>` dropdown by value or label |
+| `browser_click` | **Sub-agent only** | Click at screenshot-image x,y coordinates (the header's `Screenshot: WxH` fixes the pixel space; the renderer scales to viewport coords). Dispatches full pointer/mouse event sequence. |
+| `browser_type` | **Sub-agent only** | Click the input/textarea at screenshot-image x,y and type text into it — clicks first, clears, then types with realistic keyboard events |
+| `browser_clear` | **Sub-agent only** | Clear the value of the input/textarea at screenshot-image x,y |
+| `browser_select` | **Sub-agent only** | Select an option from the native `<select>` at screenshot-image x,y by value or label |
 | `browser_scroll` | **Sub-agent only** | Scroll the page by pixels or to top/bottom |
 | `browser_press_key` | **Sub-agent only** | Press a keyboard key (Enter, Escape, Tab, Arrows, etc.) on the active element |
 | `browser_wait` | **Sub-agent only** | Wait for an element matching a CSS selector to appear (polls every 200ms, default 5s timeout) |
 | **Mouse / file upload** |||
-| `browser_move_mouse` | **Sub-agent only** | Move the cursor to x,y — triggers hover effects without clicking |
-| `browser_right_click` | **Sub-agent only** | Right-click at x,y — dispatches contextmenu event |
-| `browser_upload_file` | **Sub-agent only** | Set files on a file input by absolute paths |
+| `browser_move_mouse` | **Sub-agent only** | Move the cursor to screenshot-image x,y — triggers hover effects without clicking |
+| `browser_right_click` | **Sub-agent only** | Right-click at screenshot-image x,y — dispatches contextmenu event |
+| `browser_upload_file` | **Sub-agent only** | Set files on a file input by absolute paths — pass the file input's x,y in the screenshot, or omit to use the page's first file input |
 | **Dialogs** |||
 | `browser_get_dialog` | Sub-agent only | Check if the page is blocked on a JavaScript dialog (alert/confirm/prompt). Returns the pending dialog's id, type, and message. |
 | `browser_respond_dialog` | Sub-agent only | Answer a pending dialog so the blocked page continues: `accept=true/false` for confirm, `value` for prompt text. The page auto-dismisses as Cancel after 2 minutes if unanswered. |
@@ -1066,12 +1065,12 @@ Parent resumes ← result pushed to parent's state.messages
 
 | Profile | Tools | Iterations | Description |
 |---------|-------|-----------|-------------|
-| `browser` | `browser_navigate`, `browser_info`, `browser_screenshot`, `browser_get_dom`, `browser_click`, `browser_type`, `browser_clear`, `browser_select`, `browser_press_key`, `browser_console`, `browser_request_errors`, `browser_scroll`, `browser_wait`, `browser_move_mouse`, `browser_right_click`, `browser_upload_file`, `browser_get_dialog`, `browser_respond_dialog` | 100 | Full browser automation — unlimited turns for intensive testing. Navigates, clicks, types, scrolls, fills forms, inspects DOM/console/network, and answers blocked alert/confirm/prompt dialogs. |
+| `browser` | `browser_navigate`, `browser_info`, `browser_screenshot`, `browser_click`, `browser_type`, `browser_clear`, `browser_select`, `browser_press_key`, `browser_console`, `browser_request_errors`, `browser_scroll`, `browser_wait`, `browser_move_mouse`, `browser_right_click`, `browser_upload_file`, `browser_get_dialog`, `browser_respond_dialog` | 100 | Full browser automation — unlimited turns for intensive testing. Navigates, screenshots (pixel image), clicks/types by coordinate on the image, scrolls, fills forms, checks console/network, and answers blocked alert/confirm/prompt dialogs. |
 | `code-search` | `read_file`, `list_files`, `search_files`, `grep`, `read_graph` | 20 | Read-only code exploration. Finds files, reads code, reports findings. Never edits. |
 | `code-writer` | Full filesystem + `run_command`, `read_problems`, `read_graph` | 50 | Implements features or fixes bugs. Reads, edits, builds, and verifies. |
 | `researcher` | `read_file`, `list_files`, `search_files`, `grep`, `run_command`, `read_graph` | 25 | Explores codebase to answer questions. Reports with file paths and line numbers. |
 | `planner` | `read_file`, `list_files`, `search_files`, `grep`, `read_graph`, `write_todos` | 25 | Analyzes project and creates structured step-by-step plans. Outputs a todo list with ordered, actionable steps. |
-| `frontend-specialist` | Full filesystem + `run_command`, `read_problems`, `read_graph`, `browser_screenshot`, `browser_get_dom`, `browser_console`, `browser_request_errors` | 50 | Implements UI features and components. Visually verifies changes in the browser. |
+| `frontend-specialist` | Full filesystem + `run_command`, `read_problems`, `read_graph`, `browser_screenshot`, `browser_console`, `browser_request_errors` | 50 | Implements UI features and components. Visually verifies changes in the browser. |
 | `backend-specialist` | Full filesystem + `run_command`, `read_problems`, `read_graph` | 50 | Implements API routes, services, and database logic. Focuses on server-side patterns and data integrity. |
 | `security-auditor` | `read_file`, `list_files`, `search_files`, `grep`, `run_command`, `read_graph`, `read_problems` | 30 | Audits code for vulnerabilities. Runs security scans, reports findings with severity and remediation. Never edits. |
 | `architect-analyst` | `read_file`, `list_files`, `search_files`, `grep`, `read_graph` | 25 | Analyzes project architecture, dependency graphs, and module structure. Reports architectural concerns and recommendations. Never edits. |
@@ -1085,7 +1084,7 @@ Parent resumes ← result pushed to parent's state.messages
 | **Context isolation** | Each sub-agent has its own `AgentState` — messages do not pollute the parent's context |
 | **Tool allowlisting** | Sub-agents receive only the tools their profile specifies (e.g. code-search can never write files) |
 | **Headless execution** | All non-browser sub-agents run entirely server-side — no browser or terminal tools. Frontend-specialist has read-only browser tools for visual verification. |
-| **Browser delegation** | The parent agent has NO browser tools — not even read-only ones. ALL browser interaction (navigating, inspecting DOM, taking screenshots, checking console/network, clicking, typing, scrolling) goes through the browser sub-agent via `delegate_task agent_type: "browser"`. This keeps the main agent's context clean and forces structured delegation. |
+| **Browser delegation** | The parent agent has NO browser tools — not even read-only ones. ALL browser interaction (navigating, taking screenshots, checking console/network, clicking, typing, scrolling) goes through the browser sub-agent via `delegate_task agent_type: "browser"`. This keeps the main agent's context clean and forces structured delegation. |
 | **Live streaming** | Sub-agent tool calls stream live to the UI as colored tool cards in real-time. Parent appears paused during delegation. Sub-agent text events are filtered — only tool_start/tool_end cards are shown, preventing message pollution. |
 | **Result summarization** | Sub-agent results are compressed before returning to the parent, preserving context budget |
 | **Parallelism** | Not supported — sub-agents run sequentially. Each must complete before the next starts, managing RAM usage. The agent should call `delegate_task` multiple times for independent sub-tasks. |
@@ -1124,23 +1123,20 @@ Parent: delegate_task task="Go to http://localhost:3000/login,
 
 → [Browser Agent] browser_navigate http://localhost:3000/login
   → Renderer executes → page loads
-→ [Browser Agent] browser_get_dom
-  → Renderer returns indexed elements in standardized
-    position-stable grid (V:WxH, XX|N sections, A/A+ flags)
-    On dense pages, splits into bands like "Band 1/2 y:0-450"
-    so the agent reads one region at a time.
-→ [Browser Agent] browser_click index=12  (email input with A+ flag)
-  → Renderer clicks → input focused
-→ [Browser Agent] browser_type index=12 text="admin"
-  → Renderer types → "admin" entered
-→ [Browser Agent] browser_click index=15  (password input)
-→ [Browser Agent] browser_type index=15 text="pass123"
-→ [Browser Agent] browser_click index=18  (Sign In button with A+ flag)
 → [Browser Agent] browser_screenshot
-  → Renderer returns URL, title, banded grid
-    (auto-splits into regions if viewport is dense),
-    and filtered error text
-  → Sees "Welcome, admin!" in Band 2, Middle-Center section
+  → Renderer returns the page image + header
+    (URL, title, "Screenshot: WxH" image size)
+  → Agent sees the login form in the image
+→ [Browser Agent] browser_click x=320 y=180  (email field it sees)
+  → Renderer scales to viewport coords → input focused
+→ [Browser Agent] browser_type x=320 y=180 text="admin"
+  → Renderer types → "admin" entered
+→ [Browser Agent] browser_click x=320 y=240  (password field)
+→ [Browser Agent] browser_type x=320 y=240 text="pass123"
+→ [Browser Agent] browser_click x=280 y=300  (Sign In button)
+→ [Browser Agent] browser_screenshot
+  → Renderer returns the page image + header
+  → Sees "Welcome, admin!" rendered in the image
 
 → [Browser Agent] Completed in 10 turns.
   Login test: SUCCESS. Navigated to login page,
@@ -1514,7 +1510,7 @@ The agent knows how to diagnose and fix errors for each language stack. Below is
 | Syntax check (all files) | `run_command` | `python -m compileall .` |
 | Run tests | `run_command` | `python -m pytest` |
 | Install dependencies | `run_command` | `pip install -r requirements.txt` or `pip install <pkg>` |
-| Flask/Django runtime errors | `browser_screenshot` or `browser_get_dom` | Flask debug mode shows full tracebacks in the browser; the standardized grid with position buckets and `A`/`A+` flags helps distinguish nav chrome from the actual error pane |
+| Flask/Django runtime errors | `browser_screenshot` | Flask debug mode shows full tracebacks in the browser; the screenshot image lets the vision model read the traceback directly and distinguish nav chrome from the actual error pane |
 | HTTP errors from backend | `browser_request_errors` | Check for 500 errors and CORS issues |
 | Find where a function is defined | `grep` | `def <name>` or `class <Name>` |
 | Read stack traces | `read_file` | Open the failing file at the line from the traceback |
@@ -1582,7 +1578,7 @@ The agent knows how to diagnose and fix errors for each language stack. Below is
 
 1. **Start the server** (`run_in_terminal`) — user must Allow
 2. **Check for build errors** (`run_command`) — fixes go through `edit_file` / `write_file`
-3. **Verify the page loads** (`browser_info` → `browser_screenshot` / `browser_get_dom`, then use the standardized grid, position buckets, and `A`/`A+` flags to target the right element)
+3. **Verify the page loads** (`browser_info` → `browser_screenshot`, then use the screenshot image to locate elements and click/type by their coordinates)
 4. **Check browser runtime errors** (`browser_console`, `browser_request_errors`)
 5. **Read relevant source files** (`read_file`) before making fixes
 6. **Make targeted edits** (`edit_file` — just send the lines that change)
@@ -1813,7 +1809,7 @@ H/
 │       │   ├── AgentConsole.tsx     # Agent chat UI: streaming messages, diff previews, permission prompts, tool cards with agent color coding, markdown rendering
 │       │   ├── TerminalPane.tsx     # xterm.js terminal: WebSocket-backed PTY, Ctrl+click links, scrollback, agent bridge
 │       │   ├── FilesPanel.tsx       # File explorer tree: virtual files + backend FsEntry, create/rename/delete
-│       │   ├── BrowserView.tsx      # Embedded browser: iframe proxy, getIndexedDom/clickElement/typeIntoElement agent APIs, DOM indexing helpers
+│       │   ├── BrowserView.tsx      # Embedded browser: iframe proxy, coordinate-based agent APIs (pixel screenshot + click/type at x,y), no DOM indexing
 │       │   ├── MenuBar.tsx          # Dropdown menus: File, Edit, View, Run, Help with keyboard shortcuts
 │       │   ├── StatusBar.tsx        # Status bar: cursor position, encoding, indent, language, LSP errors, memory count
 │       │   ├── ScmPanel.tsx         # Source control: git status, commit log, fetch/pull/push, diff

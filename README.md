@@ -32,7 +32,7 @@ Copilot is a code **assistant** — autocomplete, chat, and inline suggestions. 
 | **Delegation** | `delegate_task` — spawns 11 specialized sub-agents (browser, code-writer, researcher, security-auditor, architect…) with isolated context windows | None — single chat thread |
 | **Live sub-agent UI** | Per-agent color-coded streaming, progress cards, nested todos | None |
 | **Persistent memory** | File-based cross-session memory (`remember` / `recall` / `forget`) | Per-session chat only |
-| **Browser automation** | Built-in Electron webview + 16 browser tools (click, type, upload, console, network, DOM) | None |
+| **Browser automation** | Built-in Electron webview + 15 browser tools (pixel screenshots, coordinate-based click/type, upload, console, network) | None |
 | **Terminal control** | `run_in_terminal` — real PTY with agent read/write/kill access | Integrated terminal, no agent access |
 | **Knowledge graph** | Auto-built codebase graph (.kg): symbol-level imports, stdlib/third-party classification, unused-import detection, `read_graph` tool (6 query types) | None |
 | **Multi-agent orchestration** | Parent → child agent handoff with streaming summaries | None |
@@ -61,7 +61,7 @@ Get a key at [platform.deepseek.com](https://platform.deepseek.com).
 |---|---|
 | **Filesystem** | `read_file`, `write_file`, `edit_file`, `list_files`, `search_files`, `grep`, `create_directory`, `rename_file`, `delete_file` |
 | **Terminal** | `run_command` (sandbox), `run_in_terminal` (real PTY), `kill_terminal`, `read_command_output` |
-| **Browser** | `browser_navigate`, `browser_info`, `browser_screenshot`, `browser_get_dom`, `browser_click`, `browser_type`, `browser_clear`, `browser_select`, `browser_scroll`, `browser_press_key`, `browser_wait`, `browser_move_mouse`, `browser_right_click`, `browser_upload_file`, `browser_console`, `browser_request_errors` |
+| **Browser** | `browser_navigate`, `browser_info`, `browser_screenshot`, `browser_click`, `browser_type`, `browser_clear`, `browser_select`, `browser_scroll`, `browser_press_key`, `browser_wait`, `browser_move_mouse`, `browser_right_click`, `browser_upload_file`, `browser_console`, `browser_request_errors` |
 | **Diagnostics** | `read_problems`, `read_graph` |
 | **Control** | `write_todos`, `write_summary`, `task_complete`, `delegate_task` |
 | **Memory** | `remember`, `recall`, `forget` |

@@ -120,7 +120,7 @@ export const SUB_AGENT_PROFILES: Record<string, SubAgentConfig> = {
   "browser": {
     name: "Browser Agent",
     tools: [
-      "browser_navigate", "browser_info", "browser_screenshot", "browser_get_dom",
+      "browser_navigate", "browser_info", "browser_screenshot",
       "browser_click", "browser_type", "browser_clear", "browser_select",
       "browser_console", "browser_request_errors", "browser_scroll", "browser_wait",
       "browser_press_key", "browser_move_mouse", "browser_right_click", "browser_upload_file",
@@ -133,26 +133,14 @@ export const SUB_AGENT_PROFILES: Record<string, SubAgentConfig> = {
 - BEFORE starting, call write_todos to break the task into steps: navigate, inspect, interact, verify.
 - Use browser_navigate to go to a URL (http/https only).
 - Use browser_info to check the current URL and page title.
-- Use browser_get_dom to inspect the page. It returns a positional grid, NOT raw HTML:
-  * First line "V:<width>x<height>" is the viewport size.
-  * Elements are grouped into 9 regions: TL/TC/TR (top), ML/MC/MR (middle), BL/BC/BR (bottom).
-  * Each element line is: INDEX|tag#id[type] "label" FLAGS x,y:WxH ^ancestor
-    - INDEX is the number you pass to browser_click / browser_type / browser_clear / browser_select.
-    - x,y is the element's top-left position in the viewport; WxH is its size. Use these to reason about layout and relative position.
-    - FLAGS: A/A+ means interactive, disabled/checked/readonly/required describe state.
-- Use browser_screenshot to get the same positional grid plus any visible error text. You run on a vision-capable model, so the result also includes the actual page image — use it to assess visual layout, styling, spacing, and on-screen UI state directly. If no image is present, use the grid and any error text.
-- Prefer browser_screenshot (with its image) over browser_get_dom for a quick visual overview; use browser_get_dom when you need exact indices to interact.
-- NEVER try view-source:, reading document.documentElement.outerHTML, or fetching raw HTML — there is no such tool and browser_get_dom already gives you everything you need to locate and act on elements.
-- Re-run browser_get_dom after any click/type/scroll/navigation, because indices can change.
-- Use browser_scroll to reveal content below the fold, then call browser_get_dom again.
+- Use browser_screenshot to SEE the page. You run on a vision-capable model, so the result is the actual page image plus a short header (URL, title, and 'Screenshot: WxH' image size). Use the image to assess visual layout, styling, spacing, and on-screen UI state. The header's 'Screenshot: WxH' line defines the coordinate space — all x,y you pass to interaction tools are in the screenshot image's pixel space.
+- Interact by pointing at what you see in the screenshot: browser_click x,y; browser_type x,y text; browser_clear x,y; browser_select x,y value/label; browser_right_click x,y; browser_move_mouse x,y for hover effects.
+- NEVER try view-source:, reading document.documentElement.outerHTML, or fetching raw HTML — there is no such tool; you interact through the pixel screenshot only.
+- Take a fresh browser_screenshot after any click/type/scroll/navigation before the next interaction — the page changed under you.
+- Use browser_scroll to reveal content below the fold, then screenshot again.
 - Use browser_wait to wait for a CSS selector to appear on dynamic pages.
-- Use browser_click to click an element by INDEX (preferred) or by x,y coordinates.
-- Use browser_type to type into an input by INDEX (it focuses the field automatically).
-- Use browser_clear to clear an input before typing a new value.
-- Use browser_select to choose an option in a native <select> by INDEX. For custom dropdowns, click the trigger, wait, then click the option.
 - Use browser_press_key to press keys (Enter, Escape, Tab, arrows).
-- Use browser_move_mouse to hover at x,y; use browser_right_click for context menus.
-- Use browser_upload_file to upload files to an <input type=file> by INDEX.
+- Use browser_upload_file to upload files: pass the x,y of the file input you see in the screenshot (or omit them to use the page's file input) plus the absolute file paths.
 - Use browser_console / browser_request_errors to check for errors.
 - If a page is blocked on an alert/confirm/prompt (browser_get_dialog returns a pending dialog, or browser_console shows [DIALOG] entries), answer it with browser_respond_dialog: accept=true for OK, accept=false for Cancel, value=<text> for prompt input. The page stays frozen until the dialog is answered, so answer it before trying to screenshot or click again.
 - Update write_todos as you complete each step.
@@ -231,7 +219,7 @@ Do NOT call task_complete or write_summary.`,
     tools: ["read_file", "write_file", "edit_file", "list_files", "search_files", "grep",
             "run_command", "read_problems", "read_command_output", "read_graph",
             "create_directory", "delete_file", "rename_file",
-            "browser_screenshot", "browser_get_dom", "browser_console", "browser_request_errors",
+            "browser_screenshot", "browser_console", "browser_request_errors",
             "write_todos"],
     headless: false,
     maxIterations: 50,
@@ -241,7 +229,7 @@ Do NOT call task_complete or write_summary.`,
 - Prefer edit_file for targeted changes; use write_file only for new files.
 - Follow the project's existing component patterns, styling approach (CSS modules, Tailwind, etc.), and state management conventions.
 - After making changes, run the build/lint with run_command to verify.
-- Use browser_screenshot and browser_get_dom to visually verify UI changes after starting the dev server.
+- Use browser_screenshot to visually verify UI changes after starting the dev server.
 - Use browser_console and browser_request_errors to check for JS errors and failed API calls.
 - Update write_todos as you complete each step.
 - When done, return a structured summary in plain text using this exact template:
@@ -650,18 +638,11 @@ export const TOOLS: ToolDef[] = [
   {
     name: "browser_screenshot",
     description:
-      "Get a visual snapshot of the current page: the actual page image (primary), plus URL and title. "
-      + "The positional text grid is used only as a fallback when the image cannot be captured or the "
-      + "vision API fails. For non-vision models, a text description of the screenshot is produced by "
-      + "the flash vision model instead. Use this for a quick overview; use browser_get_dom for the full indexed element list.",
-    parameters: { type: "object", properties: {}, required: [] },
-  },
-  {
-    name: "browser_get_dom",
-    description:
-      "Get the current page's interactive elements as a positional grid. Each line is "
-      + "INDEX|tag#id[type] \"label\" FLAGS x,y:WxH ^ancestor, grouped into 9 viewport regions (TL..BR). "
-      + "Use the INDEX with browser_click/browser_type/browser_select. Re-run after any page change.",
+      "Get a visual snapshot of the current page: the actual page image (primary) plus a short header "
+      + "(URL, title, image size). You see the image directly, so use it to assess visual layout, styling, "
+      + "spacing, and on-screen UI state. Coordinates for browser_click / browser_type / browser_select are "
+      + "given in the screenshot image's pixel space — read the 'Screenshot: WxH' line and point at the "
+      + "elements you see. Non-vision models receive a text description instead.",
     parameters: { type: "object", properties: {}, required: [] },
   },
   {
@@ -733,65 +714,67 @@ export const TOOLS: ToolDef[] = [
   {
     name: "browser_click",
     description:
-      "Click an interactive element by its DOM index (from browser_get_dom) or by viewport x,y coordinates. "
-      + "Prefer index. The index is the number at the start of each line in browser_get_dom. "
-      + "Re-run browser_get_dom first if the page changed since your last inspection.",
+      "Click at viewport x,y coordinates of an element you see in the page screenshot. "
+      + "Coordinates are in the pixel space of the last browser_screenshot image (see its 'Screenshot: WxH' line). "
+      + "Take a fresh browser_screenshot after any click/scroll/navigation before choosing new coordinates.",
     parameters: {
       type: "object",
       properties: {
-        index: { type: "integer", description: "Element index from browser_get_dom. Use this instead of x,y when possible." },
-        x: { type: "number", description: "Viewport x coordinate to click (only if index is not used)." },
-        y: { type: "number", description: "Viewport y coordinate to click (only if index is not used)." },
+        x: { type: "number", description: "X coordinate in the screenshot image (pixels)." },
+        y: { type: "number", description: "Y coordinate in the screenshot image (pixels)." },
       },
-      required: [],
+      required: ["x", "y"],
     },
   },
   {
     name: "browser_type",
     description:
-      "Type text into an input or textarea by its DOM index (from browser_get_dom). "
+      "Click into the input/textarea at screenshot-image x,y coordinates and type text into it. "
       + "The field is focused and clicked automatically. Use browser_clear first if you need to replace existing text.",
     parameters: {
       type: "object",
       properties: {
-        index: { type: "integer", description: "Element index of the input/textarea from browser_get_dom." },
+        x: { type: "number", description: "X coordinate of the input in the screenshot image (pixels)." },
+        y: { type: "number", description: "Y coordinate of the input in the screenshot image (pixels)." },
         text: { type: "string", description: "Text to type." },
       },
-      required: ["index", "text"],
+      required: ["x", "y", "text"],
     },
   },
   {
     name: "browser_clear",
     description:
-      "Clear the current value of an input or textarea by its DOM index (from browser_get_dom).",
+      "Clear the current value of the input/textarea at screenshot-image x,y coordinates.",
     parameters: {
       type: "object",
       properties: {
-        index: { type: "integer", description: "Element index of the input/textarea from browser_get_dom." },
+        x: { type: "number", description: "X coordinate of the input in the screenshot image (pixels)." },
+        y: { type: "number", description: "Y coordinate of the input in the screenshot image (pixels)." },
       },
-      required: ["index"],
+      required: ["x", "y"],
     },
   },
   {
     name: "browser_select",
     description:
-      "Select an option in a native <select> by its DOM index, matching by value or visible label. "
-      + "For custom dropdowns (not a native <select>), use browser_click on the trigger, then browser_get_dom to find the option, then browser_click on the option.",
+      "Select an option in the native <select> located at screenshot-image x,y coordinates, matching by value or visible label. "
+      + "For custom dropdowns (not a native <select>), use browser_click on the trigger, wait, screenshot, then browser_click the desired option.",
     parameters: {
       type: "object",
       properties: {
-        index: { type: "integer", description: "Element index of the <select> from browser_get_dom." },
+        x: { type: "number", description: "X coordinate of the <select> in the screenshot image (pixels)." },
+        y: { type: "number", description: "Y coordinate of the <select> in the screenshot image (pixels)." },
         value: { type: "string", description: "Option value to select." },
         label: { type: "string", description: "Visible option label to select (used when value is not provided)." },
       },
-      required: ["index"],
+      required: ["x", "y"],
     },
   },
   {
     name: "browser_scroll",
     description:
       "Scroll the page. Pass x,y pixel deltas to scroll by that amount, or to='top'/'bottom' to jump. "
-      + "Use this to reveal content below the fold, then call browser_get_dom again to get fresh indices.",
+      + "Use this to reveal content below the fold, then take a fresh browser_screenshot.",
     parameters: {
       type: "object",
       properties: {
@@ -844,28 +827,29 @@ export const TOOLS: ToolDef[] = [
   {
     name: "browser_right_click",
     description:
-      "Right-click an element by its DOM index (from browser_get_dom) or by viewport x,y coordinates, opening the context menu.",
+      "Right-click at screenshot-image x,y coordinates, opening the context menu.",
     parameters: {
       type: "object",
       properties: {
-        index: { type: "integer", description: "Element index from browser_get_dom." },
-        x: { type: "number", description: "Viewport x coordinate to right-click (only if index is not used)." },
-        y: { type: "number", description: "Viewport y coordinate to right-click (only if index is not used)." },
+        x: { type: "number", description: "X coordinate in the screenshot image (pixels)." },
+        y: { type: "number", description: "Y coordinate in the screenshot image (pixels)." },
       },
-      required: [],
+      required: ["x", "y"],
     },
   },
   {
     name: "browser_upload_file",
     description:
-      "Upload one or more files to an <input type=file> by its DOM index. paths is an array of absolute file paths.",
+      "Upload one or more files to a file input. Pass x,y (screenshot image pixels) of the file input if visible, "
+      + "or omit them to target the page's first file input. paths is an array of absolute file paths.",
     parameters: {
       type: "object",
       properties: {
-        index: { type: "integer", description: "Element index of the file input from browser_get_dom." },
+        x: { type: "number", description: "X coordinate of the file input in the screenshot image (pixels). Optional." },
+        y: { type: "number", description: "Y coordinate of the file input in the screenshot image (pixels). Optional." },
         paths: { type: "array", items: { type: "string" }, description: "Absolute file paths to upload." },
       },
-      required: ["index", "paths"],
+      required: ["paths"],
     },
   },
   {
@@ -2347,7 +2331,7 @@ Current time: ${new Date().toISOString()}`;
 const BROWSER_USAGE = `### Browser usage
 - You do NOT have browser tools. All browser interaction goes through the browser sub-agent.
 - Delegate browser tasks via \`delegate_task agent_type: "browser"\`. Describe what to navigate to, what to interact with, and what to verify.
-- The browser sub-agent can: navigate to URLs, take screenshots (text snapshots), inspect the DOM, check console/network errors, click, type, scroll, select, press keys, upload files, and wait for elements.
+- The browser sub-agent can: navigate to URLs, take pixel screenshots, click/type by coordinates on the screenshot, check console/network errors, scroll, press keys, upload files, and wait for elements.
 - The sub-agent returns a concise summary of what it found — URL, page title, key content, interaction results, and any errors.
 - Use \`frontend-specialist\` instead when you need to write UI code AND verify it visually — it has read-only browser tools for visual checks.`;
 
@@ -2395,7 +2379,7 @@ Error patterns — Python tracebacks are read BOTTOM-UP (last line is the actual
   - \`SyntaxError\` → usually shows exact line with a caret (^) pointing to the problem
   - \`ZeroDivisionError: division by zero\` → math error, check denominator
 Runtime debugging for web apps (Flask/Django/FastAPI):
-  - After \`run_in_terminal\`, delegate to the browser sub-agent to check for HTTP errors (browser_console, browser_request_errors) and page content (browser_screenshot, browser_get_dom)
+  - After \`run_in_terminal\`, delegate to the browser sub-agent to check for HTTP errors (browser_console, browser_request_errors) and page content (browser_screenshot)
   - Common pitfalls: missing template files, undefined Jinja2 variables, database connection failures, port already in use`;
 
 const LANG_GO = `### Go troubleshooting
@@ -2897,7 +2881,7 @@ function getPendingTodos(state: AgentState): { id: string; text: string; status:
 }
 
 const BROWSER_TOOLS = new Set([
-  "browser_info", "browser_screenshot", "browser_get_dom", "browser_console",
+  "browser_info", "browser_screenshot", "browser_console",
   "browser_request_errors", "browser_scroll", "browser_wait",
   "browser_click", "browser_type", "browser_navigate",
   "browser_move_mouse", "browser_right_click", "browser_press_key",
@@ -4062,12 +4046,12 @@ export async function agentLoop(
     }
 
     if (browserTool) {
-      // Push any remaining tool calls with "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_get_dom, browser_select, or any other browser_* tool) on your next turn to get the actual result." responses so they aren't lost.
+      // Push any remaining tool calls with "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_select, or any other browser_* tool) on your next turn to get the actual result." responses so they aren't lost.
       // The actual result for the browser tool will be pushed by /continue.
       for (let i = browserBreakIdx + 1; i < toolCalls.length; i++) {
         const tc = toolCalls[i];
         state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: tc.function.name, arguments: tc.function.arguments } }]), name: tc.function.name, ...rc2(reasoningContent) });
-        state.messages.push({ role: "tool", content: "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_get_dom, browser_select, or any other browser_* tool) on your next turn to get the actual result.", tool_call_id: tc.id });
+        state.messages.push({ role: "tool", content: "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_select, or any other browser_* tool) on your next turn to get the actual result.", tool_call_id: tc.id });
       }
       return { phase: "tool_needed", tool: browserTool, executedTools, messages: state.messages };
     }
@@ -4312,14 +4296,14 @@ export async function* agentLoopStream(
         // Update params so the client receives the sanitized command in tool_start
         (params as Record<string, unknown>).command = cmd;
         // Push individual assistant+tool messages for each tool call.
-        // run_in_terminal pauses for permission — push "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_get_dom, browser_select, or any other browser_* tool) on your next turn to get the actual result." for all
+        // run_in_terminal pauses for permission — push "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_select, or any other browser_* tool) on your next turn to get the actual result." for all
         // other tools so they don't block. The actual run_in_terminal result
         // will be pushed by /stream/continue.
         for (let i = 0; i < finalToolCalls.length; i++) {
           const t = finalToolCalls[i];
           state.messages.push({ role: "assistant", content: JSON.stringify([{ id: t.id, type: "function", function: { name: t.function.name, arguments: t.function.arguments } }]), name: t.function.name, ...rc(finalReasoning) });
           if (i > 0) {
-            state.messages.push({ role: "tool", content: "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_get_dom, browser_select, or any other browser_* tool) on your next turn to get the actual result.", tool_call_id: t.id });
+            state.messages.push({ role: "tool", content: "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_select, or any other browser_* tool) on your next turn to get the actual result.", tool_call_id: t.id });
           }
         }
         // Store the pending command so /continue can execute it after user approval
@@ -4606,12 +4590,12 @@ export async function* agentLoopStream(
     }
 
     if (browserTool) {
-      // Push any remaining tool calls with "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_get_dom, browser_select, or any other browser_* tool) on your next turn to get the actual result." responses so they aren't lost.
+      // Push any remaining tool calls with "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_select, or any other browser_* tool) on your next turn to get the actual result." responses so they aren't lost.
       // The actual result for the browser tool will be pushed by /stream/continue.
       for (let i = browserBreakIdx + 1; i < finalToolCalls.length; i++) {
         const tc = finalToolCalls[i];
         state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: tc.function.name, arguments: tc.function.arguments } }]), name: tc.function.name, ...rc(finalReasoning) });
-        state.messages.push({ role: "tool", content: "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_get_dom, browser_select, or any other browser_* tool) on your next turn to get the actual result.", tool_call_id: tc.id });
+        state.messages.push({ role: "tool", content: "NOT_EXECUTED: This tool was not run because it was batched with other browser tools. Do NOT interpret this as a real result. Call this tool BY ITSELF (not batched with browser_click, browser_type, browser_navigate, browser_screenshot, browser_select, or any other browser_* tool) on your next turn to get the actual result.", tool_call_id: tc.id });
       }
       // Yield browser_tool and stop — caller resumes via /continue/stream
       yield {

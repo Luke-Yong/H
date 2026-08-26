@@ -10,16 +10,12 @@ interface BrowserTab {
 export interface BrowserViewHandle {
   /** Run JS in the browser page and return the result (serialized). */
   evalInPage: (code: string) => Promise<string>;
-  /** Get the DOM as indexed clickable elements. */
-  getIndexedDom: () => Promise<string>;
-  /** Click element at index (from getIndexedDom). */
-  clickElement: (index: number) => Promise<string>;
-  /** Type text into element at index using realistic keyboard events. */
-  typeIntoElement: (index: number, text: string) => Promise<string>;
-  /** Get a text snapshot of the page: URL, title, visible text, form elements, buttons. */
-  getPageSnapshot: () => Promise<string>;
-  /** Capture the visible page as a base64 PNG data URL (for vision-capable models). */
-  captureScreenshotImage: () => Promise<string>;
+  /** Type text into the input/textarea at screenshot-image coordinates x,y using realistic keyboard events. */
+  typeIntoElement: (x: number, y: number, text: string) => Promise<string>;
+  /** Get a short header for the current page: URL and title. */
+  getScreenshotHeader: () => Promise<string>;
+  /** Capture the visible page as a base64 PNG data URL (for vision-capable models) plus its pixel size. */
+  captureScreenshotImage: () => Promise<{ url: string; imageW: number; imageH: number }>;
   /** Navigate to a URL in the current tab. */
   navigateTo: (url: string) => Promise<void>;
   /** Wait for an element matching a CSS selector to appear. Returns first match or empty. */
@@ -30,24 +26,22 @@ export interface BrowserViewHandle {
   getRequestErrors: () => Promise<string>;
   /** Get current browser tab URL and page load status. */
   getInfo: () => string;
-  /** Select an option in a <select> element by value or label. */
-  selectOption: (index: number, value?: string, label?: string) => Promise<string>;
-  /** Clear an input element at the given DOM index. */
-  clearElement: (index: number) => Promise<string>;
-  /** Left-click at viewport coordinates. */
+  /** Select an option in the native <select> at screenshot-image coordinates x,y by value or label. */
+  selectOption: (x: number, y: number, value?: string, label?: string) => Promise<string>;
+  /** Clear the input/textarea at screenshot-image coordinates x,y. */
+  clearElement: (x: number, y: number) => Promise<string>;
+  /** Left-click at screenshot-image coordinates (scaled to the viewport). */
   clickCoords: (x: number, y: number) => Promise<string>;
-  /** Move mouse to viewport coordinates (triggers hover effects). */
+  /** Move mouse to screenshot-image coordinates (triggers hover effects). */
   moveMouse: (x: number, y: number) => Promise<string>;
-  /** Right-click at viewport coordinates (opens context menu). */
+  /** Right-click at screenshot-image coordinates (opens context menu). */
   rightClick: (x: number, y: number) => Promise<string>;
-  /** Right-click element at DOM index. */
-  rightClickElement: (index: number) => Promise<string>;
   /** Scroll the page. */
   scrollPage: (x: number, y: number, to?: string) => Promise<string>;
   /** Press a keyboard key. */
   pressKey: (key: string) => Promise<string>;
-  /** Upload files to a file input. */
-  uploadFile: (index: number, paths: string[]) => Promise<string>;
+  /** Upload files to a file input at screenshot-image coordinates x,y (or the page's first file input when x,y are null). */
+  uploadFile: (x: number | null, y: number | null, paths: string[]) => Promise<string>;
 }
 
 interface Props {
@@ -98,355 +92,6 @@ const VIEWPORT_PRESETS: ViewportPreset[] = [
   { id: "fold-matex6-cover", label: "Mate X6 Cover 412 x 915", width: 412, height: 915 },
   { id: "fold-matex6-main", label: "Mate X6 Unfolded 747 x 813", width: 747, height: 813 },
 ];
-
-const DOM_INDEXING_HELPERS = String.raw`
-const H_BUCKET_ORDER = ['TL', 'TC', 'TR', 'ML', 'MC', 'MR', 'BL', 'BC', 'BR'];
-const hNormalizeText = (value, maxLen) => {
-  const text = String(value || '').replace(/\s+/g, ' ').trim();
-  if (!text) return '';
-  return typeof maxLen === 'number' && maxLen > 0 && text.length > maxLen ? text.slice(0, maxLen) : text;
-};
-const hQuoteText = (value, maxLen) => '"' + hNormalizeText(value, maxLen).replace(/"/g, "'") + '"';
-const hInViewport = (r, vw, vh) => !(r.width <= 0 || r.height <= 0 || r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw);
-const hIsCollapsed = (el) => {
-  if (!el || el.nodeType !== 1) return true;
-  if (el.hasAttribute('hidden') || el.getAttribute('aria-hidden') === 'true' || el.hasAttribute('inert')) return true;
-  if (el.getAttribute('aria-expanded') === 'false' && !hPrimaryLabel(el)) return true;
-  let cur = el;
-  while (cur && cur !== document.body && cur !== document.documentElement) {
-    if (cur.hasAttribute && (cur.hasAttribute('hidden') || cur.getAttribute('aria-hidden') === 'true' || cur.hasAttribute('inert'))) return true;
-    if (cur.tagName && cur.tagName.toLowerCase() === 'details' && !cur.open) {
-      let summary = null;
-      try { summary = cur.querySelector(':scope > summary'); } catch (_) { summary = cur.querySelector('summary'); }
-      if (!summary || (el !== summary && !summary.contains(el))) return true;
-    }
-    try {
-      const cs = window.getComputedStyle(cur);
-      if (
-        cs.display === 'none'
-        || cs.visibility === 'hidden'
-        || cs.contentVisibility === 'hidden'
-        || Number(cs.opacity || '1') < 0.05
-        || cs.maxHeight === '0px'
-      ) return true;
-      if ((cs.overflow === 'hidden' || cs.overflowY === 'hidden') && Number.parseFloat(cs.maxHeight || '0') === 0) return true;
-    } catch (_) {}
-    cur = cur.parentElement;
-  }
-  return false;
-};
-const hSamplePoints = (r, vw, vh) => {
-  const padX = Math.max(1, Math.min(6, r.width / 4));
-  const padY = Math.max(1, Math.min(6, r.height / 4));
-  const clampX = (v) => Math.max(0, Math.min(v, Math.max(0, vw - 1)));
-  const clampY = (v) => Math.max(0, Math.min(v, Math.max(0, vh - 1)));
-  return [
-    [clampX(r.left + r.width / 2), clampY(r.top + r.height / 2)],
-    [clampX(r.left + padX), clampY(r.top + padY)],
-    [clampX(r.right - padX), clampY(r.top + padY)],
-    [clampX(r.left + padX), clampY(r.bottom - padY)],
-    [clampX(r.right - padX), clampY(r.bottom - padY)],
-  ];
-};
-const hIsOccluded = (el, r, vw, vh) => {
-  if (r.width < 2 || r.height < 2) return true;
-  const samples = hSamplePoints(r, vw, vh);
-  let visibleHits = 0;
-  for (let i = 0; i < samples.length; i++) {
-    const pt = samples[i];
-    const topEl = document.elementFromPoint(pt[0], pt[1]);
-    if (!topEl) continue;
-    if (topEl === el || el.contains(topEl) || topEl.contains(el)) {
-      visibleHits++;
-      if (visibleHits > 0) return false;
-    }
-  }
-  return true;
-};
-const hPosKey = (r, vw, vh) => {
-  const cx = r.left + r.width / 2;
-  const cy = r.top + r.height / 2;
-  const ry = cy / Math.max(vh, 1);
-  const rx = cx / Math.max(vw, 1);
-  const row = ry < 0.33 ? 'T' : (ry < 0.66 ? 'M' : 'B');
-  const col = rx < 0.33 ? 'L' : (rx < 0.66 ? 'C' : 'R');
-  return row + col;
-};
-const hPrimaryLabel = (el) => {
-  const tag = el.tagName.toLowerCase();
-  const candidates = [];
-  const push = (value) => {
-    const text = hNormalizeText(value, 80);
-    if (text) candidates.push(text);
-  };
-  push(el.getAttribute('aria-label'));
-  push(el.getAttribute('title'));
-  if (typeof el.labels !== 'undefined' && el.labels) {
-    for (let i = 0; i < el.labels.length; i++) push(el.labels[i].textContent);
-  }
-  if (el.id) {
-    try {
-      const escaped = window.CSS && typeof window.CSS.escape === 'function' ? window.CSS.escape(el.id) : el.id;
-      const label = document.querySelector('label[for="' + escaped + '"]');
-      if (label) push(label.textContent);
-    } catch (_) {}
-  }
-  if (tag === 'input') {
-    push(el.placeholder);
-    push(el.name);
-    push(el.value);
-  } else if (tag === 'textarea') {
-    push(el.placeholder);
-    push(el.name);
-    push(el.value);
-  } else if (tag === 'select') {
-    const selIdx = typeof el.selectedIndex === 'number' && el.selectedIndex >= 0 ? el.selectedIndex : 0;
-    push(el.options && el.options[selIdx] ? el.options[selIdx].text : '');
-    push(el.value);
-  } else if (tag === 'img') {
-    push(el.alt);
-  } else if (tag === 'a' && el.href) {
-    push(el.textContent);
-    push(el.href);
-  } else {
-    push(el.textContent);
-  }
-  return candidates[0] || '';
-};
-const hAncestorContext = (el) => {
-  const parts = [];
-  let cur = el.parentElement;
-  let depth = 0;
-  while (cur && cur !== document.body && cur !== document.documentElement && depth < 6 && parts.length < 2) {
-    const tag = cur.tagName.toLowerCase();
-    const role = (cur.getAttribute('role') || '').toLowerCase();
-    const id = cur.id ? '#' + cur.id : '';
-    const cls = cur.className && typeof cur.className === 'string'
-      ? cur.className.trim().split(/\s+/).filter(Boolean).slice(0, 2).join('.')
-      : '';
-    const classPart = cls ? '.' + cls : '';
-    const marker = [tag, role, id, cls].join(' ');
-    const interestingTag = /^(form|dialog|section|article|aside|nav|main|header|footer|table|tr|li|ul|ol|fieldset)$/i.test(tag);
-    const interestingRole = /^(dialog|form|navigation|main|region|complementary|banner|tabpanel|tablist|listbox|menu|grid|row|toolbar|list|listitem)$/i.test(role);
-    const interestingClass = /(modal|dialog|drawer|panel|card|form|menu|nav|toolbar|sidebar|content|table|row|list|grid|section)/i.test(marker);
-    if (interestingTag || interestingRole || interestingClass || cur.getAttribute('aria-label')) {
-      const label = hPrimaryLabel(cur);
-      parts.push((tag + id + classPart) + (label ? ' ' + hQuoteText(label, 50) : ''));
-    }
-    cur = cur.parentElement;
-    depth++;
-  }
-  return parts.join(' <= ');
-};
-const hActionableRank = (el) => {
-  const tag = el.tagName.toLowerCase();
-  const role = (el.getAttribute('role') || '').toLowerCase();
-  if (el.disabled || el.getAttribute('aria-disabled') === 'true') return -1;
-  if (tag === 'input' && String(el.type || '').toLowerCase() === 'hidden') return -1;
-  if (hIsCollapsed(el)) return -1;
-  try {
-    const cs = window.getComputedStyle(el);
-    if (cs.display === 'none' || cs.visibility === 'hidden' || cs.pointerEvents === 'none') return -1;
-  } catch (_) {}
-  let rank = 0;
-  if (tag === 'button' || tag === 'select' || tag === 'textarea' || tag === 'summary') rank = 6;
-  else if (tag === 'input') rank = 6;
-  else if (tag === 'a' && (el.href || hPrimaryLabel(el))) rank = 5;
-  else if (tag === 'label' && (el.getAttribute('for') || el.control)) rank = 5;
-  else if (/^(button|link|tab|menuitem|option|checkbox|radio|switch|textbox|combobox|listbox|slider|spinbutton)$/.test(role)) rank = 5;
-  else if (el.getAttribute('contenteditable') === '' || el.getAttribute('contenteditable') === 'true') rank = 5;
-  if (el.onclick || el.getAttribute('onclick')) rank = Math.max(rank, 4);
-  const tabIdx = el.getAttribute('tabindex');
-  if (tabIdx !== null && Number(tabIdx) >= 0) rank = Math.max(rank, 3);
-  try {
-    const cs = window.getComputedStyle(el);
-    if (cs.cursor === 'pointer') rank = Math.max(rank, 3);
-  } catch (_) {}
-  return rank;
-};
-const hShouldInclude = (el, actionable, label) => {
-  if (actionable) return true;
-  const tag = el.tagName.toLowerCase();
-  const role = el.getAttribute('role');
-  if (role) return true;
-  if (tag === 'img' || tag === 'label' || /^h[1-6]$/.test(tag)) return true;
-  if (tag === 'input' || tag === 'select' || tag === 'textarea' || tag === 'button' || tag === 'a') return true;
-  if (label) return true;
-  if (el.id) return true;
-  return false;
-};
-// ── Standardized grid formatter ──
-// Produces position-stable indexed output with rigid field order:
-//   NN|tag#id[type] "label" FLAGS x,y:WxH ^ctx
-// FLAGS (space-separated, alphabetically ordered):
-//   A=clickable A+=interactive checked disabled readonly required
-const hBuildFlags = (el, actionableRank) => {
-  const flags = [];
-  if (actionableRank >= 6) flags.push('A+');
-  else if (actionableRank > 0) flags.push('A');
-  if (el.disabled) flags.push('disabled');
-  const tag = el.tagName.toLowerCase();
-  if (tag === 'input') {
-    const itype = (el.type || 'text').toLowerCase();
-    if (itype === 'checkbox' || itype === 'radio') {
-      if (el.checked) flags.push('checked');
-    }
-    if (el.readOnly) flags.push('readonly');
-    if (el.required) flags.push('required');
-  }
-  return flags.join(' ');
-};
-const hBuildGridLine = (item, index) => {
-  const el = item.el;
-  const r = item.r;
-  const tag = el.tagName.toLowerCase();
-  const idPart = el.id ? '#' + el.id : '';
-  let tagPart = tag + idPart;
-  if (tag === 'input') {
-    const itype = (el.type || 'text').toLowerCase();
-    tagPart = tag + idPart + '[' + itype + ']';
-  }
-  const labelPart = hQuoteText(item.label || '', 72);
-  const flagsPart = hBuildFlags(el, item.actionableRank);
-  const x = Math.round(r.left);
-  const y = Math.round(r.top);
-  const w = Math.round(r.width);
-  const h = Math.round(r.height);
-  const posPart = x + ',' + y + ':' + w + 'x' + h;
-  const ctxPart = item.ancestor ? ' ^' + item.ancestor : '';
-  // Pad index to 3 chars for alignment
-  const idxStr = String(index);
-  const pad = idxStr.length < 3 ? ' '.repeat(3 - idxStr.length) : '';
-  return pad + idxStr + '|' + tagPart + ' ' + labelPart + (flagsPart ? ' ' + flagsPart : '') + ' ' + posPart + ctxPart;
-};
-const hBuildGrid = (items, vw, vh) => {
-  const buckets = Object.create(null);
-  for (let i = 0; i < H_BUCKET_ORDER.length; i++) buckets[H_BUCKET_ORDER[i]] = [];
-  for (let i = 0; i < items.length; i++) {
-    const it = items[i];
-    buckets[it.pk].push(hBuildGridLine(it, i));
-  }
-  const lines = [];
-  lines.push('V:' + vw + 'x' + vh);
-  lines.push('---');
-  for (let i = 0; i < H_BUCKET_ORDER.length; i++) {
-    const k = H_BUCKET_ORDER[i];
-    const arr = buckets[k];
-    if (!arr || arr.length === 0) continue;
-    lines.push(k + '|' + arr.length);
-    for (let j = 0; j < arr.length; j++) lines.push(arr[j]);
-  }
-  return lines.join('\\n');
-};
-// When the viewport is dense, split into horizontal bands so the agent
-// works one region at a time instead of drowning in a flat list.
-// Each band is a self-contained position-grid with its own bucket headers.
-const hBuildRegionalGrid = (items, vw, vh) => {
-  // Split into 2 bands if >400 elements, 3 bands if >800, 4 if >1200
-  let numBands = 1;
-  if (items.length > 1200) numBands = 4;
-  else if (items.length > 800) numBands = 3;
-  else if (items.length > 400) numBands = 2;
-
-  if (numBands === 1) return hBuildGrid(items, vw, vh);
-
-  const bandH = vh / numBands;
-  const bands = [];
-  for (let b = 0; b < numBands; b++) {
-    const y0 = Math.round(b * bandH);
-    const y1 = Math.round((b + 1) * bandH);
-    bands.push({ y0, y1, items: [] });
-  }
-
-  for (let i = 0; i < items.length; i++) {
-    const it = items[i];
-    const cy = it.r.top + it.r.height / 2;
-    const bandIdx = Math.min(Math.floor(cy / bandH), numBands - 1);
-    bands[bandIdx].items.push(it);
-  }
-
-  const lines = [];
-  lines.push('V:' + vw + 'x' + vh + ' split ' + numBands + ' bands (' + items.length + ' elements)');
-  lines.push('---');
-  for (let b = 0; b < numBands; b++) {
-    const band = bands[b];
-    if (band.items.length === 0) continue;
-    lines.push('--- Band ' + (b + 1) + '/' + numBands + ' (y:' + band.y0 + '-' + band.y1 + ', ' + band.items.length + ' elems) ---');
-    const buckets = Object.create(null);
-    for (let i = 0; i < H_BUCKET_ORDER.length; i++) buckets[H_BUCKET_ORDER[i]] = [];
-    for (let j = 0; j < band.items.length; j++) {
-      const it = band.items[j];
-      buckets[it.pk].push(hBuildGridLine(it, it.idx));
-    }
-    for (let i = 0; i < H_BUCKET_ORDER.length; i++) {
-      const k = H_BUCKET_ORDER[i];
-      const arr = buckets[k];
-      if (!arr || arr.length === 0) continue;
-      lines.push(k + '|' + arr.length);
-      for (let jj = 0; jj < arr.length; jj++) lines.push(arr[jj]);
-    }
-  }
-  return lines.join('\\n');
-};
-const hCollectItems = (options) => {
-  const opts = options || {};
-  const vw = window.innerWidth;
-  const vh = window.innerHeight;
-  const actionableOnly = !!opts.actionableOnly;
-  const maxItems = typeof opts.maxItems === 'number' && opts.maxItems > 0 ? opts.maxItems : 0;
-  const w = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
-  const items = [];
-  let domIdx = 0;
-  let el;
-  while ((el = w.nextNode())) {
-    if (maxItems > 0 && items.length >= maxItems) break;
-    const r = el.getBoundingClientRect();
-    if (!hInViewport(r, vw, vh)) {
-      domIdx++;
-      continue;
-    }
-    if (hIsCollapsed(el) || hIsOccluded(el, r, vw, vh)) {
-      domIdx++;
-      continue;
-    }
-    const actionableRank = hActionableRank(el);
-    const actionable = actionableRank > 0;
-    const label = hPrimaryLabel(el);
-    if (actionableOnly && !actionable) {
-      domIdx++;
-      continue;
-    }
-    if (!hShouldInclude(el, actionable, label)) {
-      domIdx++;
-      continue;
-    }
-    items.push({
-      el,
-      r,
-      domIdx,
-      actionable,
-      actionableRank,
-      pk: hPosKey(r, vw, vh),
-      label,
-      ancestor: hAncestorContext(el),
-    });
-    domIdx++;
-  }
-  // Pure position-stable sort: top-to-bottom, then left-to-right, then DOM order.
-  // No actionability priority — indices are predictable from geometry alone.
-  // The agent uses A/A+ flags to find interactive elements.
-  items.sort((a, b) => {
-    const dy = a.r.top - b.r.top;
-    if (Math.abs(dy) > 0.5) return dy;
-    const dx = a.r.left - b.r.left;
-    if (Math.abs(dx) > 0.5) return dx;
-    return a.domIdx - b.domIdx;
-  });
-  // Stamp each item with its global index so banded grids use stable, clickable indices
-  for (let i = 0; i < items.length; i++) items[i].idx = i;
-  return { vw, vh, bucketOrder: H_BUCKET_ORDER, items };
-};
-`;
 
 type BrowserGuest = HTMLElement & {
   src?: string;
@@ -519,6 +164,9 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   const webviewRef = useRef<BrowserGuest | null>(null);
   const webviewReadyRef = useRef(false);
   const stageRef = useRef<HTMLDivElement>(null);
+  // Size of the last captured screenshot image plus the guest viewport size at
+  // capture time — used to map screenshot-image coordinates to viewport coords.
+  const lastCaptureRef = useRef<{ imageW: number; imageH: number; viewportW: number; viewportH: number } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const inputFocusedRef = useRef(false);
   const activeTab = tabs.find((tab) => tab.id === activeTabId) || tabs[0] || null;
@@ -1955,189 +1603,130 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     return result;
   }, [getWebview]);
 
-  const getIndexedDom = useCallback(async (): Promise<string> => {
-    return evalInPage(`
-      (() => {
-        ${DOM_INDEXING_HELPERS}
-        const collected = hCollectItems({ maxItems: 3000 });
-        let grid = hBuildRegionalGrid(collected.items, collected.vw, collected.vh);
-        // Character cap: if output exceeds 120K chars, truncate with note
-        const MAX_CHARS = 120000;
-        if (grid.length > MAX_CHARS) {
-          const at = grid.lastIndexOf('\\n', MAX_CHARS);
-          grid = grid.slice(0, at > 0 ? at : MAX_CHARS);
-          grid += '\\n... truncated (' + Math.round(grid.length / 1024) + 'K chars)';
-        }
-        if (collected.items.length >= 3000) {
-          grid += '\\nNOTE: capped at 3000 elements. Page may have more.';
-        }
-        return grid;
-      })()
-    `);
-  }, [evalInPage]);
+  // ── Coordinate-based interaction ──
+  // All x,y arguments are in the pixel space of the last browser_screenshot
+  // image. They are scaled to the guest page's viewport coordinates before any
+  // event is dispatched, so the agent can simply point at what it sees in the
+  // screenshot image.
+  const scaleToViewport = useCallback((x: number, y: number): { x: number; y: number } => {
+    const c = lastCaptureRef.current;
+    if (!c || c.imageW <= 0 || c.imageH <= 0 || c.viewportW <= 0 || c.viewportH <= 0) return { x, y };
+    return {
+      x: Math.round((x * c.viewportW) / c.imageW),
+      y: Math.round((y * c.viewportH) / c.imageH),
+    };
+  }, []);
 
-  const clickElement = useCallback(async (index: number): Promise<string> => {
+  const typeIntoElement = useCallback(async (x: number, y: number, text: string) => {
+    const { x: vx, y: vy } = scaleToViewport(x, y);
     const result = await evalInPage(`
       (() => {
-        ${DOM_INDEXING_HELPERS}
-        const items = hCollectItems({}).items;
-        const target = items[${index}];
-        if (!target || !target.el) return 'element not found at index ${index}';
-        const rect = target.el.getBoundingClientRect();
-          const cx = rect.left + rect.width / 2;
-          const cy = rect.top + rect.height / 2;
-          // Constrain coords to viewport (avoid dispatching outside visible area)
-          const vx = Math.max(0, Math.min(cx, window.innerWidth - 1));
-          const vy = Math.max(0, Math.min(cy, window.innerHeight - 1));
-          const mouseOpts = { clientX: vx, clientY: vy, screenX: vx, screenY: vy, bubbles: true, cancelable: true, button: 0, buttons: 1, view: window };
-          const ptrOpts = { clientX: vx, clientY: vy, screenX: vx, screenY: vy, bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', button: 0, buttons: 1, view: window };
-          // Try focusing — works for native focusable elements
-          try { if (typeof target.el.focus === 'function') target.el.focus(); } catch(_) {}
-          // Dispatch full mouse event sequence with enhanced properties
-          target.el.dispatchEvent(new PointerEvent('pointerdown', ptrOpts));
-          target.el.dispatchEvent(new MouseEvent('mousedown', mouseOpts));
-          target.el.dispatchEvent(new PointerEvent('pointerup', ptrOpts));
-          target.el.dispatchEvent(new MouseEvent('mouseup', mouseOpts));
-          target.el.dispatchEvent(new MouseEvent('click', mouseOpts));
-          // Fallback: native click() for handlers that require isTrusted:true
-          try { target.el.click(); } catch(_) {}
-          return 'clicked <' + target.el.tagName.toLowerCase() + '> at index ${index}';
-      })()
-    `);
-    // If the click triggered a page navigation (e.g. clicking a link/button that changes URL),
-    // Electron's executeJavaScript throws GUEST_VIEW_MANAGER_CALL because the renderer
-    // process is torn down mid-execution. The click did succeed — we report the new URL.
-    const finalResult = await handleNavigationError(result, "clicked element at index " + index);
-    if (result === finalResult) {
-      // No navigation error — normal click, short wait for DOM updates
-      await new Promise((r) => setTimeout(r, 400));
-    }
-    return finalResult;
-  }, [evalInPage, handleNavigationError]);
+        const hit = document.elementFromPoint(${vx}, ${vy});
+        if (!hit) return 'no element at (${vx},${vy}) — re-screenshot and pick visible coordinates';
+        const field = hit.closest ? (hit.closest('input, textarea, [contenteditable="true"]') || hit) : hit;
+        const tag = field.tagName ? field.tagName.toLowerCase() : '';
+        const editable = tag === 'input' || tag === 'textarea' || field.isContentEditable === true;
+        if (!editable) {
+          return 'element at (${vx},${vy}) is <' + tag + '> — not a text field. Re-screenshot and click directly on the input you see in the image.';
+        }
 
-  const typeIntoElement = useCallback(async (index: number, text: string) => {
-    const result = await evalInPage(`
-      (() => {
-        ${DOM_INDEXING_HELPERS}
-        const items = hCollectItems({}).items;
-        const target = items[${index}];
-        if (!target || !target.el) return 'element not found at index ${index}';
-        const inp = target.el;
+        // Click the field first — reactive frameworks (React/Vue) need real mouse events
+        const rect = field.getBoundingClientRect();
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        const fvx = Math.max(0, Math.min(cx, window.innerWidth - 1));
+        const fvy = Math.max(0, Math.min(cy, window.innerHeight - 1));
+        const mouseOpts = { clientX: fvx, clientY: fvy, screenX: fvx, screenY: fvy, bubbles: true, cancelable: true, button: 0, buttons: 1, view: window };
+        const ptrOpts = { clientX: fvx, clientY: fvy, screenX: fvx, screenY: fvy, bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', button: 0, buttons: 1, view: window };
+        field.dispatchEvent(new PointerEvent('pointerdown', ptrOpts));
+        field.dispatchEvent(new MouseEvent('mousedown', mouseOpts));
+        field.dispatchEvent(new PointerEvent('pointerup', ptrOpts));
+        field.dispatchEvent(new MouseEvent('mouseup', mouseOpts));
+        field.dispatchEvent(new MouseEvent('click', mouseOpts));
+        try { field.focus(); } catch(_) {}
 
-          // Click the element first — reactive frameworks (React/Vue) need real mouse events
-          const rect = inp.getBoundingClientRect();
-          const cx = rect.left + rect.width / 2;
-          const cy = rect.top + rect.height / 2;
-          const vx = Math.max(0, Math.min(cx, window.innerWidth - 1));
-          const vy = Math.max(0, Math.min(cy, window.innerHeight - 1));
-          const mouseOpts = { clientX: vx, clientY: vy, screenX: vx, screenY: vy, bubbles: true, cancelable: true, button: 0, buttons: 1, view: window };
-          const ptrOpts = { clientX: vx, clientY: vy, screenX: vx, screenY: vy, bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', button: 0, buttons: 1, view: window };
-          inp.dispatchEvent(new PointerEvent('pointerdown', ptrOpts));
-          inp.dispatchEvent(new MouseEvent('mousedown', mouseOpts));
-          inp.dispatchEvent(new PointerEvent('pointerup', ptrOpts));
-          inp.dispatchEvent(new MouseEvent('mouseup', mouseOpts));
-          inp.dispatchEvent(new MouseEvent('click', mouseOpts));
-          try { inp.focus(); } catch(_) {}
+        const text = ${JSON.stringify(text)};
+        if (field.isContentEditable) {
+          // contenteditable: replace the content and notify frameworks
+          field.textContent = text;
+          field.dispatchEvent(new Event('input', { bubbles: true }));
+          field.dispatchEvent(new Event('change', { bubbles: true }));
+          return text
+            ? 'typed "' + text + '" into contenteditable at (${vx},${vy})'
+            : 'cleared contenteditable at (${vx},${vy})';
+        }
 
-          // Resolve the native value setter (React overrides HTMLInputElement.prototype.value)
-          const nativeSetter = Object.getOwnPropertyDescriptor(
-            (inp.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement : window.HTMLInputElement).prototype, 'value'
-          );
-          const setValue = nativeSetter && nativeSetter.set
-            ? function(v) { nativeSetter.set.call(inp, v); }
-            : function(v) { inp.value = v; };
+        // Resolve the native value setter (React overrides HTMLInputElement.prototype.value)
+        const nativeSetter = Object.getOwnPropertyDescriptor(
+          (field.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement : window.HTMLInputElement).prototype, 'value'
+        );
+        const setValue = nativeSetter && nativeSetter.set
+          ? function(v) { nativeSetter.set.call(field, v); }
+          : function(v) { field.value = v; };
 
-          // Select all, clear via native setter, notify frameworks
-          if (typeof inp.select === 'function') inp.select();
-          setValue('');
-          inp.dispatchEvent(new Event('input', { bubbles: true }));
+        // Select all, clear via native setter, notify frameworks
+        if (typeof field.select === 'function') field.select();
+        setValue('');
+        field.dispatchEvent(new Event('input', { bubbles: true }));
 
-          if (!${JSON.stringify(text)}) {
-            inp.dispatchEvent(new Event('change', { bubbles: true }));
-            return 'cleared element at index ${index}';
-          }
+        if (!text) {
+          field.dispatchEvent(new Event('change', { bubbles: true }));
+          return 'cleared element at (${vx},${vy})';
+        }
 
-          // Type each character with native input events + native value setter
-          for (const ch of ${JSON.stringify(text)}) {
-            inp.dispatchEvent(new KeyboardEvent('keydown', { key: ch, code: 'Key' + ch.toUpperCase(), keyCode: ch.charCodeAt(0), bubbles: true, cancelable: true }));
-            inp.dispatchEvent(new KeyboardEvent('keypress', { key: ch, code: 'Key' + ch.toUpperCase(), keyCode: ch.charCodeAt(0), bubbles: true, cancelable: true }));
-            const start = inp.selectionStart || 0;
-            const newVal = inp.value.slice(0, start) + ch + inp.value.slice(inp.selectionEnd || start);
-            setValue(newVal);
-            inp.selectionStart = inp.selectionEnd = start + 1;
-            inp.dispatchEvent(new Event('input', { bubbles: true }));
-            inp.dispatchEvent(new KeyboardEvent('keyup', { key: ch, code: 'Key' + ch.toUpperCase(), keyCode: ch.charCodeAt(0), bubbles: true, cancelable: true }));
-          }
-          inp.dispatchEvent(new Event('change', { bubbles: true }));
-          return 'typed "' + ${JSON.stringify(text)} + '" into ' + inp.tagName.toLowerCase() + ' at index ${index}';
+        // Type each character with native input events + native value setter
+        for (const ch of text) {
+          field.dispatchEvent(new KeyboardEvent('keydown', { key: ch, code: 'Key' + ch.toUpperCase(), keyCode: ch.charCodeAt(0), bubbles: true, cancelable: true }));
+          field.dispatchEvent(new KeyboardEvent('keypress', { key: ch, code: 'Key' + ch.toUpperCase(), keyCode: ch.charCodeAt(0), bubbles: true, cancelable: true }));
+          const start = field.selectionStart || 0;
+          const newVal = field.value.slice(0, start) + ch + field.value.slice(field.selectionEnd || start);
+          setValue(newVal);
+          field.selectionStart = field.selectionEnd = start + 1;
+          field.dispatchEvent(new Event('input', { bubbles: true }));
+          field.dispatchEvent(new KeyboardEvent('keyup', { key: ch, code: 'Key' + ch.toUpperCase(), keyCode: ch.charCodeAt(0), bubbles: true, cancelable: true }));
+        }
+        field.dispatchEvent(new Event('change', { bubbles: true }));
+        return 'typed "' + text + '" into ' + tag + ' at (${vx},${vy})';
       })()
     `);
     await new Promise((r) => setTimeout(r, 300));
     return result;
-  }, [evalInPage]);
+  }, [evalInPage, scaleToViewport]);
 
-  const getPageSnapshot = useCallback(async (): Promise<string> => {
+  // Short header for the page (URL + title). The pixel screenshot is the
+  // primary output of browser_screenshot; this text only identifies the page.
+  const getScreenshotHeader = useCallback(async (): Promise<string> => {
     return evalInPage(`
       (() => {
-        ${DOM_INDEXING_HELPERS}
-        const lines = [];
-        lines.push('URL: ' + window.location.href);
-        lines.push('Title: ' + document.title);
-        const collected = hCollectItems({ maxItems: 800 });
-        const items = collected.items;
-        const vw = collected.vw, vh = collected.vh;
-
-        // Grid of elements (capped at 500)
-        const capped = items.slice(0, 500);
-        let grid = hBuildRegionalGrid(capped, vw, vh);
-        // Character cap: if grid exceeds 80K chars, truncate
-        const MAX_CHARS = 80000;
-        if (grid.length > MAX_CHARS) {
-          const at = grid.lastIndexOf('\\n', MAX_CHARS);
-          grid = grid.slice(0, at > 0 ? at : MAX_CHARS);
-          grid += '\\n... truncated (' + Math.round(grid.length / 1024) + 'K chars)';
-        }
-        lines.push(grid);
-        if (items.length > 500) {
-          lines.push('NOTE: showing 500 of ' + items.length + ' elements. Use browser_get_dom for more.');
-        }
-
-        // Error state: visible error text
-        const errors = document.querySelectorAll('[role="alert"], .error, .alert-danger, [class*="error"], [class*="Error"]');
-        if (errors.length > 0) {
-          lines.push('--- Errors/Warnings ---');
-          errors.forEach(function(el) {
-            const txt = (el.textContent || '').trim().slice(0, 200);
-            if (txt) lines.push('  ' + txt);
-          });
-        }
-
-        return lines.join('\\n');
+        return 'URL: ' + window.location.href + '\\nTitle: ' + document.title;
       })()
     `);
   }, [evalInPage]);
 
-  // Capture the visible page as a base64 PNG. On desktop this captures the
-  // Electron webview in the main process (webContents.capturePage via the
-  // hDesktop IPC bridge — the <webview> element's own capturePage throws
-  // "An object could not be cloned" over IPC). In web mode (iframe) it falls
-  // back to DOM rasterization (SVG foreignObject → canvas), inlining page
-  // CSS/images through the same-origin reverse proxy and retrying in a
-  // taint-safe mode if the canvas is blocked. Returns a
-  // "data:image/png;base64,..." string, or an "Error: ..." string on failure.
-  const captureScreenshotImage = useCallback(async (): Promise<string> => {
+  // Capture the visible page as a base64 PNG data URL plus its pixel size. On
+  // desktop this captures the Electron webview in the main process
+  // (webContents.capturePage via the hDesktop IPC bridge — the <webview>
+  // element's own capturePage throws "An object could not be cloned" over
+  // IPC). In web mode (iframe) it falls back to DOM rasterization (SVG
+  // foreignObject → canvas), inlining page CSS/images through the same-origin
+  // reverse proxy and retrying in a taint-safe mode if the canvas is blocked.
+  // The image and guest viewport sizes are recorded so coordinate tools can
+  // map screenshot pixels to viewport pixels.
+  const captureScreenshotImage = useCallback(async (): Promise<{ url: string; imageW: number; imageH: number }> => {
     // ── Desktop: main-process webview capture (no taint possible) ──
     const desktop = (window as any).hDesktop;
     const wv = getWebview() as (BrowserGuest & { getWebContentsId?: () => number }) | null;
+    let url = "";
     if (wv && typeof wv.getWebContentsId === "function" && desktop && typeof desktop.captureBrowserPage === "function") {
       try {
         const b64 = await desktop.captureBrowserPage(wv.getWebContentsId());
-        if (b64) return "data:image/png;base64," + b64;
+        if (b64) url = "data:image/png;base64," + b64;
       } catch { /* fall through to DOM rasterization */ }
     }
 
     // ── Web / fallback: DOM rasterization (full → safe) ──
-    return evalInPage(`
+    if (!url) {
+      url = await evalInPage(`
       (() => {
         const MAX_W = 1280, MAX_H = 1024, MAX_CSS = 150000, MAX_IMGS = 24, MAX_HTML = 600000;
         const vw = Math.min(document.documentElement.clientWidth || window.innerWidth || 1280, MAX_W);
@@ -2308,7 +1897,31 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
           .catch(function (e) { return 'Error: screenshot capture failed: ' + (e && e.message ? e.message : e); });
       })()
     `);
-  }, [evalInPage]);
+    }
+
+    if (!url.startsWith("data:image/") || url.startsWith("data:image/svg")) {
+      return { url, imageW: 0, imageH: 0 };
+    }
+
+    // Record the image's pixel size and the guest viewport size so coordinate
+    // tools can map screenshot pixels → viewport pixels.
+    const size = await new Promise<{ w: number; h: number } | null>((resolve) => {
+      const im = new Image();
+      im.onload = () => resolve({ w: im.naturalWidth, h: im.naturalHeight });
+      im.onerror = () => resolve(null);
+      im.src = url;
+    });
+    if (size) {
+      let viewportW = 0;
+      let viewportH = 0;
+      const vs = await evalInPage(`[window.innerWidth, window.innerHeight].join('x')`).catch(() => "");
+      const m = String(vs || "").match(/^(\d+)x(\d+)$/);
+      if (m) { viewportW = Number(m[1]); viewportH = Number(m[2]); }
+      lastCaptureRef.current = { imageW: size.w, imageH: size.h, viewportW, viewportH };
+      return { url, imageW: size.w, imageH: size.h };
+    }
+    return { url, imageW: 0, imageH: 0 };
+  }, [evalInPage, getWebview]);
 
   // Wait for an element matching a CSS selector to appear. Returns text content of first match.
   const waitForElement = useCallback(async (selector: string, timeoutMs: number = 5000): Promise<string> => {
@@ -2388,9 +2001,9 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     return `URL: ${currentUrl} | Title: ${activeTab.label || "(no title)"} | Loaded: ${loading ? "loading" : "yes"} | Tabs: ${tabs.length}`;
   }, [activeTab, currentUrl, loading, tabs]);
 
-  const clearElement = useCallback(async (index: number): Promise<string> => {
-    const result = await typeIntoElement(index, "");
-    // typeIntoElement returns "cleared element at index N" for empty text
+  const clearElement = useCallback(async (x: number, y: number): Promise<string> => {
+    const result = await typeIntoElement(x, y, "");
+    // typeIntoElement returns "cleared element at (x,y)" for empty text
     return result.startsWith("cleared") ? "Cleared element." : result;
   }, [typeIntoElement]);
 
@@ -2428,67 +2041,25 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   }, [evalInPage]);
 
   const clickCoords = useCallback(async (x: number, y: number): Promise<string> => {
-    const result = await mouseEvent(x, y, "click");
+    const { x: vx, y: vy } = scaleToViewport(x, y);
+    const result = await mouseEvent(vx, vy, "click");
     return handleNavigationError(result, "click at (" + x + "," + y + ")");
-  }, [mouseEvent, handleNavigationError]);
+  }, [mouseEvent, handleNavigationError, scaleToViewport]);
 
   const moveMouse = useCallback(async (x: number, y: number): Promise<string> => {
-    return mouseEvent(x, y, "move");
-  }, [mouseEvent]);
+    const { x: vx, y: vy } = scaleToViewport(x, y);
+    return mouseEvent(vx, vy, "move");
+  }, [mouseEvent, scaleToViewport]);
 
   const rightClick = useCallback(async (x: number, y: number): Promise<string> => {
-    return mouseEvent(x, y, "contextmenu");
-  }, [mouseEvent]);
-
-  const rightClickElement = useCallback(async (index: number): Promise<string> => {
-    return evalInPage(`
-      (() => {
-        ${DOM_INDEXING_HELPERS}
-        const items = hCollectItems({}).items;
-        const target = items[${index}];
-        if (target && target.el) {
-          const el = target.el;
-          const rect = el.getBoundingClientRect();
-          const cx = rect.left + rect.width / 2;
-          const cy = rect.top + rect.height / 2;
-          const vx = Math.max(0, Math.min(cx, window.innerWidth - 1));
-          const vy = Math.max(0, Math.min(cy, window.innerHeight - 1));
-          const opts = { clientX: vx, clientY: vy, screenX: vx, screenY: vy, bubbles: true, cancelable: true, button: 2, buttons: 2, view: window };
-          el.dispatchEvent(new PointerEvent('pointerdown', { ...opts, pointerId: 1, pointerType: 'mouse' }));
-          el.dispatchEvent(new MouseEvent('mousedown', opts));
-          el.dispatchEvent(new PointerEvent('pointerup', { ...opts, pointerId: 1, pointerType: 'mouse' }));
-          el.dispatchEvent(new MouseEvent('mouseup', opts));
-          el.dispatchEvent(new MouseEvent('contextmenu', opts));
-          return 'right-clicked <' + el.tagName.toLowerCase() + '> at index ${index}';
-        }
-        return 'element not found at index ${index}';
-      })()
-    `);
-  }, [evalInPage]);
+    const { x: vx, y: vy } = scaleToViewport(x, y);
+    return mouseEvent(vx, vy, "contextmenu");
+  }, [mouseEvent, scaleToViewport]);
 
   const scrollPage = useCallback(async (x: number, y: number, to?: string): Promise<string> => {
     if (to === "top") return evalInPage(`window.scrollTo(0, 0); 'Scrolled to top.';`);
     if (to === "bottom") return evalInPage(`window.scrollTo(0, document.body.scrollHeight); 'Scrolled to bottom.';`);
     return evalInPage(`window.scrollBy(${x || 0}, ${y || 0}); 'Scrolled by ${x || 0},${y || 0}.';`);
-  }, [evalInPage]);
-
-  const hoverElement = useCallback(async (index: number): Promise<string> => {
-    return evalInPage(`
-      (() => {
-        ${DOM_INDEXING_HELPERS}
-        const items = hCollectItems({}).items;
-        const target = items[${index}];
-        if (!target || !target.el) return 'Element not found at index ${index}.';
-        const el = target.el;
-        const rect = el.getBoundingClientRect();
-        const cx = rect.left + rect.width / 2;
-        const cy = rect.top + rect.height / 2;
-        el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, clientX: cx, clientY: cy }));
-        el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, clientX: cx, clientY: cy }));
-        el.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: cx, clientY: cy }));
-        return 'Hovered element at index ${index}.';
-      })()
-    `);
   }, [evalInPage]);
 
   const pressKey = useCallback(async (key: string): Promise<string> => {
@@ -2529,7 +2100,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     `);
   }, [evalInPage]);
 
-  const uploadFile = useCallback(async (index: number, paths: string[]): Promise<string> => {
+  const uploadFile = useCallback(async (x: number | null, y: number | null, paths: string[]): Promise<string> => {
     // Read files as ArrayBuffer and transfer to the iframe context
     const fileDatas: { name: string; type: string; data: number[] }[] = [];
     for (const fp of paths) {
@@ -2543,14 +2114,19 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
       } catch { return `Cannot read file: ${fp}`; }
     }
     const serialized = JSON.stringify(fileDatas);
+    const hitExpr = x != null && y != null
+      ? (() => { const { x: vx, y: vy } = scaleToViewport(x, y); return `(document.elementFromPoint(${vx}, ${vy}) || null)`; })()
+      : "null";
     return evalInPage(`
       (() => {
-        ${DOM_INDEXING_HELPERS}
-        const items = hCollectItems({}).items;
-        const target = items[${index}];
-        if (!target || !target.el) return 'Element not found at index ${index}.';
-        const el = target.el;
-        if (el.tagName !== 'INPUT' || el.type !== 'file') return 'Element is not a file input.';
+        let el = ${hitExpr};
+        if (el) {
+          el = el.closest ? (el.closest('input[type="file"]') || (el.tagName === 'INPUT' && el.type === 'file' ? el : null)) : null;
+        }
+        if (!el) {
+          el = document.querySelector('input[type="file"]');
+        }
+        if (!el) return 'No file input found. Re-screenshot and click on the file input, or pass its coordinates.';
 
         const fileDatas = ${serialized};
         const dt = new DataTransfer();
@@ -2578,19 +2154,18 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
         return 'Uploaded ${paths.length} file(s).';
       })()
     `);
-  }, [evalInPage]);
+  }, [evalInPage, scaleToViewport]);
 
-  const selectOption = useCallback(async (index: number, value?: string, label?: string): Promise<string> => {
+  const selectOption = useCallback(async (x: number, y: number, value?: string, label?: string): Promise<string> => {
+    const { x: vx, y: vy } = scaleToViewport(x, y);
     const v = value != null ? JSON.stringify(value) : "null";
     const l = label != null ? JSON.stringify(label) : "null";
     return evalInPage(`
       (() => {
-        ${DOM_INDEXING_HELPERS}
-        const items = hCollectItems({}).items;
-        const target = items[${index}];
-        if (!target || !target.el) return 'Element not found at index ${index}.';
-        const el = target.el;
-        if (el.tagName !== 'SELECT') return 'Element at index ${index} is <' + el.tagName.toLowerCase() + '>, not a <select>. Tip: for custom dropdowns (not native <select>), use browser_click on the trigger, then browser_wait + browser_get_dom to find options, then browser_click on the desired option.';
+        const hit = document.elementFromPoint(${vx}, ${vy});
+        if (!hit) return 'no element at (${vx},${vy}) — re-screenshot and pick visible coordinates';
+        const el = hit.closest ? (hit.closest('select') || hit) : hit;
+        if (el.tagName !== 'SELECT') return 'element at (${vx},${vy}) is <' + el.tagName.toLowerCase() + '>, not a <select>. For custom dropdowns (not native <select>), use browser_click on the trigger, wait, then screenshot and browser_click the desired option.';
         const sel = el;
 
         // Click to activate — enhanced properties for framework compatibility
@@ -2642,12 +2217,12 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
         return 'Selected: ' + (sel.options[sel.selectedIndex]?.text || sel.value);
       })()
     `);
-  }, [evalInPage]);
+  }, [evalInPage, scaleToViewport]);
 
   useImperativeHandle(ref, () => ({
-    evalInPage, getIndexedDom, clickElement, typeIntoElement, clearElement, clickCoords, moveMouse, rightClick, rightClickElement, scrollPage, pressKey, uploadFile, getPageSnapshot, captureScreenshotImage, navigateTo,
+    evalInPage, typeIntoElement, clearElement, clickCoords, moveMouse, rightClick, scrollPage, pressKey, uploadFile, getScreenshotHeader, captureScreenshotImage, navigateTo,
     waitForElement, getConsoleEntries, getRequestErrors, getInfo, selectOption,
-  }), [evalInPage, getIndexedDom, clickElement, typeIntoElement, clearElement, clickCoords, moveMouse, rightClick, rightClickElement, scrollPage, pressKey, uploadFile, getPageSnapshot, captureScreenshotImage, navigateTo,
+  }), [evalInPage, typeIntoElement, clearElement, clickCoords, moveMouse, rightClick, scrollPage, pressKey, uploadFile, getScreenshotHeader, captureScreenshotImage, navigateTo,
     waitForElement, getConsoleEntries, getRequestErrors, getInfo, selectOption]);
 
   return (

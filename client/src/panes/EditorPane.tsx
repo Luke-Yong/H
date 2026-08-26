@@ -1948,18 +1948,21 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     if (!bv) return done("Browser not available. Use browser_navigate first to open a URL, then retry this tool.");
     switch (toolName) {
       case "browser_screenshot": {
-        const text = await bv.getPageSnapshot();
-        // Capture the real page image (primary). On failure, keep the text grid
-        // and surface the reason so the agent/user knows the image path failed.
-        const img = await bv.captureScreenshotImage().catch(() => "Error: capture threw");
-        const image = img && img.startsWith("data:image/") && !img.startsWith("data:image/svg") ? img : undefined;
-        if (image) return { text, image };
-        const reason = img && img.startsWith("Error:") ? img.replace(/^Error:\s*/, "").slice(0, 200) : "no image captured";
-        return { text: `[Screenshot image unavailable: ${reason} — text grid used]\n${text}` };
+        // Primary output is the pixel image. The text is only a short header
+        // (URL, title) plus the image size, which fixes the coordinate space
+        // the agent should use when clicking on the screenshot.
+        const cap = await bv.captureScreenshotImage().catch(() => ({ url: "Error: capture threw", imageW: 0, imageH: 0 }));
+        const header = await bv.getScreenshotHeader();
+        const image = cap.url.startsWith("data:image/") && !cap.url.startsWith("data:image/svg") ? cap.url : undefined;
+        if (image) {
+          const sizeLine = cap.imageW > 0 ? `\nScreenshot: ${cap.imageW}x${cap.imageH}` : "";
+          return { text: `${header}${sizeLine}`, image };
+        }
+        const reason = cap.url.startsWith("Error:") ? cap.url.replace(/^Error:\s*/, "").slice(0, 200) : "no image captured";
+        return { text: `[Screenshot image unavailable: ${reason}]\n${header}` };
       }
-      case "browser_get_dom": return done(await bv.getIndexedDom());
-      case "browser_type": await bv.typeIntoElement(Number(params.index || 0), String(params.text || "")); return done(`Typed "${params.text}" into element.`);
-      case "browser_clear": return done(await bv.clearElement(Number(params.index || 0)));
+      case "browser_type": await bv.typeIntoElement(Number(params.x ?? 0), Number(params.y ?? 0), String(params.text || "")); return done(`Typed "${params.text}" into element at (${params.x ?? 0},${params.y ?? 0}).`);
+      case "browser_clear": return done(await bv.clearElement(Number(params.x ?? 0), Number(params.y ?? 0)));
       case "browser_wait": {
         const selector = String(params.selector || "");
         if (!selector) return done("Error: selector is required.");
@@ -1967,19 +1970,17 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
         return done(await bv.waitForElement(selector, timeout));
       }
       case "browser_click":
-        if (params.index != null) return done(await bv.clickElement(Number(params.index)));
-        return done(await bv.clickCoords(Number(params.x || 0), Number(params.y || 0)));
+        return done(await bv.clickCoords(Number(params.x ?? 0), Number(params.y ?? 0)));
       case "browser_right_click":
-        if (params.index != null) return done(await bv.rightClickElement(Number(params.index)));
-        return done(await bv.rightClick(Number(params.x || 0), Number(params.y || 0)));
-      case "browser_move_mouse": return done(await bv.moveMouse(Number(params.x || 0), Number(params.y || 0)));
+        return done(await bv.rightClick(Number(params.x ?? 0), Number(params.y ?? 0)));
+      case "browser_move_mouse": return done(await bv.moveMouse(Number(params.x ?? 0), Number(params.y ?? 0)));
       case "browser_scroll": return done(await bv.scrollPage(Number(params.x || 0), Number(params.y || 0), params.to as string | undefined));
       case "browser_press_key": return done(await bv.pressKey(String(params.key || "")));
-      case "browser_upload_file": return done(await bv.uploadFile(Number(params.index || 0), (params.paths as string[]) || []));
+      case "browser_upload_file": return done(await bv.uploadFile(params.x != null ? Number(params.x) : null, params.y != null ? Number(params.y) : null, (params.paths as string[]) || []));
       case "browser_console": return done(await bv.getConsoleEntries());
       case "browser_request_errors": return done(await bv.getRequestErrors());
       case "browser_info": return done(bv.getInfo());
-      case "browser_select": return done(await bv.selectOption(Number(params.index || 0), params.value as string | undefined, params.label as string | undefined));
+      case "browser_select": return done(await bv.selectOption(Number(params.x ?? 0), Number(params.y ?? 0), params.value as string | undefined, params.label as string | undefined));
       case "read_problems": return done(getConsoleContext());
       default: return done(`Unknown browser tool: ${toolName}`);
     }

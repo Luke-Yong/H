@@ -32,7 +32,7 @@ Copilot 是代码 **助手** — 自动补全、聊天、行内建议。H 是 **
 | **任务委托** | `delegate_task` — 派生 11 种专用子 Agent（浏览器、代码编写、研究、安全审计、架构分析…），每个拥有独立上下文窗口 | 无 — 单聊天线程 |
 | **子 Agent 实时 UI** | 按 Agent 颜色编码流式输出、进度卡片、嵌套 Todo | 无 |
 | **持久化记忆** | 文件支持的跨会话记忆（`remember` / `recall` / `forget`） | 仅当前会话聊天记录 |
-| **浏览器自动化** | 内置 Electron webview + 16 个浏览器工具（点击、输入、上传、控制台、网络、DOM） | 无 |
+| **浏览器自动化** | 内置 Electron webview + 15 个浏览器工具（像素截图、基于坐标的点击/输入、上传、控制台、网络） | 无 |
 | **终端控制** | `run_in_terminal` — 真实 PTY，Agent 可读写/终止 | 集成终端，Agent 无法访问 |
 | **知识图谱** | 自动构建代码库图谱（.kg）：符号级导入关系、stdlib/third-party 导入分类、未使用导入检测、`read_graph` 工具（6 种查询类型） | 无 |
 | **多 Agent 编排** | 父 Agent → 子 Agent 交接，附带流式摘要 | 无 |
@@ -61,7 +61,7 @@ npm run dev
 |---|---|
 | **文件系统** | `read_file`、`write_file`、`edit_file`、`list_files`、`search_files`、`grep`、`create_directory`、`rename_file`、`delete_file` |
 | **终端** | `run_command`（沙箱）、`run_in_terminal`（真实 PTY）、`kill_terminal`、`read_command_output` |
-| **浏览器** | `browser_navigate`、`browser_info`、`browser_screenshot`、`browser_get_dom`、`browser_click`、`browser_type`、`browser_clear`、`browser_select`、`browser_scroll`、`browser_press_key`、`browser_wait`、`browser_move_mouse`、`browser_right_click`、`browser_upload_file`、`browser_console`、`browser_request_errors` |
+| **浏览器** | `browser_navigate`、`browser_info`、`browser_screenshot`、`browser_click`、`browser_type`、`browser_clear`、`browser_select`、`browser_scroll`、`browser_press_key`、`browser_wait`、`browser_move_mouse`、`browser_right_click`、`browser_upload_file`、`browser_console`、`browser_request_errors` |
 | **诊断** | `read_problems`、`read_graph` |
 | **控制** | `write_todos`、`write_summary`、`task_complete`、`delegate_task` |
 | **记忆** | `remember`、`recall`、`forget` |
