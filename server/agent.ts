@@ -112,7 +112,6 @@ export interface SubAgentConfig {
   name: string;
   systemPrompt?: string;
   tools?: string[];
-  maxIterations?: number;
   headless?: boolean;
 }
 
@@ -128,7 +127,6 @@ export const SUB_AGENT_PROFILES: Record<string, SubAgentConfig> = {
       "write_todos",
     ],
     headless: false,
-    maxIterations: 100,
     systemPrompt: `You are a browser automation specialist running as a sub-agent. Your job is to interact with a web page and report your findings to the parent agent.
 - BEFORE starting, call write_todos to break the task into steps: navigate, inspect, interact, verify.
 - Use browser_navigate to go to a URL (http/https only).
@@ -152,7 +150,6 @@ export const SUB_AGENT_PROFILES: Record<string, SubAgentConfig> = {
     name: "Code Search Agent",
     tools: ["read_file", "list_files", "search_files", "grep", "read_graph", "write_todos"],
     headless: true,
-    maxIterations: 20,
     systemPrompt: `You are a code-search specialist running as a sub-agent. Your ONLY job is to find and read relevant code in the project.
 - BEFORE starting, call write_todos to break the search task into concrete steps: what to find, where to look, what to read.
 - Never create, edit, or delete files.
@@ -167,7 +164,6 @@ export const SUB_AGENT_PROFILES: Record<string, SubAgentConfig> = {
             "run_command", "read_problems", "read_command_output", "read_graph",
             "create_directory", "delete_file", "rename_file", "write_todos"],
     headless: true,
-    maxIterations: 50,
     systemPrompt: `You are a code-writing specialist running as a sub-agent. Your job is to implement a specific feature or fix a specific bug.
 - BEFORE starting, call write_todos to break the task into concrete steps: research, implement, verify.
 - Read relevant files first to understand the existing code before making changes.
@@ -188,7 +184,6 @@ Do NOT call task_complete or write_summary.`,
     name: "Research Agent",
     tools: ["read_file", "list_files", "search_files", "grep", "run_command", "read_graph", "write_todos"],
     headless: true,
-    maxIterations: 25,
     systemPrompt: `You are a codebase researcher running as a sub-agent. Explore the project to answer the user's question.
 - BEFORE starting, call write_todos to break the research into concrete steps: what to explore, what to find, what to report.
 - Use list_files and search_files to understand the project structure.
@@ -203,7 +198,6 @@ Do NOT call task_complete or write_summary.`,
     name: "Planner Agent",
     tools: ["read_file", "list_files", "search_files", "grep", "read_graph", "write_todos"],
     headless: true,
-    maxIterations: 25,
     systemPrompt: `You are a strategic planner running as a sub-agent. Your job is to analyze the project and create a structured step-by-step plan.
 - BEFORE starting, call write_todos to outline your planning steps: explore structure, analyze dependencies, create plan.
 - Use list_files and read_graph to understand the project architecture and structure.
@@ -224,7 +218,6 @@ Do NOT call task_complete or write_summary.`,
             "browser_screenshot", "browser_console", "browser_request_errors",
             "write_todos"],
     headless: false,
-    maxIterations: 50,
     systemPrompt: `You are a frontend development specialist running as a sub-agent. You implement UI features, components, and client-side logic.
 - BEFORE starting, call write_todos to break the task into concrete steps: research, implement, verify visually.
 - Read relevant files first to understand the existing UI code, component hierarchy, and styling conventions.
@@ -249,7 +242,6 @@ Do NOT call task_complete or write_summary.`,
             "run_command", "read_problems", "read_command_output", "read_graph",
             "create_directory", "delete_file", "rename_file", "write_todos"],
     headless: true,
-    maxIterations: 50,
     systemPrompt: `You are a backend development specialist running as a sub-agent. You implement API routes, services, database logic, and server-side features.
 - BEFORE starting, call write_todos to break the task into concrete steps: research, implement, verify.
 - Read relevant files first to understand the existing backend architecture, middleware patterns, and data models.
@@ -271,7 +263,6 @@ Do NOT call task_complete or write_summary.`,
     name: "Security Auditor Agent",
     tools: ["read_file", "list_files", "search_files", "grep", "run_command", "read_graph", "read_problems", "write_todos"],
     headless: true,
-    maxIterations: 30,
     systemPrompt: `You are a security auditor running as a sub-agent. Your job is to review code for security vulnerabilities and compliance issues.
 - BEFORE starting, call write_todos to break the audit into concrete steps: scan dependencies, search for vulnerability patterns, check auth, report.
 - Read relevant files to understand the codebase's security posture.
@@ -287,7 +278,6 @@ Do NOT call task_complete or write_summary.`,
     name: "Architect Analyst Agent",
     tools: ["read_file", "list_files", "search_files", "grep", "read_graph", "write_todos"],
     headless: true,
-    maxIterations: 25,
     systemPrompt: `You are a software architecture analyst running as a sub-agent. Your job is to analyze the project's architecture and provide insights.
 - BEFORE starting, call write_todos to break the analysis into concrete steps: explore structure, trace dependencies, identify concerns, report.
 - Use list_files and read_graph to understand the overall project structure and module relationships.
@@ -304,7 +294,6 @@ Do NOT call task_complete or write_summary.`,
     name: "Docs Analyst Agent",
     tools: ["read_file", "list_files", "search_files", "grep", "read_graph", "write_todos"],
     headless: true,
-    maxIterations: 20,
     systemPrompt: `You are a documentation analyst running as a sub-agent. Your job is to find and assess existing documentation and identify gaps.
 - BEFORE starting, call write_todos to break the audit into concrete steps: inventory docs, assess quality, find gaps, report.
 - Search for existing documentation files (README, docs/, wiki/, CONTRIBUTING, CHANGELOG, API docs).
@@ -321,7 +310,6 @@ Do NOT call task_complete or write_summary.`,
     name: "Documentation Writer Agent",
     tools: ["read_file", "write_file", "edit_file", "list_files", "search_files", "grep", "read_graph", "create_directory", "write_todos"],
     headless: true,
-    maxIterations: 30,
     systemPrompt: `You are a technical documentation writer running as a sub-agent. Your job is to create or improve project documentation.
 - BEFORE starting, call write_todos to break the task into concrete steps: research, draft, write, verify.
 - Read existing documentation and source code to understand what needs to be documented.
@@ -1995,7 +1983,6 @@ function formatMemoryResults(results: Array<{ key: string; value: string; catego
 
 // ── Agent loop ──
 
-const MAX_ITERATIONS = 50;
 const HISTORY_COMPACTION_TRIGGER_MESSAGES = 60;
 const HISTORY_COMPACTION_TRIGGER_TOKENS = 20_000;
 const HISTORY_PLAIN_MESSAGES_TO_KEEP = 15;
@@ -2308,6 +2295,7 @@ You have access to tools that let you read/write files, run commands, and delega
     - \`frontend-specialist\`: Building UI features (has browser tools for visual verification).
     - \`backend-specialist\`: API routes, services, database logic.
     - \`security-auditor\` / \`architect-analyst\` / \`docs-analyst\`: Read-only audit/analysis tasks.
+13. **NEVER paste raw command output or tool results into your reply.** Every tool result — including \`run_command\` output — is already shown to the user in its own tool card. Do NOT repeat it in your message text. Summarize the outcome in 1-2 lines (e.g. "the build failed with 3 TypeScript errors") and let the tool card carry the full output. Pasting large output into your reply duplicates the UI and wastes tokens.
 
 ### Persistent Memory
 - Use \`remember\` to store important decisions, user preferences, project conventions, and discovered patterns. Memories survive across sessions in file-based storage. Be proactive — when the user says "let's use X", "I prefer Y", or establishes a convention, store it.
@@ -2506,7 +2494,7 @@ const DIAGNOSTICS = `### Diagnostics
 - **When \`run_command\` output is truncated**: every \`run_command\` result starts with \`[cmd #N]\`. If you see \`... (showing last 4000 of N chars)\`, use \`read_command_output cmd_id=N\` to re-read the output with pagination. Use \`priority=top\` to see the beginning, \`limit=N\` to control how many lines, \`offset=N\` to advance through pages, or \`filter="pattern"\` to extract only matching lines.
 
 ### Terminal
-- Use \`run_command\` for sandboxed short commands: tests, lint, git, pip, npm, builds, etc. (no permission needed, fast inline output).
+- Use \`run_command\` for sandboxed short commands: tests, lint, git, pip, npm, builds, etc. (no permission needed, fast inline output). The command's output is rendered in its tool card — never copy it into your reply text.
 - Use \`run_in_terminal\` for long-running commands: starting servers, watch mode, interactive shells. User must Allow. You receive the full terminal output before your next turn.
 - The working directory is already the project root — do NOT use cd/pushd.
 - After starting a web server with \`run_in_terminal\`: CHECK THE TERMINAL OUTPUT for runtime errors FIRST. Then delegate to the browser sub-agent to verify the page loads. If no URL is shown, ask the user for the URL — do NOT guess the port.`;
@@ -2870,6 +2858,38 @@ function hasToolActivity(state: AgentState): boolean {
   return state.messages.some((m) => m.role === "tool");
 }
 
+/** True when a run_command / run_in_terminal result told the agent the full
+ *  output is cached ("Full output is cached as cmd #N; call read_command_output
+ *  for more") but the agent never called read_command_output on that output.
+ *  Used to refuse task_complete while such output remains unread. */
+function hasUnreadCachedOutput(state: AgentState): boolean {
+  const msgs = state.messages;
+  // cmd_ids the agent attempted to read via read_command_output. Attempts count
+  // (even a failed read) so a deadlock can't occur if a cache entry was evicted.
+  const readAttempts = new Set<number>();
+  for (const m of msgs) {
+    if (m.role !== "assistant" || m.name !== "read_command_output") continue;
+    try {
+      const arr = JSON.parse(contentToDisplayString(m.content ?? ""));
+      const args = JSON.parse(arr?.[0]?.function?.arguments ?? "{}");
+      const id = Number(args?.cmd_id);
+      if (Number.isFinite(id)) readAttempts.add(id);
+    } catch { /* ignore malformed */ }
+  }
+  // Find the newest cached-output hint. If it was never read, the agent still
+  // has pending work to resolve before calling task_complete.
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i];
+    if (m.role !== "tool") continue;
+    const match = String(m.content || "").match(/cached as cmd #(\d+)/);
+    if (match) {
+      const id = Number(match[1]);
+      return !readAttempts.has(id);
+    }
+  }
+  return false;
+}
+
 function buildTaskCompleteReminder(state: AgentState, scope: "agent" | "sub-agent"): string {
   const todoRequirement = state.latestTodos && state.latestTodos.length > 0
     ? ` Your summary must include a "### Todo Progress" section covering every todo item's final status.`
@@ -2952,8 +2972,6 @@ async function* runSubAgentStream(
   agentMarker: string,
   modelOpts: { model?: string; apiKey: string },
 ): AsyncGenerator<SubAgentStreamEvent, SubAgentResult, undefined> {
-  const maxIter = config.maxIterations || 15;
-
   // Prepend shared prefix from previous delegations of the same type
   const prefix = agentMarker ? (parentState.subAgentPrefix || (parentState.subAgentPrefix = {}))[agentMarker] || [] : [];
   const subState: AgentState = {
@@ -2970,7 +2988,8 @@ async function* runSubAgentStream(
   const systemPrompt = config.systemPrompt || "";
   const rc = (reasoning: string | null | undefined) =>
     reasoning ? { reasoning_content: reasoning } : {};
-  for (let iter = 0; iter < maxIter; iter++) {
+  // No turn limit — the sub-agent runs until it stops requesting tools (long-running tasks).
+  for (;;) {
     subState.iteration++;
     const openaiMessages = buildOpenAiMessagesForSubAgent(subState, systemPrompt);
     const { text, toolCalls, reasoningContent } = await chatDeepSeekTool(openaiMessages, subTools, modelOpts);
@@ -2989,7 +3008,7 @@ async function* runSubAgentStream(
       subState.messages.push({ role: "assistant", content: reply, ...rc(reasoningContent) });
       yield { type: "text", text: reply } as SubAgentStreamEvent;
       const summary = summarizeSubAgentResult(reply, config.name);
-      return { phase: "done", success: true, summary, iterations: iter + 1, subState };
+      return { phase: "done", success: true, summary, iterations: subState.iteration, subState };
     }
 
     for (const tc of toolCalls) {
@@ -3071,8 +3090,6 @@ async function* runSubAgentStream(
       }
     }
   }
-
-  return { phase: "done", success: false, summary: `Sub-agent reached max iterations (${maxIter}).`, iterations: maxIter, subState };
 }
 
 // The dedicated browser sub-agent does all screenshot observation, so it
@@ -3095,8 +3112,6 @@ async function runSubAgent(
   modelOpts: { model?: string; apiKey: string },
   agentType?: string,
 ): Promise<SubAgentResult> {
-  const maxIter = config.maxIterations || 15;
-
   // Prepend shared prefix from previous delegations of the same type
   const prefix = agentType ? (parentState.subAgentPrefix || (parentState.subAgentPrefix = {}))[agentType] || [] : [];
   const subState: AgentState = {
@@ -3113,7 +3128,8 @@ async function runSubAgent(
   const systemPrompt = config.systemPrompt || "";
   const rc = (reasoning: string | null | undefined) =>
     reasoning ? { reasoning_content: reasoning } : {};
-  for (let iter = 0; iter < maxIter; iter++) {
+  // No turn limit — the sub-agent runs until it stops requesting tools (long-running tasks).
+  for (;;) {
     subState.iteration++;
     const openaiMessages = buildOpenAiMessagesForSubAgent(subState, systemPrompt);
     const { text, toolCalls, reasoningContent } = await chatDeepSeekTool(openaiMessages, subTools, modelOpts);
@@ -3131,7 +3147,7 @@ async function runSubAgent(
       }
       subState.messages.push({ role: "assistant", content: reply, ...rc(reasoningContent) });
       const summary = summarizeSubAgentResult(reply, config.name);
-      return { phase: "done", success: true, summary, iterations: iter + 1, subState };
+      return { phase: "done", success: true, summary, iterations: subState.iteration, subState };
     }
 
     for (const tc of toolCalls) {
@@ -3216,8 +3232,6 @@ async function runSubAgent(
       }
     }
   }
-
-  return { phase: "done", success: false, summary: `Sub-agent reached max iterations (${maxIter}).`, iterations: maxIter, subState };
 }
 
 /** Resume a paused sub-agent after a browser tool result has been received. */
@@ -3232,8 +3246,6 @@ export async function resumeSubAgent(
    *  before any other state is added. */
   fallbackToolResult?: string,
 ): Promise<SubAgentResult> {
-  const maxIter = config.maxIterations || 15;
-
   // Push the browser tool result
   subState.messages.push({ role: "tool", content: toolResult, tool_call_id: toolCallId });
   const baseMessageCount = subState.messages.length;
@@ -3248,7 +3260,8 @@ export async function resumeSubAgent(
   const rc = (reasoning: string | null | undefined) =>
     reasoning ? { reasoning_content: reasoning } : {};
 
-  for (let iter = subState.iteration; iter < maxIter; iter++) {
+  // No turn limit — the sub-agent resumes and runs until it stops requesting tools.
+  for (;;) {
     subState.iteration++;
     const openaiMessages = buildOpenAiMessagesForSubAgent(subState, systemPrompt);
     const { text, toolCalls, reasoningContent } = await chatDeepSeekTool(openaiMessages, subTools, modelOpts);
@@ -3266,7 +3279,7 @@ export async function resumeSubAgent(
       }
       subState.messages.push({ role: "assistant", content: reply, ...rc(reasoningContent) });
       const summary = summarizeSubAgentResult(reply, config.name);
-      return { phase: "done", success: true, summary, iterations: iter + 1, subState };
+      return { phase: "done", success: true, summary, iterations: subState.iteration, subState };
     }
 
     for (const tc of toolCalls) {
@@ -3341,8 +3354,6 @@ export async function resumeSubAgent(
       }
     }
   }
-
-  return { phase: "done", success: false, summary: `Sub-agent reached max iterations (${maxIter}).`, iterations: maxIter, subState };
   } catch (err) {
     // The vision API (or the model call carrying the screenshot image) failed
     // before anything else was added. Retry once with the plain-text grid so
@@ -3422,8 +3433,6 @@ async function* runStepSubAgent(
   config: SubAgentConfig,
   modelOpts: { model?: string; apiKey: string },
 ): AsyncGenerator<StepSubAgentSseEvent> {
-  const maxIter = config.maxIterations || 25;
-
   const subState: AgentState = {
     messages: [{ role: "user", content: task }],
     iteration: 0,
@@ -3438,7 +3447,8 @@ async function* runStepSubAgent(
   const systemPrompt = config.systemPrompt || "";
   const apiKey = modelOpts.apiKey;
 
-  for (let iter = 0; iter < maxIter; iter++) {
+  // No turn limit — the step sub-agent runs until it stops requesting tools.
+  for (;;) {
     subState.iteration++;
     const openaiMessages = buildOpenAiMessagesForSubAgent(subState, systemPrompt);
     const modelOptsFull = { model: modelOpts.model, apiKey };
@@ -3479,7 +3489,7 @@ async function* runStepSubAgent(
       const summary = summarizeSubAgentResult(reply, config.name);
       yield {
         type: "text", text: reply,
-        stepComplete: { success: true, summary, iterations: iter + 1 },
+        stepComplete: { success: true, summary, iterations: subState.iteration },
       } as StepSubAgentSseEvent;
       return;
     }
@@ -3554,12 +3564,6 @@ async function* runStepSubAgent(
       }
     }
   }
-
-  // Max iterations reached
-  yield {
-    type: "text", text: `Sub-agent reached max iterations (${maxIter}).`,
-    stepComplete: { success: false, summary: `Reached max iterations (${maxIter}).`, iterations: maxIter },
-  } as StepSubAgentSseEvent;
 }
 
 // ── Main Step-by-Step Agent Loop ──
@@ -3582,7 +3586,6 @@ export async function* agentLoopStepByStep(
   }
   state.stopped = false; // fresh run — a stop request only applies to the running turn
 
-  const MAX_PLANNING_ITERS = 5;
   const MODEL_CONTEXT_LIMIT = 128_000;
 
   const makeUsage = (turns: number) => ({
@@ -3608,7 +3611,8 @@ export async function* agentLoopStepByStep(
 
   yield { type: "text", text: "Planning phase — breaking down the task into steps...\n" };
 
-  for (let iter = 0; iter < MAX_PLANNING_ITERS; iter++) {
+  // No turn limit — the planning loop runs until a valid write_todos plan is created.
+  for (;;) {
     if (isStopped(state)) {
       yield { type: "done", reply: "Stopped by user.", usage: makeUsage(state.iteration) };
       return;
@@ -3806,10 +3810,6 @@ export async function* agentLoopStepByStep(
       yield { type: "tool_end", toolName: fnName, toolResult: `Not available in planning phase. Use write_todos.` };
     }
   }
-
-  // Planning phase max iterations — force a best-effort plan
-  yield { type: "error", error: "Planning phase reached maximum iterations without creating a valid plan." };
-  yield { type: "done", reply: "Could not create a plan.", usage: makeUsage(state.iteration) };
 }
 
 export async function agentLoop(
@@ -3826,13 +3826,6 @@ export async function agentLoop(
     return { phase: "done", reply: "Stopped by user.", messages: state.messages };
   }
   state.iteration++;
-
-  if (state.iteration > MAX_ITERATIONS) {
-    const summary = "I've reached the maximum number of steps. " + 
-      "Here's a summary of what I've done so far based on the previous tool results.";
-    state.messages.push({ role: "assistant", content: summary });
-    return { phase: "done", reply: summary, messages: state.messages };
-  }
 
   const rc2 = (reasoning: string | null | undefined) =>
     reasoning ? { reasoning_content: reasoning } : {};
@@ -3941,7 +3934,7 @@ export async function agentLoop(
         continue;
       }
 
-      // task_complete — reject if pending todos exist; also requires write_summary first
+      // task_complete — reject if pending todos / unread command output exist; also requires write_summary first
       if (fnName === "task_complete") {
         const pending = getPendingTodos(state);
         if (pending) {
@@ -3950,6 +3943,13 @@ export async function agentLoop(
           state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc2(reasoningContent) });
           state.messages.push({ role: "tool", content: rejectMsg, tool_call_id: tc.id });
           state.messages.push({ role: "user", content: `Your task_complete was rejected because you still have pending tasks. Call write_todos to update them (mark as completed or cancelled), then call task_complete again.` });
+          continue;
+        }
+        if (hasUnreadCachedOutput(state)) {
+          const rejectMsg = `Cannot complete: you have unread cached command/terminal output. A previous run_command / run_in_terminal result said "Full output is cached as cmd #N; call read_command_output for more" but you never called read_command_output on it. Call read_command_output (with the cmd_id from that result) to inspect the full output, then call task_complete again.`;
+          state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc2(reasoningContent) });
+          state.messages.push({ role: "tool", content: rejectMsg, tool_call_id: tc.id });
+          state.messages.push({ role: "user", content: rejectMsg });
           continue;
         }
         if (state.latestProblems && state.latestProblems.errorCount > 0) {
@@ -4096,7 +4096,6 @@ export async function* agentLoopStream(
     return;
   }
   state.stopped = false; // fresh run — a stop request only applies to the running turn
-  const MAX_ITERS = 200;
 
   // Dynamic instruction retrieval — rebuilt each iteration as conversation evolves
   const buildMessages = () => {
@@ -4139,7 +4138,8 @@ export async function* agentLoopStream(
   const rc = (reasoning: string | null | undefined) =>
     reasoning ? { reasoning_content: reasoning } : {};
 
-  for (let iter = 0; iter < MAX_ITERS; iter++) {
+  // No turn limit — the main agent loop runs until it stops requesting tools (long-running tasks).
+  for (;;) {
     if (isStopped(state)) break; // user interrupted this turn
     state.iteration++;
     turnsSinceTodoUpdate++;
@@ -4191,7 +4191,7 @@ export async function* agentLoopStream(
         state.messages.push({ role: "user", content: buildTaskCompleteReminder(state, "agent") });
         continue;
       }
-      yield { type: "done", reply, usage: makeUsage(iter + 1) };
+      yield { type: "done", reply, usage: makeUsage(state.iteration) };
       return;
     }
 
@@ -4466,7 +4466,7 @@ export async function* agentLoopStream(
         continue;
       }
 
-      // task_complete — reject if pending todos exist; also requires write_summary first
+      // task_complete — reject if pending todos / unread command output exist; also requires write_summary first
       if (fnName === "task_complete") {
         yield { type: "tool_start", toolName: fnName, toolParams: params, toolCallId: tc.id };
         const pending = getPendingTodos(state);
@@ -4476,6 +4476,14 @@ export async function* agentLoopStream(
           state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
           state.messages.push({ role: "tool", content: rejectMsg, tool_call_id: tc.id });
           state.messages.push({ role: "user", content: `Your task_complete was rejected because you still have pending tasks. Call write_todos to update them (mark as completed or cancelled), then call task_complete again.` });
+          yield { type: "tool_end", toolName: fnName, toolCallId: tc.id, toolResult: rejectMsg };
+          continue;
+        }
+        if (hasUnreadCachedOutput(state)) {
+          const rejectMsg = `Cannot complete: you have unread cached command/terminal output. A previous run_command / run_in_terminal result said "Full output is cached as cmd #N; call read_command_output for more" but you never called read_command_output on it. Call read_command_output (with the cmd_id from that result) to inspect the full output, then call task_complete again.`;
+          state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
+          state.messages.push({ role: "tool", content: rejectMsg, tool_call_id: tc.id });
+          state.messages.push({ role: "user", content: rejectMsg });
           yield { type: "tool_end", toolName: fnName, toolCallId: tc.id, toolResult: rejectMsg };
           continue;
         }
@@ -4498,7 +4506,7 @@ export async function* agentLoopStream(
         state.messages.push({ role: "assistant", content: JSON.stringify([{ id: tc.id, type: "function", function: { name: fnName, arguments: tc.function.arguments } }]), name: fnName, ...rc(finalReasoning) });
         state.messages.push({ role: "tool", content: "OK", tool_call_id: tc.id });
         yield { type: "tool_end", toolName: fnName, toolCallId: tc.id, toolResult: "OK" };
-        yield { type: "done", reply: state.latestSummary, usage: makeUsage(iter + 1) };
+        yield { type: "done", reply: state.latestSummary, usage: makeUsage(state.iteration) };
         return;
       }
 
@@ -4632,12 +4640,6 @@ export async function* agentLoopStream(
       turnsSinceTodoUpdate = 0; // only inject once, don't spam
     }
   }
-
-  yield {
-    type: "warning",
-    warning: `Reached the maximum of ${MAX_ITERS} turns. Start a "New Task" to continue with a fresh context.`,
-  };
-  yield { type: "done", reply: "Reached maximum iterations.", usage: makeUsage(MAX_ITERS) };
 }
 
 // Helper to add a tool result and get state for continuation

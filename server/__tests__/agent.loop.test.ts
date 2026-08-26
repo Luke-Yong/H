@@ -126,20 +126,6 @@ describe("agentLoop", () => {
     expect(result.reply).toContain("No server API key configured");
   });
 
-  it("stops after MAX_ITERATIONS and returns summary", async () => {
-    // Mock to always return a tool call that keeps looping
-    (chatDeepSeekTool as any).mockResolvedValue(mockResponse({
-      toolCalls: [{ name: "list_files", args: { path: "." } }],
-    }));
-
-    const state = createAgentSession("s6", tmpDir, "Loop forever", "");
-    const result = await agentLoop(tmpDir, state, "", { apiKey: "sk-test" });
-
-    // After 50 iterations it should stop
-    expect(result.phase).toBe("done");
-    expect(result.reply).toContain("maximum number of steps");
-  }, 30000);
-
   it("handles multiple tool calls in sequence", async () => {
     (chatDeepSeekTool as any)
       .mockResolvedValueOnce(mockResponse({
@@ -166,6 +152,42 @@ describe("agentLoop", () => {
     expect(fs.existsSync(path.join(tmpDir, "a.txt"))).toBe(true);
     expect(fs.existsSync(path.join(tmpDir, "b.txt"))).toBe(true);
   });
+
+  it("refuses task_complete while unread cached command output remains", async () => {
+    (chatDeepSeekTool as any)
+      // 1. Run a command (real echo — output cached as cmd #1)
+      .mockResolvedValueOnce(mockResponse({
+        toolCalls: [{ name: "run_command", args: { command: "echo refuse-me-123" } }],
+      }))
+      // 2. Agent replies with text only, then tries to finish
+      .mockResolvedValueOnce(mockResponse({ text: "The output got cached. Let me read the full output of the test run." }))
+      // 3. Agent calls write_summary + task_complete → task_complete MUST be refused (unread cached output)
+      .mockResolvedValueOnce(mockResponse({
+        toolCalls: [
+          { name: "write_summary", args: { summary: "### Changes Made\n- (mock)\n### Verification\n- (mock)\n### Outcome\n- Ran the command and captured its output." } },
+          { name: "task_complete", args: {} },
+        ],
+      }))
+      // 4. Agent reads the cached output
+      .mockResolvedValueOnce(mockResponse({
+        toolCalls: [{ name: "read_command_output", args: { cmd_id: 1 } }],
+      }))
+      // 5. Agent finishes properly — task_complete now allowed
+      .mockResolvedValueOnce(mockResponse({
+        toolCalls: [
+          { name: "write_summary", args: { summary: "### Changes Made\n- (mock)\n### Verification\n- (mock)\n### Outcome\n- Read the output and completed the task." } },
+          { name: "task_complete", args: {} },
+        ],
+      }));
+
+    const state = createAgentSession("s-refuse", tmpDir, "Run the tests and report the output", "");
+    const result = await agentLoop(tmpDir, state, "", { apiKey: "sk-test" });
+
+    expect(result.phase).toBe("done");
+    // The premature task_complete attempt (step 3) must have been refused — the
+    // turn must have continued until the cached output was read.
+    expect(result.reply).toContain("Read the output and completed the task.");
+  }, 30000);
 
   it("passes reasoning content through to state when present", async () => {
     (chatDeepSeekTool as any).mockResolvedValue(mockResponse({
@@ -353,4 +375,62 @@ describe("agentLoopStream", () => {
     expect(permEvent).toBeDefined();
     expect(permEvent?.permissionCommand).toBe("npm start");
   });
+
+  it("continues past a text-only reply after a run_in_terminal tool result (does not end the turn)", async () => {
+    // Simulate the session state right after /stream/continue pushed the
+    // run_in_terminal result (summarized, output cached as cmd #1).
+    const state = createAgentSession("s16", tmpDir, "Run the tests", "");
+    state.messages.push({
+      role: "assistant" as const,
+      content: JSON.stringify([{ id: "call_term", type: "function", function: { name: "run_in_terminal", arguments: '{"command":"python test_routes.py"}' } }]),
+      name: "run_in_terminal",
+    });
+    state.messages.push({
+      role: "tool" as const,
+      content: "Terminal output. Exit code 0. Full output is cached as cmd #1; call read_command_output for more.\nKey lines:\n- test passed",
+      tool_call_id: "call_term",
+    });
+
+    // 1st model call: agent replies with text only — must NOT end the turn
+    (chatDeepSeekToolStream as any).mockReturnValueOnce((async function* () {
+      yield {
+        type: "done" as const,
+        finalText: "The test_routes.py ran and printed some output. Let me read the full output to see if tests passed.",
+        reasoningContent: null,
+        toolCalls: null,
+      };
+    })());
+    // 2nd model call: agent continues and reads the cached output
+    (chatDeepSeekToolStream as any).mockReturnValueOnce((async function* () {
+      yield {
+        type: "done" as const,
+        finalText: null,
+        reasoningContent: null,
+        toolCalls: [{ id: "c2", type: "function", function: { name: "read_command_output", arguments: '{"cmd_id":1}' } }],
+      };
+    })());
+    // 3rd model call: agent finishes
+    (chatDeepSeekToolStream as any).mockReturnValueOnce((async function* () {
+      yield {
+        type: "done" as const,
+        finalText: null,
+        reasoningContent: null,
+        toolCalls: [
+          { id: "c3a", type: "function", function: { name: "write_summary", arguments: '{"summary":"### Changes Made\\n- (mock)\\n### Verification\\n- (mock)\\n### Outcome\\n- Read the output and completed."}' } },
+          { id: "c3b", type: "function", function: { name: "task_complete", arguments: "{}" } },
+        ],
+      };
+    })());
+
+    const events: AgentSseEvent[] = [];
+    for await (const event of agentLoopStream(tmpDir, state, "", "s16", { apiKey: "sk-test" })) {
+      events.push(event);
+      if (event.type === "done") break;
+    }
+
+    // The turn must NOT end with the text-only reply as the final message.
+    // The loop must have continued to a read_command_output tool card.
+    expect(events.find(e => e.type === "done")).toBeDefined(); // eventually completes
+    expect(events.some(e => e.type === "tool_start" && e.toolName === "read_command_output")).toBe(true);
+  }, 30000);
 });

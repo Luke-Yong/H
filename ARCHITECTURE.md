@@ -1065,17 +1065,17 @@ Parent resumes ← result pushed to parent's state.messages
 
 | Profile | Tools | Iterations | Description |
 |---------|-------|-----------|-------------|
-| `browser` | `browser_navigate`, `browser_info`, `browser_screenshot`, `browser_click`, `browser_type`, `browser_clear`, `browser_select`, `browser_press_key`, `browser_console`, `browser_request_errors`, `browser_scroll`, `browser_wait`, `browser_move_mouse`, `browser_right_click`, `browser_upload_file`, `browser_get_dialog`, `browser_respond_dialog` | 100 | Full browser automation — unlimited turns for intensive testing. Navigates, screenshots (pixel image), clicks/types by coordinate on the image, scrolls, fills forms, checks console/network, and answers blocked alert/confirm/prompt dialogs. |
-| `code-search` | `read_file`, `list_files`, `search_files`, `grep`, `read_graph` | 20 | Read-only code exploration. Finds files, reads code, reports findings. Never edits. |
-| `code-writer` | Full filesystem + `run_command`, `read_problems`, `read_graph` | 50 | Implements features or fixes bugs. Reads, edits, builds, and verifies. |
-| `researcher` | `read_file`, `list_files`, `search_files`, `grep`, `run_command`, `read_graph` | 25 | Explores codebase to answer questions. Reports with file paths and line numbers. |
-| `planner` | `read_file`, `list_files`, `search_files`, `grep`, `read_graph`, `write_todos` | 25 | Analyzes project and creates structured step-by-step plans. Outputs a todo list with ordered, actionable steps. |
-| `frontend-specialist` | Full filesystem + `run_command`, `read_problems`, `read_graph`, `browser_screenshot`, `browser_console`, `browser_request_errors` | 50 | Implements UI features and components. Visually verifies changes in the browser. |
-| `backend-specialist` | Full filesystem + `run_command`, `read_problems`, `read_graph` | 50 | Implements API routes, services, and database logic. Focuses on server-side patterns and data integrity. |
-| `security-auditor` | `read_file`, `list_files`, `search_files`, `grep`, `run_command`, `read_graph`, `read_problems` | 30 | Audits code for vulnerabilities. Runs security scans, reports findings with severity and remediation. Never edits. |
-| `architect-analyst` | `read_file`, `list_files`, `search_files`, `grep`, `read_graph` | 25 | Analyzes project architecture, dependency graphs, and module structure. Reports architectural concerns and recommendations. Never edits. |
-| `docs-analyst` | `read_file`, `list_files`, `search_files`, `grep`, `read_graph` | 20 | Audits documentation coverage and quality. Identifies gaps and outdated docs. Never edits. |
-| `documentation-writer` | `read_file`, `write_file`, `edit_file`, `list_files`, `search_files`, `grep`, `read_graph`, `create_directory` | 30 | Creates or improves documentation. Writes README sections, API docs, and guides. |
+| `browser` | `browser_navigate`, `browser_info`, `browser_screenshot`, `browser_click`, `browser_type`, `browser_clear`, `browser_select`, `browser_press_key`, `browser_console`, `browser_request_errors`, `browser_scroll`, `browser_wait`, `browser_move_mouse`, `browser_right_click`, `browser_upload_file`, `browser_get_dialog`, `browser_respond_dialog` | Unlimited | Full browser automation — no turn limit, runs until the task is done. Navigates, screenshots (pixel image), clicks/types by coordinate on the image, scrolls, fills forms, checks console/network, and answers blocked alert/confirm/prompt dialogs. |
+| `code-search` | `read_file`, `list_files`, `search_files`, `grep`, `read_graph` | Unlimited | Read-only code exploration. Finds files, reads code, reports findings. Never edits. |
+| `code-writer` | Full filesystem + `run_command`, `read_problems`, `read_graph` | Unlimited | Implements features or fixes bugs. Reads, edits, builds, and verifies. |
+| `researcher` | `read_file`, `list_files`, `search_files`, `grep`, `run_command`, `read_graph` | Unlimited | Explores codebase to answer questions. Reports with file paths and line numbers. |
+| `planner` | `read_file`, `list_files`, `search_files`, `grep`, `read_graph`, `write_todos` | Unlimited | Analyzes project and creates structured step-by-step plans. Outputs a todo list with ordered, actionable steps. |
+| `frontend-specialist` | Full filesystem + `run_command`, `read_problems`, `read_graph`, `browser_screenshot`, `browser_console`, `browser_request_errors` | Unlimited | Implements UI features and components. Visually verifies changes in the browser. |
+| `backend-specialist` | Full filesystem + `run_command`, `read_problems`, `read_graph` | Unlimited | Implements API routes, services, and database logic. Focuses on server-side patterns and data integrity. |
+| `security-auditor` | `read_file`, `list_files`, `search_files`, `grep`, `run_command`, `read_graph`, `read_problems` | Unlimited | Audits code for vulnerabilities. Runs security scans, reports findings with severity and remediation. Never edits. |
+| `architect-analyst` | `read_file`, `list_files`, `search_files`, `grep`, `read_graph` | Unlimited | Analyzes project architecture, dependency graphs, and module structure. Reports architectural concerns and recommendations. Never edits. |
+| `docs-analyst` | `read_file`, `list_files`, `search_files`, `grep`, `read_graph` | Unlimited | Audits documentation coverage and quality. Identifies gaps and outdated docs. Never edits. |
+| `documentation-writer` | `read_file`, `write_file`, `edit_file`, `list_files`, `search_files`, `grep`, `read_graph`, `create_directory` | Unlimited | Creates or improves documentation. Writes README sections, API docs, and guides. |
 
 #### Key Design
 
@@ -1183,7 +1183,7 @@ Phase 3: EXECUTE (per step)
   For each pending todo:
     → SSE "step_begin" event
     → Code-writer sub-agent spawned with ONLY this step's context
-    → Sub-agent has full filesystem + run_command tools (max 50 iters)
+    → Sub-agent has full filesystem + run_command tools (no turn limit — runs until done)
     → Streaming tool_start/tool_end events shown in UI
     → Sub-agent returns a final plain-text report → SSE "step_end" event
     → Step marked completed/failed, next step begins
@@ -1202,7 +1202,7 @@ Phase 4: WRAP-UP
 | Execution | Agent works on anything at any time | One step at a time, isolated sub-agent per step |
 | Context | Full conversation history in one loop | Each step gets fresh sub-agent with only that step + previous results |
 | Tool restriction | Full tool set available | Planning: only write_todos. Execution: code-writer tools (no browser/terminal) |
-| Max turns | 50 per agent loop | Planning: 5 turns. Per step: 50 turns (configurable per agent profile) |
+| Turn limits | None — runs until the task completes | None — planning and per-step sub-agents run until complete |
 
 #### Why use it
 
@@ -2155,7 +2155,7 @@ The `contextLimit` is set dynamically based on the model name:
 
 #### Cumulative turns
 
-The `turns` counter accumulates across the entire session, not per-response. The server sends `turns = iter + 1` (iterations in that agent turn), and the client sums them into `totalTurnsRef`.
+The `turns` counter accumulates across the entire session, not per-response. The server sends `turns = state.iteration` (iterations in that agent turn), and the client sums them into `totalTurnsRef`.
 
 ### Architecture
 

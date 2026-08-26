@@ -1045,17 +1045,17 @@ H 支持**子 agent 委托** — 主 agent 可以生成专门的子 agent 来隔
 
 | 配置文件 | 工具 | 迭代次数 | 描述 |
 |---------|------|----------|------|
-| `browser` | `browser_navigate`、`browser_info`、`browser_screenshot`、`browser_click`、`browser_type`、`browser_clear`、`browser_select`、`browser_press_key`、`browser_console`、`browser_request_errors`、`browser_scroll`、`browser_wait`、`browser_move_mouse`、`browser_right_click`、`browser_upload_file` | 100 | 完整浏览器自动化 — 无限轮次用于密集测试。导航、截图（像素图片）、按图片坐标点击/输入、滚动、填写表单、检查控制台/网络。 |
-| `code-search` | `read_file`、`list_files`、`search_files`、`grep`、`read_graph` | 20 | 只读代码探索。查找文件、读取代码、报告发现。从不编辑。 |
-| `code-writer` | 完整文件系统 + `run_command`、`read_problems`、`read_graph` | 50 | 实现功能或修复 Bug。读取、编辑、构建和验证。 |
-| `researcher` | `read_file`、`list_files`、`search_files`、`grep`、`run_command`、`read_graph` | 25 | 探索代码库回答问题。报告文件路径和行号。 |
-| `planner` | `read_file`、`list_files`、`search_files`、`grep`、`read_graph`、`write_todos` | 25 | 分析项目并创建结构化的分步计划。输出包含有序、可操作步骤的 todo 列表。 |
-| `frontend-specialist` | 完整文件系统 + `run_command`、`read_problems`、`read_graph`、`browser_screenshot`、`browser_console`、`browser_request_errors` | 50 | 实现 UI 功能和组件。在浏览器中可视化验证更改。 |
-| `backend-specialist` | 完整文件系统 + `run_command`、`read_problems`、`read_graph` | 50 | 实现 API 路由、服务和数据库逻辑。关注服务器端模式和数据完整性。 |
-| `security-auditor` | `read_file`、`list_files`、`search_files`、`grep`、`run_command`、`read_graph`、`read_problems` | 30 | 审核代码漏洞。运行安全扫描，报告发现及严重性和修复建议。从不编辑。 |
-| `architect-analyst` | `read_file`、`list_files`、`search_files`、`grep`、`read_graph` | 25 | 分析项目架构、依赖图和模块结构。报告架构问题和建议。从不编辑。 |
-| `docs-analyst` | `read_file`、`list_files`、`search_files`、`grep`、`read_graph` | 20 | 审核文档覆盖率和质量。识别文档缺口和过时文档。从不编辑。 |
-| `documentation-writer` | `read_file`、`write_file`、`edit_file`、`list_files`、`search_files`、`grep`、`read_graph`、`create_directory` | 30 | 创建或改进文档。编写 README 章节、API 文档和指南。 |
+| `browser` | `browser_navigate`、`browser_info`、`browser_screenshot`、`browser_click`、`browser_type`、`browser_clear`、`browser_select`、`browser_press_key`、`browser_console`、`browser_request_errors`、`browser_scroll`、`browser_wait`、`browser_move_mouse`、`browser_right_click`、`browser_upload_file` | 无限制 | 完整浏览器自动化 — 无轮次限制，运行至任务完成。导航、截图（像素图片）、按图片坐标点击/输入、滚动、填写表单、检查控制台/网络。 |
+| `code-search` | `read_file`、`list_files`、`search_files`、`grep`、`read_graph` | 无限制 | 只读代码探索。查找文件、读取代码、报告发现。从不编辑。 |
+| `code-writer` | 完整文件系统 + `run_command`、`read_problems`、`read_graph` | 无限制 | 实现功能或修复 Bug。读取、编辑、构建和验证。 |
+| `researcher` | `read_file`、`list_files`、`search_files`、`grep`、`run_command`、`read_graph` | 无限制 | 探索代码库回答问题。报告文件路径和行号。 |
+| `planner` | `read_file`、`list_files`、`search_files`、`grep`、`read_graph`、`write_todos` | 无限制 | 分析项目并创建结构化的分步计划。输出包含有序、可操作步骤的 todo 列表。 |
+| `frontend-specialist` | 完整文件系统 + `run_command`、`read_problems`、`read_graph`、`browser_screenshot`、`browser_console`、`browser_request_errors` | 无限制 | 实现 UI 功能和组件。在浏览器中可视化验证更改。 |
+| `backend-specialist` | 完整文件系统 + `run_command`、`read_problems`、`read_graph` | 无限制 | 实现 API 路由、服务和数据库逻辑。关注服务器端模式和数据完整性。 |
+| `security-auditor` | `read_file`、`list_files`、`search_files`、`grep`、`run_command`、`read_graph`、`read_problems` | 无限制 | 审核代码漏洞。运行安全扫描，报告发现及严重性和修复建议。从不编辑。 |
+| `architect-analyst` | `read_file`、`list_files`、`search_files`、`grep`、`read_graph` | 无限制 | 分析项目架构、依赖图和模块结构。报告架构问题和建议。从不编辑。 |
+| `docs-analyst` | `read_file`、`list_files`、`search_files`、`grep`、`read_graph` | 无限制 | 审核文档覆盖率和质量。识别文档缺口和过时文档。从不编辑。 |
+| `documentation-writer` | `read_file`、`write_file`、`edit_file`、`list_files`、`search_files`、`grep`、`read_graph`、`create_directory` | 无限制 | 创建或改进文档。编写 README 章节、API 文档和指南。 |
 
 #### 关键设计
 
@@ -1163,7 +1163,7 @@ Agent: delegate_parallel tasks=[
   对于每个待处理的 todo：
     → SSE "step_begin" 事件
     → 生成 code-writer 子 agent，仅使用此步骤的上下文
-    → 子 agent 具有完整文件系统 + run_command 工具（最多 50 次迭代）
+    → 子 agent 具有完整文件系统 + run_command 工具（无轮次限制 — 运行至完成）
     → 流式 tool_start/tool_end 事件显示在 UI 中
     → 子 agent 返回最终纯文本报告 → SSE "step_end" 事件
     → 步骤标记为已完成/失败，开始下一步
@@ -1182,7 +1182,7 @@ Agent: delegate_parallel tasks=[
 | 执行 | Agent 随时处理任何事情 | 一次一步，每步隔离的子 agent |
 | 上下文 | 完整对话历史在一个循环中 | 每步获得仅包含该步 + 先前结果的新子 agent |
 | 工具限制 | 完整工具集可用 | 规划：仅 write_todos。执行：code-writer 工具（无浏览器/终端） |
-| 最大轮数 | 每 agent 循环 50 次 | 规划：5 轮。每步：50 轮（可按 agent 配置文件配置） |
+| 轮次限制 | 无 — 运行至任务完成 | 无 — 规划和每步子 agent 运行至完成 |
 
 #### 为什么使用它
 
@@ -2135,7 +2135,7 @@ estimatedTokens = round(totalChars / 4)
 
 #### 累积轮次
 
-`turns` 计数器在整个会话中累积，而不是每次响应。服务器发送 `turns = iter + 1`（该 agent 回合中的迭代次数），客户端将其汇总到 `totalTurnsRef`。
+`turns` 计数器在整个会话中累积，而不是每次响应。服务器发送 `turns = state.iteration`（该 agent 回合中的迭代次数），客户端将其汇总到 `totalTurnsRef`。
 
 ### 架构
 

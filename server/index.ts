@@ -349,17 +349,21 @@ app.post("/api/chat/agent/stream", async (req, res) => {
     };
 
     const modelOpts = { model, apiKey };
-    // If the client disconnects (abort / tab close), stop the loop server-side
-    // so it doesn't keep burning tokens, and persist any pending todos.
-    const onStreamAbort = () => stopAgentSession(sessionId);
-    req.on("close", onStreamAbort);
+    // If the client disconnects (abort / tab close) BEFORE the response ends,
+    // stop the loop server-side so it doesn't keep burning tokens, and persist
+    // any pending todos. We listen on res.close (the connection closing), NOT
+    // req.close — req.close fires as soon as the request body is received, which
+    // would spuriously stop the session mid-turn (breaking browser/permission
+    // continuations).
+    const onStreamAbort = () => { if (!res.writableEnded) stopAgentSession(sessionId); };
+    res.on("close", onStreamAbort);
     try {
       for await (const event of agentLoopStream(root, state, context || "", sessionId, modelOpts)) {
         await sendAndMaybeYeld(event);
         if (event.type === "browser_tool" || event.type === "permission_required" || event.type === "done" || event.type === "error") break;
       }
     } finally {
-      req.removeListener("close", onStreamAbort);
+      res.removeListener("close", onStreamAbort);
     }
 
     // Session-end memory maintenance (async, non-blocking).
@@ -417,15 +421,15 @@ app.post("/api/chat/agent/stream/stepbystep", async (req, res) => {
     };
 
     const modelOpts = { model, apiKey };
-    const onStreamAbort = () => stopAgentSession(sessionId);
-    req.on("close", onStreamAbort);
+    const onStreamAbort = () => { if (!res.writableEnded) stopAgentSession(sessionId); };
+    res.on("close", onStreamAbort);
     try {
       for await (const event of agentLoopStepByStep(root, state, context || "", sessionId, modelOpts)) {
         await sendAndMaybeYeld(event);
         if (event.type === "done" || event.type === "error") break;
       }
     } finally {
-      req.removeListener("close", onStreamAbort);
+      res.removeListener("close", onStreamAbort);
     }
 
     res.end();
@@ -574,15 +578,15 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
         })),
       } as AgentSseEvent);
       const continueContext = typeof consoleContext === "string" ? consoleContext : "";
-      const onStreamAbort = () => stopAgentSession(sessionId);
-      req.on("close", onStreamAbort);
+      const onStreamAbort = () => { if (!res.writableEnded) stopAgentSession(sessionId); };
+      res.on("close", onStreamAbort);
       try {
         for await (const event of agentLoopStream(state.projectRoot, state, continueContext, sessionId, { model, apiKey })) {
           await sendAndMaybeYeld(event);
           if (event.type === "browser_tool" || event.type === "done" || event.type === "error") break;
         }
       } finally {
-        req.removeListener("close", onStreamAbort);
+        res.removeListener("close", onStreamAbort);
       }
       return res.end();
     }
@@ -664,15 +668,15 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
     };
 
     const continueContext = typeof consoleContext === "string" ? consoleContext : "";
-    const onStreamAbort = () => stopAgentSession(sessionId);
-    req.on("close", onStreamAbort);
+    const onStreamAbort = () => { if (!res.writableEnded) stopAgentSession(sessionId); };
+    res.on("close", onStreamAbort);
     try {
       for await (const event of agentLoopStream(state.projectRoot, state, continueContext, sessionId, { model, apiKey })) {
         await sendAndMaybeYeld(event);
         if (event.type === "browser_tool" || event.type === "done" || event.type === "error") break;
       }
     } finally {
-      req.removeListener("close", onStreamAbort);
+      res.removeListener("close", onStreamAbort);
     }
 
     res.end();

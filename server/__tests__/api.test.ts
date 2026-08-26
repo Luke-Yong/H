@@ -206,4 +206,94 @@ describe("API Endpoints", () => {
       expect(typeof res.body.isWin).toBe("boolean");
     });
   });
+
+  // ── run_in_terminal continue flow ──
+
+  describe("POST /api/chat/agent/stream/continue (run_in_terminal)", () => {
+    const parseSSE = (body: string): any[] =>
+      body.split("\n\n")
+        .filter((b) => b.trim().startsWith("data:"))
+        .map((b) => JSON.parse(b.replace(/^data:\s*/, "").trim()));
+
+    it("does not end the turn after a text-only reply following the terminal result", async () => {
+      // 1st stream: the model calls run_in_terminal
+      vi.mocked(chatDeepSeekToolStream).mockReturnValueOnce((async function* () {
+        yield {
+          type: "done" as const,
+          finalText: null,
+          reasoningContent: null,
+          toolCalls: [{ id: "call_term", type: "function" as const, function: { name: "run_in_terminal", arguments: '{"command":"python test_routes.py"}' } }],
+        };
+      })());
+
+      const agent = request.agent(app);
+      await agent.post("/api/chat/agent/credentials").send({ apiKey: "sk-test" });
+
+      const sseParser = (res: any, cb: any) => {
+        let data = "";
+        res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
+        res.on("end", () => { cb(null, data); });
+      };
+
+      const streamRes = await agent
+        .post("/api/chat/agent/stream")
+        .send({ message: "Run the tests", model: "test-model" })
+        .buffer(true)
+        .parse(sseParser);
+
+      const streamEvents = parseSSE(String(streamRes.body));
+      const permEvent = streamEvents.find((e) => e.type === "permission_required");
+      expect(permEvent).toBeDefined();
+      const sessionId = permEvent.sessionId;
+      const toolCallId = permEvent.toolCallId;
+
+      // 2nd call: agent replies with text only — must NOT end the turn here
+      vi.mocked(chatDeepSeekToolStream).mockReturnValueOnce((async function* () {
+        yield {
+          type: "text" as const,
+          text: "The test_routes.py ran and printed some output. Let me read the full output to see if tests passed.",
+        };
+        yield {
+          type: "done" as const,
+          finalText: "The test_routes.py ran and printed some output. Let me read the full output to see if tests passed.",
+          reasoningContent: null,
+          toolCalls: null,
+        };
+      })());
+      // 3rd call: agent continues by reading the cached output
+      vi.mocked(chatDeepSeekToolStream).mockReturnValueOnce((async function* () {
+        yield {
+          type: "done" as const,
+          finalText: null,
+          reasoningContent: null,
+          toolCalls: [{ id: "c2", type: "function" as const, function: { name: "read_command_output", arguments: '{"cmd_id":1}' } }],
+        };
+      })());
+      // 4th call: agent finishes
+      vi.mocked(chatDeepSeekToolStream).mockReturnValueOnce((async function* () {
+        yield {
+          type: "done" as const,
+          finalText: null,
+          reasoningContent: null,
+          toolCalls: [
+            { id: "c3a", type: "function" as const, function: { name: "write_summary", arguments: '{"summary":"### Changes Made\\n- (mock)\\n### Verification\\n- (mock)\\n### Outcome\\n- Read the output and completed."}' } },
+            { id: "c3b", type: "function" as const, function: { name: "task_complete", arguments: "{}" } },
+          ],
+        };
+      })());
+
+      const contRes = await agent
+        .post("/api/chat/agent/stream/continue")
+        .send({ sessionId, toolCallId, permissionGranted: true, toolResult: "[cmd #1] test passed", model: "test-model" })
+        .buffer(true)
+        .parse(sseParser);
+
+      expect(contRes.status).toBe(200);
+      const contEvents = parseSSE(String(contRes.body));
+      // The continue stream must have progressed to read_command_output instead
+      // of ending right after the text-only reply.
+      expect(contEvents.some((e) => e.type === "tool_start" && e.toolName === "read_command_output")).toBe(true);
+      expect(contEvents.some((e) => e.type === "done")).toBe(true);
+    }, 30000);
+  });
 });
