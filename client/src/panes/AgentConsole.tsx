@@ -370,6 +370,10 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
     if (!parentId) return;
     const name = String(evt.toolName || "");
     const isStart = evt.type === "tool_start";
+    // Sub-agent cards render under the delegate_task card with ids like
+    // `${parentId}-sa-<index>`; collect the ones to auto-collapse so they get
+    // the same collapse behaviour as main-agent tool cards (output + code).
+    let toCollapse: string[] = [];
     setMessages((prev) => {
       const next = [...prev];
       const idx = next.findIndex((m) => m.id === parentId);
@@ -381,26 +385,47 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
           { id: String(evt.toolCallId || ""), type: "function", function: { name, arguments: JSON.stringify(evt.toolParams || {}) } },
         ]);
         updated.push({ role: "assistant", name, content, state: "waiting" });
+        // Pre-collapse the code block at card creation, mirroring the main
+        // agent's tool_start handler (collapses `${id}-code`).
+        if (name !== "run_in_terminal") {
+          toCollapse = [`${parentId}-sa-${updated.length - 1}-code`];
+        }
       } else {
         // Mark the matching streaming tool card done. write_todos keeps its
         // tool-call content (the todos live in the arguments); other tools
         // append a tool-result block to mirror the final server trace.
         const result = String(evt.toolResult || "");
         let markedDone = false;
+        let doneIdx = -1;
         for (let i = updated.length - 1; i >= 0; i--) {
           if (updated[i].name === name && updated[i].state === "waiting") {
             updated[i] = { ...updated[i], state: undefined };
             markedDone = true;
+            doneIdx = i;
             break;
           }
         }
-        if (markedDone && name !== "write_todos") {
-          updated.push({ role: "tool", content: result });
+        const collapsed: string[] = [];
+        if (markedDone) {
+          // Auto-collapse the completed card's output + code block, same as
+          // the main agent's tool_end handler.
+          collapsed.push(`${parentId}-sa-${doneIdx}`, `${parentId}-sa-${doneIdx}-code`);
         }
+        if (markedDone && name !== "write_todos") {
+          // The appended result card collapses too (like the main agent's
+          // merged result). run_command / run_in_terminal results are merged
+          // into the call card, so these extra ids are harmless no-ops.
+          updated.push({ role: "tool", content: result });
+          collapsed.push(`${parentId}-sa-${updated.length - 1}`, `${parentId}-sa-${updated.length - 1}-code`);
+        }
+        toCollapse = collapsed;
       }
       next[idx] = { ...next[idx], subAgentMessages: updated };
       return next;
     });
+    if (toCollapse.length > 0) {
+      setCollapsedOutputs((prev) => { const next = new Set(prev); for (const c of toCollapse) next.add(c); return next; });
+    }
   }, []);
   // Deferred destructive file tool: after file auto-executes, diff is shown. User must Accept/Reject before agent continues.
   const deferredToolRef = useRef<{ sessionId: string; toolCallId: string; filePath: string; name: string; originalContent: string | null } | null>(null);
