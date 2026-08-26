@@ -8,7 +8,7 @@
 //
 // Conversation state is held in memory keyed by session id.
 
-import { chatDeepSeekTool, chatDeepSeekToolStream, modelSupportsVision, VISION_MODEL, type DeepSeekApiUsage, type MessageContentPart } from "./deepseek";
+import { chatDeepSeekTool, chatDeepSeekToolStream, VISION_MODEL, type DeepSeekApiUsage, type MessageContentPart } from "./deepseek";
 import { getSnapshotPath } from "./hPaths";
 import { getMemoryContext, getMemoryStore, guessScope, getUserProfileContext } from "./memory";
 import { killSession, getLastCreatedSessionId } from "./terminalManager";
@@ -3012,11 +3012,13 @@ async function* runSubAgentStream(
 }
 
 // The dedicated browser sub-agent does all screenshot observation, so it
-// automatically runs on the vision-capable flash model — no user setup needed.
-// If the user's active model already supports vision, keep it for consistency.
+// always runs on the vision-capable flash model — browser_screenshot images
+// are seen natively with no setup needed.
 export function resolveSubAgentModel(agentType: string | undefined, parentModel?: string): string | undefined {
-  if (agentType === "browser" && !modelSupportsVision(parentModel)) {
-    console.log(`[sub-agent] browser agent auto-uses ${VISION_MODEL} (parent model ${parentModel || "(none)"} is not vision-capable)`);
+  if (agentType === "browser") {
+    if (parentModel !== VISION_MODEL) {
+      console.log(`[sub-agent] browser agent uses ${VISION_MODEL} (parent model ${parentModel || "(none)"})`);
+    }
     return VISION_MODEL;
   }
   return parentModel;

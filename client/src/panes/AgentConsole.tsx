@@ -1401,10 +1401,36 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
     // so runAgent doesn't need `messages` in its dep array (would trigger
     // expensive recreate on every append).
     let seedTodos: { id: string; text: string; status: string; agentMarker?: string }[] | undefined;
+    // True when the previous turn was stopped by the user — i.e. this is the
+    // immediate next turn. Detected via the "Stopped." marker message, which
+    // sits right before the new user message (or is the last message itself).
+    let prevTurnStopped = false;
     setMessages((current) => {
       seedTodos = extractTodosFromMessagesForServer(current);
+      const isStopMarker = (m: ConsoleMessage | undefined) =>
+        !!m && m.role === "system" && typeof m.content === "string" && m.content === "Stopped.";
+      const last = current[current.length - 1];
+      prevTurnStopped = isStopMarker(last)
+        || (!!last && last.role === "user" && isStopMarker(current[current.length - 2]));
       return current;
     });
+
+    // ── IDE reminder for pending tasks after a stopped turn ──
+    // The IDE explicitly reminds the agent of outstanding tasks on the next
+    // turn: a visible system message in the console + a "Pending tasks" block
+    // in the request context (injected into the system prompt).
+    let contextForTurn = fullContext;
+    if (prevTurnStopped) {
+      const pendingReminder = (seedTodos || []).filter((t) => t.status !== "completed" && t.status !== "cancelled");
+      if (pendingReminder.length > 0) {
+        const pendingList = pendingReminder.map((t) => `- [${t.status}] ${t.text}`).join("\n");
+        contextForTurn = `${fullContext}\n\n### ⚠️ Pending tasks (previous turn stopped by the user)\nA previous turn was stopped. These tasks are still pending — continue working on them using write_todos:\n${pendingList}`;
+        push({
+          role: "system",
+          content: `⚠️ Previous turn was stopped — ${pendingReminder.length} task${pendingReminder.length > 1 ? "s" : ""} still pending. Continuing on the next turn.`,
+        });
+      }
+    }
 
     // Register a sub-agent browser tool so the outer while-loop can execute it
     // via the shared browser bridge and then resume the paused sub-agent.
@@ -1458,7 +1484,7 @@ export default function AgentConsole({ goal, onGoalChange, getConsoleContext, re
     };
 
     try {
-      await consumeSSE("/api/chat/agent/stream", { sessionId, message: userMessage, context: fullContext, projectRoot: root, model: selectedModel, latestTodos: seedTodos ?? null }, async (evt) => {
+      await consumeSSE("/api/chat/agent/stream", { sessionId, message: userMessage, context: contextForTurn, projectRoot: root, model: selectedModel, latestTodos: seedTodos ?? null }, async (evt) => {
         if (signal.aborted) return false;
         if (evt.sessionId && evt.sessionId !== sessionId) {
           sessionId = evt.sessionId;
