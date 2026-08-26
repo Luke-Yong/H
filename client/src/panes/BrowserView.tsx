@@ -875,25 +875,46 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
             if (origOnerror) origOnerror.call(win, msg, source, line, col);
           };
 
-          // Intercept alert/confirm/prompt — log to console instead of blocking
-          win.__hDialog = { lastText: "", lastResult: false };
-          const origAlert = win.alert;
+          // Intercept alert/confirm/prompt — block on a server long-poll so the
+          // browser sub-agent can answer them via browser_respond_dialog.
+          // The page freezes until answered (exactly like a real modal), and
+          // auto-dismisses after 2 minutes so it can never hang forever.
+          win.__hDialogAwait = function(type: string, message: string, defaultValue: string): { answered: boolean; value: string } {
+            const id = "d" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+            const start = Date.now();
+            const budget = 120000;
+            const origin = (win.location && win.location.origin) || "";
+            while (Date.now() - start < budget) {
+              let xhr: XMLHttpRequest;
+              try { xhr = new win.XMLHttpRequest(); } catch { break; }
+              try {
+                xhr.open("POST", origin + "/_h-dialog/await", false);
+                xhr.setRequestHeader("Content-Type", "application/json");
+                xhr.send(JSON.stringify({ id, type, message: String(message), defaultValue: String(defaultValue || "") }));
+              } catch { break; }
+              if (xhr.status === 200) {
+                try {
+                  const r = JSON.parse(xhr.responseText);
+                  if (r && r.status === "answered") return { answered: true, value: String(r.value ?? "") };
+                  if (r && r.status === "gone") break;
+                } catch { break; }
+              } else { break; }
+            }
+            return { answered: false, value: "" };
+          };
           win.alert = function(msg: any) {
-            win.__hDialog.lastText = String(msg);
             postEntry("dialog", "[ALERT] " + String(msg));
+            win.__hDialogAwait("alert", String(msg), "");
           };
-          const origConfirm = win.confirm;
           win.confirm = function(msg: any) {
-            win.__hDialog.lastText = String(msg);
-            win.__hDialog.lastResult = false;
-            postEntry("dialog", "[CONFIRM] " + String(msg) + " → auto-dismissed as Cancel");
-            return false;
+            postEntry("dialog", "[CONFIRM] " + String(msg));
+            const r = win.__hDialogAwait("confirm", String(msg), "");
+            return r.answered ? r.value === "true" : false;
           };
-          const origPrompt = win.prompt;
           win.prompt = function(msg: any, def?: string) {
-            win.__hDialog.lastText = String(msg);
-            postEntry("dialog", "[PROMPT] " + String(msg) + " → auto-dismissed (default: " + (def || "") + ")");
-            return def || "";
+            postEntry("dialog", "[PROMPT] " + String(msg) + (def ? " (default: " + def + ")" : ""));
+            const r = win.__hDialogAwait("prompt", String(msg), def || "");
+            return r.answered ? r.value : (def || "");
           };
 
           // PerformanceObserver: capture failed network requests (4xx/5xx/CORS)
@@ -1233,6 +1254,37 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
       if(!m){m=document.createElement('meta');m.setAttribute('name','viewport');(document.head||document.documentElement).appendChild(m);}
       m.setAttribute('content','width=${viewportWidth},height=${viewportHeight},initial-scale=1');
       if(window.__hPatched)return;window.__hPatched=true;
+      // Intercept alert/confirm/prompt — block on a server long-poll so the
+      // browser sub-agent can answer them via browser_respond_dialog. The page
+      // freezes until answered, and auto-dismisses after 2 minutes.
+      window.__hDialogAwait=function(type,message,defaultValue){
+        var id='d'+Date.now().toString(36)+Math.random().toString(36).slice(2,8);
+        var start=Date.now();var budget=120000;
+        var origin=(window.location&&window.location.origin)||'';
+        while(Date.now()-start<budget){
+          var xhr=null;
+          try{xhr=new XMLHttpRequest()}catch(e){break}
+          try{xhr.open('POST',origin+'/_h-dialog/await',false);xhr.setRequestHeader('Content-Type','application/json');xhr.send(JSON.stringify({id:id,type:type,message:String(message),defaultValue:String(defaultValue||'')}))}catch(e){break}
+          if(xhr.status===200){
+            try{var r=JSON.parse(xhr.responseText);if(r&&r.status==='answered')return{answered:true,value:String(r.value||'')};if(r&&r.status==='gone')break}catch(e){break}
+          }else{break}
+        }
+        return{answered:false,value:''};
+      };
+      window.alert=function(msg){
+        console.log('[DIALOG] [ALERT] '+String(msg));
+        window.__hDialogAwait('alert',String(msg),'');
+      };
+      window.confirm=function(msg){
+        console.log('[DIALOG] [CONFIRM] '+String(msg));
+        var r=window.__hDialogAwait('confirm',String(msg),'');
+        return r.answered?(r.value==='true'):false;
+      };
+      window.prompt=function(msg,def){
+        console.log('[DIALOG] [PROMPT] '+String(msg)+(def?' (default: '+def+')':''));
+        var r=window.__hDialogAwait('prompt',String(msg),def||'');
+        return r.answered?r.value:(def||'');
+      };
       // Signal parent when DOM structure changes (parent reads tree via executeJavaScript)
       var _t=null;
       try{

@@ -18,6 +18,7 @@ import { execSync } from "child_process";
 import { getFileTrackingService } from "./fileTracking";
 import { API_KEYS_FILE, CLIENT_STATE_FILE } from "./hPaths";
 import { encryptApiKeys, decryptApiKeys } from "./cryptoStore";
+import { awaitBrowserDialogAnswer } from "./browserDialogs";
 
 const app = express();
 const server = createServer(app);
@@ -2352,6 +2353,22 @@ function resolveProjectRoot(): string {
   return path.resolve(dir, "..");
 }
 const PROJECT_ROOT = resolveProjectRoot();
+
+// ── Pending browser dialog long-poll ──
+// The in-page alert/confirm/prompt interceptor (BrowserView.tsx) POSTs here via
+// a same-origin synchronous XHR and blocks the page until the browser sub-agent
+// answers with browser_respond_dialog. Registering before the SPA catch-all and
+// the /_browser proxy below so it always takes precedence.
+app.post("/_h-dialog/await", async (req, res) => {
+  const body = req.body || {};
+  const id = typeof body.id === "string" && body.id ? body.id : "";
+  if (!id) return res.status(400).json({ error: "missing dialog id" });
+  const type = body.type === "prompt" || body.type === "confirm" || body.type === "alert" ? body.type : "alert";
+  const message = typeof body.message === "string" ? body.message : "";
+  const defaultValue = typeof body.defaultValue === "string" ? body.defaultValue : "";
+  const result = await awaitBrowserDialogAnswer(id, type, message, defaultValue);
+  res.json(result);
+});
 
 // ── Serve client (desktop / production) ──
 const clientDist = path.join(PROJECT_ROOT, "client", "dist");

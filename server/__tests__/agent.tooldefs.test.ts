@@ -74,6 +74,8 @@ describe("Tool definitions - Schema validation", () => {
     expect(names).toContain("browser_console");
     expect(names).toContain("browser_request_errors");
     expect(names).toContain("browser_info");
+    expect(names).toContain("browser_get_dialog");
+    expect(names).toContain("browser_respond_dialog");
 
     // Diagnostics
     expect(names).toContain("read_problems");

@@ -926,6 +926,9 @@ Agent calls run_in_terminal
 | `browser_move_mouse` | **Sub-agent only** | Move the cursor to x,y — triggers hover effects without clicking |
 | `browser_right_click` | **Sub-agent only** | Right-click at x,y — dispatches contextmenu event |
 | `browser_upload_file` | **Sub-agent only** | Set files on a file input by absolute paths |
+| **Dialogs** |||
+| `browser_get_dialog` | Sub-agent only | Check if the page is blocked on a JavaScript dialog (alert/confirm/prompt). Returns the pending dialog's id, type, and message. |
+| `browser_respond_dialog` | Sub-agent only | Answer a pending dialog so the blocked page continues: `accept=true/false` for confirm, `value` for prompt text. The page auto-dismisses as Cancel after 2 minutes if unanswered. |
 
 ### Diagnostics
 
@@ -1063,7 +1066,7 @@ Parent resumes ← result pushed to parent's state.messages
 
 | Profile | Tools | Iterations | Description |
 |---------|-------|-----------|-------------|
-| `browser` | `browser_navigate`, `browser_info`, `browser_screenshot`, `browser_get_dom`, `browser_click`, `browser_type`, `browser_clear`, `browser_select`, `browser_press_key`, `browser_console`, `browser_request_errors`, `browser_scroll`, `browser_wait`, `browser_move_mouse`, `browser_right_click`, `browser_upload_file` | 100 | Full browser automation — unlimited turns for intensive testing. Navigates, clicks, types, scrolls, fills forms, inspects DOM/console/network. |
+| `browser` | `browser_navigate`, `browser_info`, `browser_screenshot`, `browser_get_dom`, `browser_click`, `browser_type`, `browser_clear`, `browser_select`, `browser_press_key`, `browser_console`, `browser_request_errors`, `browser_scroll`, `browser_wait`, `browser_move_mouse`, `browser_right_click`, `browser_upload_file`, `browser_get_dialog`, `browser_respond_dialog` | 100 | Full browser automation — unlimited turns for intensive testing. Navigates, clicks, types, scrolls, fills forms, inspects DOM/console/network, and answers blocked alert/confirm/prompt dialogs. |
 | `code-search` | `read_file`, `list_files`, `search_files`, `grep`, `read_graph` | 20 | Read-only code exploration. Finds files, reads code, reports findings. Never edits. |
 | `code-writer` | Full filesystem + `run_command`, `read_problems`, `read_graph` | 50 | Implements features or fixes bugs. Reads, edits, builds, and verifies. |
 | `researcher` | `read_file`, `list_files`, `search_files`, `grep`, `run_command`, `read_graph` | 25 | Explores codebase to answer questions. Reports with file paths and line numbers. |

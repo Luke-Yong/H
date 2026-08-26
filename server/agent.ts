@@ -14,6 +14,7 @@ import { getMemoryContext, getMemoryStore, guessScope, getUserProfileContext } f
 import { killSession, getLastCreatedSessionId } from "./terminalManager";
 import { getDiagnosticsForRoot } from "./lsp";
 import { canParseExports } from "./knowledgeGraph";
+import { getBrowserDialog, getLatestPendingBrowserDialog, respondToBrowserDialog } from "./browserDialogs";
 import fs from "fs";
 import path from "path";
 import os from "os";
@@ -123,6 +124,7 @@ export const SUB_AGENT_PROFILES: Record<string, SubAgentConfig> = {
       "browser_click", "browser_type", "browser_clear", "browser_select",
       "browser_console", "browser_request_errors", "browser_scroll", "browser_wait",
       "browser_press_key", "browser_move_mouse", "browser_right_click", "browser_upload_file",
+      "browser_get_dialog", "browser_respond_dialog",
       "write_todos",
     ],
     headless: false,
@@ -152,6 +154,7 @@ export const SUB_AGENT_PROFILES: Record<string, SubAgentConfig> = {
 - Use browser_move_mouse to hover at x,y; use browser_right_click for context menus.
 - Use browser_upload_file to upload files to an <input type=file> by INDEX.
 - Use browser_console / browser_request_errors to check for errors.
+- If a page is blocked on an alert/confirm/prompt (browser_get_dialog returns a pending dialog, or browser_console shows [DIALOG] entries), answer it with browser_respond_dialog: accept=true for OK, accept=false for Cancel, value=<text> for prompt input. The page stays frozen until the dialog is answered, so answer it before trying to screenshot or click again.
 - Update write_todos as you complete each step.
 - After analyzing, return a structured report in plain text: URL, title, key content, what you clicked/typed, results observed, any errors. Do NOT call task_complete or write_summary.`,
   },
@@ -680,8 +683,36 @@ export const TOOLS: ToolDef[] = [
       "Get the last 50 console entries (log, warn, error, dialog) from the page. "
       + "Use this to check for JavaScript errors, warnings, or debug output. "
       + "Also captures alert/confirm/prompt dialogs as [DIALOG] entries. "
+      + "If a dialog is blocking the page, answer it with browser_respond_dialog. "
       + "Returns one entry per line in [LEVEL] text format.",
     parameters: { type: "object", properties: {}, required: [] },
+  },
+  {
+    name: "browser_get_dialog",
+    description:
+      "Check if the page is currently blocked on a JavaScript dialog (alert/confirm/prompt). "
+      + "If one is pending, returns its id, type, and message. The page is frozen until the dialog is answered "
+      + "(it cannot render or respond to clicks/types while blocked). "
+      + "Answer it with browser_respond_dialog, or leave it — it auto-dismisses as Cancel after 2 minutes.",
+    parameters: { type: "object", properties: {}, required: [] },
+  },
+  {
+    name: "browser_respond_dialog",
+    description:
+      "Answer a pending JavaScript dialog (alert/confirm/prompt) so the blocked page can continue. "
+      + "Call browser_get_dialog first to see what is pending. "
+      + "For confirm: set accept=true (OK) or accept=false (Cancel). "
+      + "For prompt: set value to the text to return as the prompt result (defaults to the dialog's default value). "
+      + "If id is omitted, answers the most recent pending dialog.",
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Dialog id from browser_get_dialog. Omit to answer the most recent pending dialog." },
+        accept: { type: "boolean", description: "For confirm dialogs: true = OK, false = Cancel. Ignored for alert/prompt." },
+        value: { type: "string", description: "For prompt dialogs: the text to return. For confirm: 'true' or 'false'." },
+      },
+      required: [],
+    },
   },
   {
     name: "browser_request_errors",
@@ -2883,6 +2914,43 @@ function isBrowserTool(name: string): boolean {
   return BROWSER_TOOLS.has(name);
 }
 
+// Browser dialog tools are answered server-side (the page blocks on a long-poll
+// to the Express server), so they are deliberately NOT in BROWSER_TOOLS — the
+// renderer never needs to execute them.
+function runBrowserDialogTool(fnName: string, params: Record<string, unknown>): string {
+  if (fnName === "browser_get_dialog") {
+    const d = getLatestPendingBrowserDialog();
+    if (!d) return "No pending browser dialog. The page is not blocked on an alert/confirm/prompt.";
+    let msg = `Pending browser dialog: id=${d.id}, type=${d.type}, message="${d.message}"`;
+    if (d.type === "prompt") msg += `, defaultValue="${d.defaultValue}"`;
+    msg += `. Answer it with browser_respond_dialog (id="${d.id}").`;
+    return msg;
+  }
+  if (fnName === "browser_respond_dialog") {
+    const id = typeof params.id === "string" && params.id ? String(params.id) : undefined;
+    const d = id ? getBrowserDialog(id) : getLatestPendingBrowserDialog();
+    if (!d) {
+      return "Error: no pending browser dialog to respond to."
+        + (id ? ` No dialog with id "${id}".` : " Use browser_get_dialog to find one.")
+        + " The page may have auto-dismissed it after 2 minutes.";
+    }
+    let value: string;
+    if (d.type === "confirm") {
+      value = typeof params.value === "string"
+        ? (params.value === "true" ? "true" : "false")
+        : (params.accept === true ? "true" : "false");
+    } else if (d.type === "prompt") {
+      value = typeof params.value === "string" ? params.value : d.defaultValue;
+    } else {
+      value = "";
+    }
+    const result = respondToBrowserDialog(d.id, value);
+    if ("error" in result) return `Error: ${result.error}`;
+    return `Answered browser dialog ${d.id} (${d.type}) with ${JSON.stringify(value)}. The page will now continue.`;
+  }
+  return `Unknown browser dialog tool: ${fnName}`;
+}
+
 // Streaming sub-agent: yields tool_start/tool_end events for live UI.
 // Returns a SubAgentResult when complete (done or browser_tool pause).
 async function* runSubAgentStream(
@@ -2992,6 +3060,10 @@ async function* runSubAgentStream(
         const diag = await runReadProblems(subState.projectRoot);
         subState.messages.push({ role: "tool", content: diag.summary, tool_call_id: tc.id });
         yield { type: "tool_end", toolName: fnName, toolCallId: tc.id, toolResult: diag.summary, agentMarker } as SubAgentStreamEvent;
+      } else if (fnName === "browser_get_dialog" || fnName === "browser_respond_dialog") {
+        const result = runBrowserDialogTool(fnName, params);
+        subState.messages.push({ role: "tool", content: result, tool_call_id: tc.id });
+        yield { type: "tool_end", toolName: fnName, toolCallId: tc.id, toolResult: result, agentMarker } as SubAgentStreamEvent;
       } else if (fnName === "task_complete") {
         const notAllowed = `Tool "${fnName}" is not available to sub-agents. Return your final report as plain text instead.`;
         subState.messages.push({ role: "tool", content: notAllowed, tool_call_id: tc.id });
@@ -3136,6 +3208,9 @@ async function runSubAgent(
       } else if (fnName === "read_problems") {
         const diag = await runReadProblems(subState.projectRoot);
         subState.messages.push({ role: "tool", content: diag.summary, tool_call_id: tc.id });
+      } else if (fnName === "browser_get_dialog" || fnName === "browser_respond_dialog") {
+        const result = runBrowserDialogTool(fnName, params);
+        subState.messages.push({ role: "tool", content: result, tool_call_id: tc.id });
       } else if (fnName === "task_complete") {
         const notAllowed = `Tool "${fnName}" is not available to sub-agents. Return your final report as plain text instead.`;
         subState.messages.push({ role: "tool", content: notAllowed, tool_call_id: tc.id });
@@ -3262,6 +3337,9 @@ export async function resumeSubAgent(
       } else if (fnName === "read_problems") {
         const diag = await runReadProblems(subState.projectRoot);
         subState.messages.push({ role: "tool", content: diag.summary, tool_call_id: tc.id });
+      } else if (fnName === "browser_get_dialog" || fnName === "browser_respond_dialog") {
+        const result = runBrowserDialogTool(fnName, params);
+        subState.messages.push({ role: "tool", content: result, tool_call_id: tc.id });
       } else if (fnName === "task_complete") {
         const notAllowed = `Tool "${fnName}" is not available to sub-agents. Return your final report as plain text instead.`;
         subState.messages.push({ role: "tool", content: notAllowed, tool_call_id: tc.id });
