@@ -260,7 +260,7 @@ app.post("/api/chat/agent/continue", async (req, res) => {
       });
       state.messages.push({ role: "tool", content: resultText, tool_call_id: psa.parentToolCallId });
       // Continue the parent agent loop
-      broadcast({ type: "agent_tool_result", data: { sessionId, toolCallId: psa.parentToolCallId, toolResult: resultText.slice(0, 500) } });
+      broadcast({ type: "agent_tool_result", data: { sessionId, toolCallId: psa.parentToolCallId, toolResult: resultText.slice(0, 4000) } });
       const result = await agentLoop(projectRoot || state.projectRoot, state, "", { model, apiKey });
       if (result.phase === "tool_needed") {
         broadcast({ type: "agent_tool", data: { sessionId, tool: result.tool, executedTools: result.executedTools } });
@@ -548,7 +548,7 @@ app.post("/api/chat/agent/stream/continue", async (req, res) => {
         ...(psa.parentReasoning ? { reasoning_content: psa.parentReasoning } : {}),
       });
       state.messages.push({ role: "tool", content: resultText, tool_call_id: psa.parentToolCallId });
-      broadcast({ type: "agent_tool_result", data: { sessionId, toolCallId: psa.parentToolCallId, toolResult: resultText.slice(0, 500) } });
+      broadcast({ type: "agent_tool_result", data: { sessionId, toolCallId: psa.parentToolCallId, toolResult: resultText.slice(0, 4000) } });
 
       // SSE headers
       res.writeHead(200, {

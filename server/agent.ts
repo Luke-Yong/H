@@ -133,8 +133,10 @@ export const SUB_AGENT_PROFILES: Record<string, SubAgentConfig> = {
 - BEFORE starting, call write_todos to break the task into steps: navigate, inspect, interact, verify.
 - Use browser_navigate to go to a URL (http/https only).
 - Use browser_info to check the current URL and page title.
-- Use browser_screenshot to SEE the page. You run on a vision-capable model, so the result is the actual page image plus a short header (URL, title, and 'Screenshot: WxH' image size). Use the image to assess visual layout, styling, spacing, and on-screen UI state. The header's 'Screenshot: WxH' line defines the coordinate space — all x,y you pass to interaction tools are in the screenshot image's pixel space.
+- Use browser_screenshot to SEE the page. You run on a vision-capable model, so the result is the actual page image plus a short header (URL, title, and 'Screenshot: WxH' image size). The image has a coordinate grid overlaid — read the axis labels (every 100px) to determine exact pixel positions. All x,y you pass to interaction tools are in the screenshot image's pixel space.
 - Interact by pointing at what you see in the screenshot: browser_click x,y; browser_type x,y text; browser_clear x,y; browser_select x,y value/label; browser_right_click x,y; browser_move_mouse x,y for hover effects.
+- Aim at the CENTER of the element you want. browser_click reports the element actually clicked (e.g. "<button> \"Sign In\"") — if it is not the element you intended, re-screenshot and adjust the coordinates before clicking again.
+- ALWAYS verify: after any click, take a fresh browser_screenshot to confirm the page responded. If nothing changed, the page may have shifted or a modal/overlay may cover the target — re-screenshot and click again, or click the element's center precisely.
 - NEVER try view-source:, reading document.documentElement.outerHTML, or fetching raw HTML — there is no such tool; you interact through the pixel screenshot only.
 - Take a fresh browser_screenshot after any click/type/scroll/navigation before the next interaction — the page changed under you.
 - Use browser_scroll to reveal content below the fold, then screenshot again.
@@ -714,8 +716,10 @@ export const TOOLS: ToolDef[] = [
   {
     name: "browser_click",
     description:
-      "Click at viewport x,y coordinates of an element you see in the page screenshot. "
-      + "Coordinates are in the pixel space of the last browser_screenshot image (see its 'Screenshot: WxH' line). "
+      "Click the element you see at screenshot-image x,y coordinates. "
+      + "Aim at the CENTER of the element. Coordinates are in the pixel space of the last browser_screenshot "
+      + "(see its 'Screenshot: WxH' line). The click snaps to the nearest interactive element and reports what "
+      + "was clicked — if it is not the element you intended, re-screenshot and click again. "
       + "Take a fresh browser_screenshot after any click/scroll/navigation before choosing new coordinates.",
     parameters: {
       type: "object",
@@ -2819,10 +2823,14 @@ function buildOpenAiMessagesForSubAgent(
 
 function summarizeSubAgentResult(rawResult: string, agentName: string): string {
   const lines = rawResult.split("\n").filter(Boolean);
+  // Keep the opening lines, the significant middle (files/changes/errors), and
+  // the trailing conclusion lines — sub-agent reports (especially browser
+  // reports) put their outcome at the end, which used to get dropped.
   const importantLines = lines.filter((l, i) =>
-    i < 3 || /(file|change|error|fix|wrote|edited|created|deleted|found|modified)/i.test(l),
+    i < 3 || i >= lines.length - 5
+    || /(file|change|error|fix|wrote|edited|created|deleted|found|modified|result|success|fail)/i.test(l),
   );
-  const summary = importantLines.slice(0, 15).join("\n");
+  const summary = importantLines.slice(0, 60).join("\n");
   if (summary.length < rawResult.length) return `${summary}\n... (full: ${lines.length} lines)`;
   return summary;
 }

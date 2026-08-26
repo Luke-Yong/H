@@ -108,6 +108,67 @@ type BrowserGuest = HTMLElement & {
   getWebContentsId?: () => number;
 };
 
+// Injected into the guest page to resolve a click/type coordinate to the
+// nearest interactive element (then snap to its center). This absorbs both the
+// small coordinate errors a vision model makes AND CSS-zoom / meta-viewport /
+// devicePixelRatio scaling between the screenshot and the page's layout space.
+// `hResolveTarget` matches the click point against interactive elements'
+// getBoundingClientRect boxes over a range of scale factors — getBoundingClientRect
+// is the one coordinate space that stays consistent under CSS zoom, whereas
+// elementFromPoint does not. `hElLabel` renders a short "<tag#id.cls> \"label\""
+// description used in tool results so the agent can verify its click.
+const PAGE_TARGET_HELPERS = `
+const hResolveTarget = function(px, py, priorScale) {
+  const INTERACTIVE = 'a[href], button, input, select, textarea, summary, label, [role="button"], [role="link"], [role="menuitem"], [role="tab"], [role="checkbox"], [role="radio"], [role="switch"], [role="option"], [contenteditable="true"], [tabindex], [onclick]';
+  const rects = [];
+  const all = document.querySelectorAll(INTERACTIVE);
+  for (let i = 0; i < all.length && rects.length < 800; i++) {
+    const el = all[i];
+    const r = el.getBoundingClientRect();
+    if (r && r.width > 0 && r.height > 0) {
+      rects.push({ el: el, left: r.left, top: r.top, right: r.right, bottom: r.bottom });
+    }
+  }
+  if (rects.length > 0) {
+    // Screenshot pixel -> page layout pixel scale. Anchored at the ratio from
+    // the captured image size / guest viewport, then widened to absorb zoom and
+    // DPR differences. The true scale is where the click point falls on (or
+    // nearest to) the intended element's rect.
+    const base = (typeof priorScale === 'number' && priorScale > 0) ? priorScale : 1;
+    let best = null, bestDist = Infinity, bestS = base;
+    for (let k = -10; k <= 10; k++) {
+      const S = base * Math.pow(2, k / 4);
+      const mx = px * S, my = py * S;
+      for (let j = 0; j < rects.length; j++) {
+        const t = rects[j];
+        const dx = mx < t.left ? t.left - mx : (mx > t.right ? mx - t.right : 0);
+        const dy = my < t.top ? t.top - my : (my > t.bottom ? my - t.bottom : 0);
+        const d = dx * dx + dy * dy;
+        if (d < bestDist) { bestDist = d; best = t; bestS = S; }
+      }
+    }
+    if (best && bestDist <= 250 * 250) {
+      return { el: best.el, via: 'nearest', hit: null, scale: bestS };
+    }
+  }
+  const hit = document.elementFromPoint(px, py);
+  return { el: hit || document.body, via: 'point', hit: hit, scale: 1 };
+};
+const hElLabel = function(el) {
+  if (!el) return '<none>';
+  const tag = el.tagName ? el.tagName.toLowerCase() : 'unknown';
+  const id = el.id ? '#' + el.id : '';
+  let cls = '';
+  if (el.className && typeof el.className === 'string') {
+    const c = el.className.trim().split(' ').filter(Boolean).slice(0, 2).join('.');
+    if (c) cls = '.' + c;
+  }
+  const raw = (el.value != null && String(el.value) !== '' ? String(el.value) : (el.textContent || ''));
+  const txt = String(raw).trim().split(' ').filter(Boolean).join(' ').slice(0, 50);
+  return '<' + tag + id + cls + '>' + (txt ? ' "' + txt + '"' : '');
+};
+`;
+
 function isUrlLike(input: string): boolean {
   if (!input.trim()) return false;
   if (/^https?:\/\//i.test(input)) return true;
@@ -116,6 +177,55 @@ function isUrlLike(input: string): boolean {
   if (/^\[.*\]/.test(input)) return true;
   if (input.includes(".") && !input.includes(" ")) return true;
   return false;
+}
+
+// Draw a coordinate grid over a screenshot data URL so the vision model can
+// read pixel positions off the image instead of estimating them. Axis labels
+// along the top and left every 100px; faint minor lines every 50px. The
+// returned image keeps the same pixel size, so coordinate mapping is unchanged.
+function addCoordinateGrid(dataUrl: string, w: number, h: number): Promise<string> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) { resolve(dataUrl); return; }
+        ctx.drawImage(img, 0, 0, w, h);
+
+        // Minor grid every 50px, major every 100px.
+        ctx.lineWidth = 1;
+        for (let x = 50; x < w; x += 50) {
+          ctx.strokeStyle = x % 100 === 0 ? "rgba(0,0,0,0.55)" : "rgba(0,0,0,0.18)";
+          ctx.beginPath(); ctx.moveTo(x + 0.5, 0); ctx.lineTo(x + 0.5, h); ctx.stroke();
+        }
+        for (let y = 50; y < h; y += 50) {
+          ctx.strokeStyle = y % 100 === 0 ? "rgba(0,0,0,0.55)" : "rgba(0,0,0,0.18)";
+          ctx.beginPath(); ctx.moveTo(0, y + 0.5); ctx.lineTo(w, y + 0.5); ctx.stroke();
+        }
+        // Axis labels every 100px (halo for readability on any background).
+        ctx.font = "9px monospace";
+        ctx.textBaseline = "top";
+        const label = (s: string, x: number, y: number) => {
+          ctx.fillStyle = "rgba(255,255,255,0.9)";
+          ctx.fillText(s, x + 1, y + 1);
+          ctx.fillText(s, x + 2, y + 2);
+          ctx.fillStyle = "rgba(0,0,0,0.9)";
+          ctx.fillText(s, x + 1, y + 1);
+        };
+        for (let x = 0; x <= w - 100; x += 100) label(String(x), x + 3, 3);
+        for (let y = 100; y <= h - 50; y += 100) label(String(y), 3, y + 3);
+
+        resolve(canvas.toDataURL("image/png"));
+      } catch {
+        resolve(dataUrl);
+      }
+    };
+    img.onerror = () => resolve(dataUrl);
+    img.src = dataUrl;
+  });
 }
 
 function isHttps(url: string): boolean {
@@ -1619,15 +1729,17 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
 
   const typeIntoElement = useCallback(async (x: number, y: number, text: string) => {
     const { x: vx, y: vy } = scaleToViewport(x, y);
+    const c = lastCaptureRef.current;
+    const priorScale = c && c.imageW > 0 && c.viewportW > 0 ? c.viewportW / c.imageW : 1;
     const result = await evalInPage(`
       (() => {
-        const hit = document.elementFromPoint(${vx}, ${vy});
-        if (!hit) return 'no element at (${vx},${vy}) — re-screenshot and pick visible coordinates';
-        const field = hit.closest ? (hit.closest('input, textarea, [contenteditable="true"]') || hit) : hit;
+        ${PAGE_TARGET_HELPERS}
+        const res = hResolveTarget(${vx}, ${vy}, ${priorScale});
+        const field = res.el;
         const tag = field.tagName ? field.tagName.toLowerCase() : '';
         const editable = tag === 'input' || tag === 'textarea' || field.isContentEditable === true;
         if (!editable) {
-          return 'element at (${vx},${vy}) is <' + tag + '> — not a text field. Re-screenshot and click directly on the input you see in the image.';
+          return 'no text field near (' + ${vx} + ',' + ${vy} + ') — found ' + hElLabel(field) + '. Re-screenshot and click directly on the input you see in the image.';
         }
 
         // Click the field first — reactive frameworks (React/Vue) need real mouse events
@@ -1728,7 +1840,9 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     if (!url) {
       url = await evalInPage(`
       (() => {
-        const MAX_W = 1280, MAX_H = 1024, MAX_CSS = 150000, MAX_IMGS = 24, MAX_HTML = 600000;
+        // Cap at 1024x1024 so vision APIs don't downscale the image further:
+        // the coordinates the model reports then match the screenshot 1:1.
+        const MAX_W = 1024, MAX_H = 1024, MAX_CSS = 150000, MAX_IMGS = 24, MAX_HTML = 600000;
         const vw = Math.min(document.documentElement.clientWidth || window.innerWidth || 1280, MAX_W);
         const vh = Math.min(window.innerHeight || document.documentElement.clientHeight || 800, MAX_H);
 
@@ -1918,7 +2032,11 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
       const m = String(vs || "").match(/^(\d+)x(\d+)$/);
       if (m) { viewportW = Number(m[1]); viewportH = Number(m[2]); }
       lastCaptureRef.current = { imageW: size.w, imageH: size.h, viewportW, viewportH };
-      return { url, imageW: size.w, imageH: size.h };
+      // Overlay a coordinate grid so the vision model can read pixel positions
+      // off the image instead of guessing them. Same pixel size, so the
+      // image→viewport mapping is unchanged.
+      const gridUrl = await addCoordinateGrid(url, size.w, size.h);
+      return { url: gridUrl, imageW: size.w, imageH: size.h };
     }
     return { url, imageW: 0, imageH: 0 };
   }, [evalInPage, getWebview]);
@@ -2010,14 +2128,33 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   // ── Coordinate-based mouse ──
   // Uses enhanced event properties (pointerId, pointerType, button, buttons) so that
   // React/Vue and other frameworks properly recognize the synthetic events.
+  // Clicks/right-clicks snap to the nearest interactive element's center so the
+  // vision model's small coordinate errors don't cause misses.
   const mouseEvent = useCallback(async (x: number, y: number, eventType: string): Promise<string> => {
+    // Anchor scale: captured image width / guest viewport width. hResolveTarget
+    // searches around this to absorb CSS-zoom / meta-viewport / DPR scaling.
+    const c = lastCaptureRef.current;
+    const priorScale = c && c.imageW > 0 && c.viewportW > 0 ? c.viewportW / c.imageW : 1;
     return evalInPage(`
       (() => {
-        const el = document.elementFromPoint(${x}, ${y});
-        const target = el || document.body;
-        const mouseOpts = { clientX: ${x}, clientY: ${y}, screenX: ${x}, screenY: ${y}, bubbles: true, cancelable: true, button: 0, buttons: 1, view: window };
-        const pointerOpts = { clientX: ${x}, clientY: ${y}, screenX: ${x}, screenY: ${y}, bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', button: 0, buttons: 1, view: window };
+        ${PAGE_TARGET_HELPERS}
+        const px = ${x}, py = ${y};
+        const res = hResolveTarget(px, py, ${priorScale});
+        const target = res.el;
+        // Click/contextmenu: aim at the resolved element's center. Hover stays
+        // at the exact point (hover effects depend on the precise position).
+        let dx = px, dy = py;
+        if (${JSON.stringify(eventType)} !== 'move') {
+          const rect = target.getBoundingClientRect();
+          if (rect && rect.width > 0 && rect.height > 0) {
+            dx = Math.max(0, Math.min(rect.left + rect.width / 2, window.innerWidth - 1));
+            dy = Math.max(0, Math.min(rect.top + rect.height / 2, window.innerHeight - 1));
+          }
+        }
+        const mouseOpts = { clientX: dx, clientY: dy, screenX: dx, screenY: dy, bubbles: true, cancelable: true, button: 0, buttons: 1, view: window };
+        const pointerOpts = { clientX: dx, clientY: dy, screenX: dx, screenY: dy, bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', button: 0, buttons: 1, view: window };
         if (${JSON.stringify(eventType)} === 'click') {
+          try { if (typeof target.focus === 'function') target.focus(); } catch(_) {}
           target.dispatchEvent(new PointerEvent('pointerdown', pointerOpts));
           target.dispatchEvent(new MouseEvent('mousedown', mouseOpts));
           target.dispatchEvent(new PointerEvent('pointerup', pointerOpts));
@@ -2025,17 +2162,18 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
           target.dispatchEvent(new MouseEvent('click', mouseOpts));
           // Fallback: native click() for handlers that require isTrusted
           try { target.click(); } catch(_) {}
+          return 'clicked ' + hElLabel(target);
         } else if (${JSON.stringify(eventType)} === 'contextmenu') {
           target.dispatchEvent(new PointerEvent('pointerdown', pointerOpts));
           target.dispatchEvent(new MouseEvent('mousedown', { ...mouseOpts, button: 2, buttons: 2 }));
           target.dispatchEvent(new MouseEvent('contextmenu', mouseOpts));
           target.dispatchEvent(new MouseEvent('mouseup', { ...mouseOpts, button: 2, buttons: 0 }));
-        } else if (${JSON.stringify(eventType)} === 'move') {
+          return 'right-clicked ' + hElLabel(target);
+        } else {
           target.dispatchEvent(new MouseEvent('mousemove', mouseOpts));
           target.dispatchEvent(new PointerEvent('pointermove', pointerOpts));
+          return 'hovered on ' + hElLabel(target);
         }
-        const tag = target.tagName ? target.tagName.toLowerCase() : 'unknown';
-        return ${JSON.stringify(eventType)} + ' at (' + ${x} + ',' + ${y} + ') on <' + tag + '>';
       })()
     `);
   }, [evalInPage]);
@@ -2043,17 +2181,29 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   const clickCoords = useCallback(async (x: number, y: number): Promise<string> => {
     const { x: vx, y: vy } = scaleToViewport(x, y);
     const result = await mouseEvent(vx, vy, "click");
-    return handleNavigationError(result, "click at (" + x + "," + y + ")");
+    const finalResult = await handleNavigationError(result, "click at (" + x + "," + y + ")");
+    // Give the page a moment to process the click (framework state updates,
+    // navigation, re-renders) before the agent's verification screenshot —
+    // mirrors the old index-based click behavior. Without this, the screenshot
+    // taken right after shows a stale page and looks like a failed click.
+    if (finalResult.startsWith("clicked")) {
+      await new Promise((r) => setTimeout(r, 400));
+    }
+    // Report the screenshot-image coordinates the agent chose (not the scaled
+    // viewport ones) plus which element was actually clicked.
+    return finalResult.startsWith("clicked") ? `click at (${x},${y}): ${finalResult}` : finalResult;
   }, [mouseEvent, handleNavigationError, scaleToViewport]);
 
   const moveMouse = useCallback(async (x: number, y: number): Promise<string> => {
     const { x: vx, y: vy } = scaleToViewport(x, y);
-    return mouseEvent(vx, vy, "move");
+    const result = await mouseEvent(vx, vy, "move");
+    return `hover at (${x},${y}): ${result}`;
   }, [mouseEvent, scaleToViewport]);
 
   const rightClick = useCallback(async (x: number, y: number): Promise<string> => {
     const { x: vx, y: vy } = scaleToViewport(x, y);
-    return mouseEvent(vx, vy, "contextmenu");
+    const result = await mouseEvent(vx, vy, "contextmenu");
+    return `right-click at (${x},${y}): ${result}`;
   }, [mouseEvent, scaleToViewport]);
 
   const scrollPage = useCallback(async (x: number, y: number, to?: string): Promise<string> => {
@@ -2158,14 +2308,16 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
 
   const selectOption = useCallback(async (x: number, y: number, value?: string, label?: string): Promise<string> => {
     const { x: vx, y: vy } = scaleToViewport(x, y);
+    const c = lastCaptureRef.current;
+    const priorScale = c && c.imageW > 0 && c.viewportW > 0 ? c.viewportW / c.imageW : 1;
     const v = value != null ? JSON.stringify(value) : "null";
     const l = label != null ? JSON.stringify(label) : "null";
     return evalInPage(`
       (() => {
-        const hit = document.elementFromPoint(${vx}, ${vy});
-        if (!hit) return 'no element at (${vx},${vy}) — re-screenshot and pick visible coordinates';
-        const el = hit.closest ? (hit.closest('select') || hit) : hit;
-        if (el.tagName !== 'SELECT') return 'element at (${vx},${vy}) is <' + el.tagName.toLowerCase() + '>, not a <select>. For custom dropdowns (not native <select>), use browser_click on the trigger, wait, then screenshot and browser_click the desired option.';
+        ${PAGE_TARGET_HELPERS}
+        const res = hResolveTarget(${vx}, ${vy}, ${priorScale});
+        const el = res.el;
+        if (el.tagName !== 'SELECT') return 'no <select> near (' + ${vx} + ',' + ${vy} + ') — found ' + hElLabel(el) + '. For custom dropdowns (not native <select>), use browser_click on the trigger, wait, then screenshot and browser_click the desired option.';
         const sel = el;
 
         // Click to activate — enhanced properties for framework compatibility

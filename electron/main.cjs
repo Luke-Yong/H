@@ -958,7 +958,9 @@ function registerIpc() {
       let image = await wc.capturePage();
       if (!image || image.isEmpty()) return null;
       const size = image.getSize();
-      const scale = Math.min(1, 1280 / (size.width || 1), 1024 / (size.height || 1));
+      // Cap at 1024x1024 so vision APIs don't downscale the image further:
+      // the coordinates the model reports then match the screenshot pixels 1:1.
+      const scale = Math.min(1, 1024 / (size.width || 1), 1024 / (size.height || 1));
       if (scale < 1) {
         image = image.resize({
           width: Math.round(size.width * scale),

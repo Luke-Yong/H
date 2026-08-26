@@ -893,14 +893,14 @@ Agent 调用 run_in_terminal
 | `browser_navigate` | 仅子 agent | 导航到 URL（仅 http/https）。如果不存在浏览器标签页则创建新标签页，否则导航活动标签页。在返回前等待浏览器视图挂载（最多 2 秒）。 |
 | `browser_info` | 仅子 agent | 获取当前浏览器标签页状态：URL、页面标题、加载状态和打开的标签页数量。 |
 | **观察**（只读） |||
-| `browser_screenshot` | 仅子 agent | 获取当前页面的视觉快照。结果是实际页面图片（base64 PNG，上限 1280×1024）加一个简短头部 — URL、标题，以及一行定义坐标空间的 `Screenshot: WxH`。浏览器子 agent 自动使用 `deepseek-v4-flash-vision-exp`（无需用户配置），因此可以原生看到图片，并通过指向图片中的坐标来交互。其他不支持视觉的子 agent 类型（如 `frontend-specialist`）则由 flash 视觉模型描述截图并返回文本描述。不再有文本网格 — 图片是唯一输出。 |
+| `browser_screenshot` | 仅子 agent | 获取当前页面的视觉快照。结果是实际页面图片（base64 PNG，上限 1024×1024，叠加了坐标网格和 100px 轴标签，便于视觉模型读取精确像素位置）加一个简短头部 — URL、标题，以及一行定义坐标空间的 `Screenshot: WxH`。浏览器子 agent 自动使用 `deepseek-v4-flash-vision-exp`（无需用户配置），因此可以原生看到图片，并通过指向图片中的坐标来交互。其他不支持视觉的子 agent 类型（如 `frontend-specialist`）则由 flash 视觉模型描述截图并返回文本描述。不再有文本网格 — 图片是唯一输出。 |
 | `browser_console` | 仅子 agent | 获取最后 50 条控制台条目（日志、警告、错误、对话框）以检查 JS 错误 |
 | `browser_request_errors` | 仅子 agent | 获取失败的网络请求（4xx/5xx/CORS）以验证 API 调用和资源加载 |
 | **交互**（仅子 agent） |||
-| `browser_click` | **仅子 agent** | 按截图图片的 x,y 坐标点击（头部的 `Screenshot: WxH` 确定像素空间；渲染器会缩放到视口坐标）。分发完整的指针/鼠标事件序列。 |
-| `browser_type` | **仅子 agent** | 点击截图图片 x,y 处的输入框/文本域并输入文本 — 先点击，清除，然后用逼真的键盘事件输入 |
+| `browser_click` | **仅子 agent** | 按截图图片的 x,y 坐标点击（头部的 `Screenshot: WxH` 确定像素空间；渲染器会缩放到视口坐标）。瞄准元素中心 — 点击会吸附到最近的可交互元素，并报告实际点击的元素（如 `<button> "Sign In"`）。分发完整的指针/鼠标事件序列。 |
+| `browser_type` | **仅子 agent** | 点击截图图片 x,y 附近的输入框/文本域并输入文本 — 吸附到最近的文本字段，先点击，清除，然后用逼真的键盘事件输入 |
 | `browser_clear` | **仅子 agent** | 清除截图图片 x,y 处输入框/文本域的值 |
-| `browser_select` | **仅子 agent** | 按值或标签选择截图图片 x,y 处原生 `<select>` 的选项 |
+| `browser_select` | **仅子 agent** | 按值或标签选择截图图片 x,y 附近原生 `<select>` 的选项 |
 | `browser_scroll` | **仅子 agent** | 按像素或滚动到页面顶部/底部 |
 | `browser_press_key` | **仅子 agent** | 在活动元素上按下键盘按键（Enter、Escape、Tab、方向键等） |
 | `browser_wait` | **仅子 agent** | 等待匹配 CSS 选择器的元素出现（每 200ms 轮询，默认 5 秒超时） |
