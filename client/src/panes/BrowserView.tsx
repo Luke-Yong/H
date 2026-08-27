@@ -14,8 +14,8 @@ export interface BrowserViewHandle {
   typeIntoElement: (x: number, y: number, text: string) => Promise<string>;
   /** Get a short header for the current page: URL and title. */
   getScreenshotHeader: () => Promise<string>;
-  /** Capture the visible page as a base64 PNG data URL (for vision-capable models) plus its pixel size. */
-  captureScreenshotImage: () => Promise<{ url: string; imageW: number; imageH: number }>;
+  /** Capture the visible page as a base64 PNG data URL (for vision-capable models) plus its pixel size and the guest viewport it maps to. */
+  captureScreenshotImage: () => Promise<{ url: string; imageW: number; imageH: number; viewportW: number; viewportH: number }>;
   /** Navigate to a URL in the current tab. */
   navigateTo: (url: string) => Promise<void>;
   /** Wait for an element matching a CSS selector to appear. Returns first match or empty. */
@@ -42,6 +42,8 @@ export interface BrowserViewHandle {
   pressKey: (key: string) => Promise<string>;
   /** Upload files to a file input at screenshot-image coordinates x,y (or the page's first file input when x,y are null). */
   uploadFile: (x: number | null, y: number | null, paths: string[]) => Promise<string>;
+  /** Toggle the guest-page pointer marker. Enabled while the agent drives the browser; disabled when idle. */
+  setAgentActive: (active: boolean) => void;
 }
 
 interface Props {
@@ -164,8 +166,31 @@ const hResolveTarget = function(px, py, priorScale) {
       return { el: best.el, via: 'nearest', hit: null, scale: bestS };
     }
   }
-  const hit = document.elementFromPoint(px, py);
+  // The model reads coordinates off a grid-less screenshot, so the point can
+  // land on a non-interactive child of a clickable control — climb to the
+  // nearest interactive ancestor so the click still hits the intended element.
+  let hit = hPointElement(px, py);
+  if (hit && hit.matches && !hit.matches(INTERACTIVE)) {
+    let n = hit.parentElement;
+    while (n) {
+      if (n.matches && n.matches(INTERACTIVE)) { hit = n; break; }
+      n = n.parentElement;
+    }
+  }
   return { el: hit || document.body, via: 'point', hit: hit, scale: 1 };
+};
+// Deepest element at a viewport point, piercing open shadow roots (plain
+// elementFromPoint only returns the shadow host, which would swallow clicks
+// aimed at controls inside web components). ShadowRoot.elementFromPoint takes
+// VIEWPORT coordinates (not host-relative), so pass (x, y) straight through.
+const hPointElement = function(x, y) {
+  let el = document.elementFromPoint(x, y) || document.body;
+  for (let guard = 0; el && el.shadowRoot && guard < 10; guard++) {
+    const inner = el.shadowRoot.elementFromPoint(x, y);
+    if (!inner || inner === el) break;
+    el = inner;
+  }
+  return el;
 };
 const hElLabel = function(el) {
   if (!el) return '<none>';
@@ -180,57 +205,50 @@ const hElLabel = function(el) {
   const txt = String(raw).trim().split(' ').filter(Boolean).join(' ').slice(0, 50);
   return '<' + tag + id + cls + '>' + (txt ? ' "' + txt + '"' : '');
 };
-// Renders a transient marker INSIDE the guest page at viewport coords x,y so it
-// is guaranteed to be visible over the webview content (host-side overlays can
-// be hidden behind the <webview> guest layer). kind: move | click | type |
-// contextmenu. Auto-removes after a short pulse. Screenshots clear it first
-// (see captureScreenshotImage) so markers never pollute vision-model input.
+// Renders a marker INSIDE the guest page at viewport coords x,y so it is
+// guaranteed to be visible over the webview content (host-side overlays can be
+// hidden behind the <webview> guest layer). kind: move | click | type |
+// contextmenu. It only renders while the browser sub-agent is driving the page
+// (window.__hPointerEnabled, armed by BrowserView.setAgentActive). The marker
+// stays put (soft pulse) and IS included in screenshots — that is intentional:
+// the verification screenshot then shows exactly where the agent's interaction
+// landed so the model can adjust its next action.
 const hShowPointer = function(x, y, kind) {
+  if (window.__hPointerEnabled !== true) return;
   try {
     var el = window.__hPointerMarker;
     if (!el) {
       el = document.createElement('div');
-      el.style.cssText = 'position:fixed;z-index:2147483647;pointer-events:none;width:26px;height:26px;border-radius:50%;transform:translate(-50%,-50%);box-shadow:0 0 0 4px rgba(0,0,0,0.25);';
+      el.style.cssText = 'position:fixed;z-index:2147483647;pointer-events:none;width:14px;height:14px;border-radius:50%;transform:translate(-50%,-50%);box-shadow:0 0 0 6px rgba(0,0,0,0.18);';
       var dot = document.createElement('div');
-      dot.style.cssText = 'position:absolute;left:50%;top:50%;width:4px;height:4px;border-radius:50%;background:#fff;transform:translate(-50%,-50%);box-shadow:0 0 4px rgba(0,0,0,0.9);';
+      dot.style.cssText = 'position:absolute;left:50%;top:50%;width:3px;height:3px;border-radius:50%;background:#fff;transform:translate(-50%,-50%);box-shadow:0 0 3px rgba(0,0,0,0.9);';
       el.appendChild(dot);
       (document.body || document.documentElement).appendChild(el);
       window.__hPointerMarker = el;
-      el.__hTimer = null;
     }
     if (kind === 'move') {
-      el.style.width = '24px'; el.style.height = '24px';
       el.style.border = '2px solid rgba(225,37,27,0.9)';
-      el.style.background = 'rgba(225,37,27,0.12)';
+      el.style.background = 'rgba(225,37,27,0.15)';
     } else if (kind === 'type') {
-      el.style.width = '30px'; el.style.height = '30px';
       el.style.border = '2px solid rgba(174,133,45,0.95)';
       el.style.background = 'rgba(174,133,45,0.25)';
     } else if (kind === 'contextmenu') {
-      el.style.width = '30px'; el.style.height = '30px';
       el.style.border = '2px dashed rgba(83,87,90,0.95)';
       el.style.background = 'rgba(83,87,90,0.18)';
     } else {
-      el.style.width = '30px'; el.style.height = '30px';
       el.style.border = '2px solid rgba(225,37,27,0.95)';
-      el.style.background = 'rgba(225,37,27,0.28)';
+      el.style.background = 'rgba(225,37,27,0.3)';
     }
     el.style.left = x + 'px';
     el.style.top = y + 'px';
-    // Restart the pulse animation (force a reflow so it replays on repeat calls).
+    // Restart the soft pulse (force a reflow so it replays on repeat calls).
     el.style.animation = 'none';
     void el.offsetWidth;
-    el.style.animation = 'hPointerPulse ' + (kind === 'move' ? '0.9' : '1.5') + 's ease-out forwards';
-    if (el.__hTimer) clearTimeout(el.__hTimer);
-    el.__hTimer = setTimeout(function() {
-      var m = window.__hPointerMarker;
-      if (m && m.parentNode) m.parentNode.removeChild(m);
-      window.__hPointerMarker = null;
-    }, kind === 'move' ? 900 : 1500);
+    el.style.animation = 'hPointerPulse 1.2s ease-in-out infinite';
     if (!document.getElementById('h-pointer-keyframes')) {
       var st = document.createElement('style');
       st.id = 'h-pointer-keyframes';
-      st.textContent = '@keyframes hPointerPulse{0%{opacity:1;transform:translate(-50%,-50%) scale(0.6)}100%{opacity:0;transform:translate(-50%,-50%) scale(1.8)}}';
+      st.textContent = '@keyframes hPointerPulse{0%{opacity:0.75;transform:translate(-50%,-50%) scale(0.85)}50%{opacity:1;transform:translate(-50%,-50%) scale(1.15)}100%{opacity:0.75;transform:translate(-50%,-50%) scale(0.85)}}';
       (document.head || document.documentElement).appendChild(st);
     }
   } catch (e) {}
@@ -1715,6 +1733,46 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     return "No browser page loaded.";
   }, [getIframe, getWebview]);
 
+  // Gate for the guest-page pointer marker: only render it while an agent is
+  // actively driving the browser. setAgentActive(true) arms the flag in the
+  // guest; setAgentActive(false) disarms it and removes any live marker.
+  const pointerEnabledRef = useRef(false);
+  const setAgentActive = useCallback(async (active: boolean): Promise<void> => {
+    pointerEnabledRef.current = active;
+    const code = active
+      ? "window.__hPointerEnabled = true;"
+      : "(function(){window.__hPointerEnabled = false;try{var m=window.__hPointerMarker;if(m&&m.parentNode)m.parentNode.removeChild(m);window.__hPointerMarker=null;}catch(e){}})()";
+    try { await evalInPage(code); } catch { /* guest not ready — next interaction re-arms */ }
+  }, [evalInPage]);
+
+  type TrustedInputEvent = {
+    type: string;
+    x?: number;
+    y?: number;
+    button?: string;
+    clickCount?: number;
+    keyCode?: string | number;
+    modifiers?: string[];
+    deltaX?: number;
+    deltaY?: number;
+    wheelTicksX?: number;
+    wheelTicksY?: number;
+  };
+  // Send REAL trusted input to the desktop webview via the main process.
+  // Returns false in web mode or when the guest is unavailable (callers fall
+  // back to synthetic dispatch).
+  const sendTrustedInput = useCallback(async (events: TrustedInputEvent[]): Promise<boolean> => {
+    const wv = getWebview() as (BrowserGuest & { getWebContentsId?: () => number }) | null;
+    const desktop = (window as any).hDesktop;
+    if (!wv || !desktop || typeof desktop.sendBrowserInput !== "function" || typeof wv.getWebContentsId !== "function") return false;
+    try {
+      // Focus the webview element too (main also focuses the guest contents) —
+      // trusted input is only delivered when the guest is the focused one.
+      (wv as any).focus?.();
+      return await desktop.sendBrowserInput(wv.getWebContentsId(), events) === true;
+    } catch { return false; }
+  }, [getWebview]);
+
   // Check if an evalInPage result indicates a navigation-triggered error.
   // When a click causes a page navigation, Electron's executeJavaScript throws
   // GUEST_VIEW_MANAGER_CALL because the renderer process is torn down.
@@ -1740,16 +1798,92 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   const scaleToViewport = useCallback((x: number, y: number): { x: number; y: number } => {
     const c = lastCaptureRef.current;
     if (!c || c.imageW <= 0 || c.imageH <= 0 || c.viewportW <= 0 || c.viewportH <= 0) return { x, y };
-    return {
-      x: Math.round((x * c.viewportW) / c.imageW),
-      y: Math.round((y * c.viewportH) / c.imageH),
-    };
+    const vx = Math.round((x * c.viewportW) / c.imageW);
+    const vy = Math.round((y * c.viewportH) / c.imageH);
+    // #region debug-point C:scale-to-viewport
+    fetch("http://127.0.0.1:7777/event", { method: "POST", body: JSON.stringify({ sessionId: "browser-coordinate-mismatch", runId: "post", hypothesisId: "C", location: "BrowserView.tsx:scaleToViewport", msg: "[DEBUG] scaleToViewport conversion (FIXED)", data: { input_x: x, input_y: y, lastCapture: c, scaleX: c.viewportW / c.imageW, scaleY: c.viewportH / c.imageH, output_vx_cssPx: vx, output_vy_cssPx: vy }, ts: Date.now() }) }).catch(() => {});
+    // #endregion
+    return { x: vx, y: vy };
   }, []);
 
   const typeIntoElement = useCallback(async (x: number, y: number, text: string) => {
     const { x: vx, y: vy } = scaleToViewport(x, y);
     const c = lastCaptureRef.current;
     const priorScale = c && c.imageW > 0 && c.viewportW > 0 ? c.viewportW / c.imageW : 1;
+
+    // Resolve the editable field near the point; returns its center (viewport
+    // px) so we can click/type at the exact element like a real user.
+    const resolved = await evalInPage(`
+      (() => {
+        ${PAGE_TARGET_HELPERS}
+        const res = hResolveTarget(${vx}, ${vy}, ${priorScale});
+        const field = res.el;
+        const tag = field.tagName ? field.tagName.toLowerCase() : '';
+        const editable = tag === 'input' || tag === 'textarea' || field.isContentEditable === true;
+        if (!editable) {
+          return JSON.stringify({ error: 'no text field near (' + ${vx} + ',' + ${vy} + ') — found ' + hElLabel(field) + '. Re-screenshot and click directly on the input you see in the image.' });
+        }
+        const rect = field.getBoundingClientRect();
+        const cx = Math.max(0, Math.min(rect.left + rect.width / 2, window.innerWidth - 1));
+        const cy = Math.max(0, Math.min(rect.top + rect.height / 2, window.innerHeight - 1));
+        window.__hPointerEnabled = true;
+        hShowPointer(cx, cy, 'type');
+        return JSON.stringify({ cx: Math.round(cx), cy: Math.round(cy), tag: tag });
+      })()
+    `).catch(() => "");
+    let parsed: { error?: string; cx?: number; cy?: number; tag?: string } = {};
+    try { parsed = JSON.parse(resolved); } catch { parsed = {}; }
+    if (parsed.error) {
+      await new Promise((r) => setTimeout(r, 300));
+      return parsed.error;
+    }
+
+    // Desktop: trusted click to focus, select-all to replace, then trusted
+    // keystrokes — the page receives exactly what a user typing would produce
+    // (isTrusted input events, IME/autocomplete hooks, React onChange).
+    if (typeof parsed.cx === "number" && typeof parsed.cy === "number") {
+      const cx = parsed.cx, cy = parsed.cy;
+      const focused = await sendTrustedInput([
+        { type: "mouseMove", x: cx, y: cy, clickCount: 1 },
+        { type: "mouseDown", x: cx, y: cy, button: "left", clickCount: 1 },
+        { type: "mouseUp", x: cx, y: cy, button: "left", clickCount: 1 },
+        { type: "keyDown", keyCode: "a", modifiers: ["control"] },
+        { type: "keyUp", keyCode: "a", modifiers: ["control"] },
+      ]);
+      if (focused) {
+        if (!text) {
+          await sendTrustedInput([
+            { type: "keyDown", keyCode: "Backspace" },
+            { type: "keyUp", keyCode: "Backspace" },
+          ]);
+          await new Promise((r) => setTimeout(r, 80));
+          return `cleared element at (${vx},${vy})`;
+        }
+        const typeEvents: TrustedInputEvent[] = [];
+        for (const ch of text) {
+          if (ch === "\n" || ch === "\r") {
+            typeEvents.push({ type: "keyDown", keyCode: "Enter" });
+            typeEvents.push({ type: "char", keyCode: "\r" });
+            typeEvents.push({ type: "keyUp", keyCode: "Enter" });
+          } else if (ch === " ") {
+            typeEvents.push({ type: "keyDown", keyCode: " " });
+            typeEvents.push({ type: "char", keyCode: " " });
+            typeEvents.push({ type: "keyUp", keyCode: " " });
+          } else if (/^[A-Za-z0-9]$/.test(ch)) {
+            typeEvents.push({ type: "keyDown", keyCode: ch });
+            typeEvents.push({ type: "char", keyCode: ch });
+            typeEvents.push({ type: "keyUp", keyCode: ch });
+          } else {
+            typeEvents.push({ type: "char", keyCode: ch });
+          }
+        }
+        await sendTrustedInput(typeEvents);
+        await new Promise((r) => setTimeout(r, 120));
+        return `typed "${text}" into ${parsed.tag || "element"} at (${vx},${vy})`;
+      }
+    }
+
+    // Web / fallback: DOM-based typing (native value setter, etc.).
     const result = await evalInPage(`
       (() => {
         ${PAGE_TARGET_HELPERS}
@@ -1823,7 +1957,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     `);
     await new Promise((r) => setTimeout(r, 300));
     return result;
-  }, [evalInPage, scaleToViewport]);
+  }, [evalInPage, scaleToViewport, sendTrustedInput]);
 
   // Short header for the page (URL + title). The pixel screenshot is the
   // primary output of browser_screenshot; this text only identifies the page.
@@ -1843,19 +1977,30 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   // foreignObject → canvas), inlining page CSS/images through the same-origin
   // reverse proxy and retrying in a taint-safe mode if the canvas is blocked.
   // The image and guest viewport sizes are recorded so coordinate tools can
-  // map screenshot pixels to viewport pixels.
-  const captureScreenshotImage = useCallback(async (): Promise<{ url: string; imageW: number; imageH: number }> => {
-    // Remove any live pointer marker so the transient click/hover indicator
-    // never shows up in the screenshot handed to the vision model.
-    await evalInPage(`(function(){try{var m=window.__hPointerMarker;if(m&&m.parentNode)m.parentNode.removeChild(m);window.__hPointerMarker=null;}catch(e){}})()`).catch(() => {});
-    // ── Desktop: main-process webview capture (no taint possible) ──
+  // map screenshot pixels to viewport pixels. NOTE: the guest-side pointer
+  // marker is intentionally LEFT IN the capture — the screenshot then shows
+  // where the agent's last interaction landed, so the model can verify and
+  // adjust its next click.
+  const captureScreenshotImage = useCallback(async (): Promise<{ url: string; imageW: number; imageH: number; viewportW: number; viewportH: number }> => {
     const desktop = (window as any).hDesktop;
     const wv = getWebview() as (BrowserGuest & { getWebContentsId?: () => number }) | null;
     let url = "";
+    let captureMeta: { width: number; height: number; targetWidth?: number | null; targetHeight?: number | null } | null = null;
     if (wv && typeof wv.getWebContentsId === "function" && desktop && typeof desktop.captureBrowserPage === "function") {
       try {
-        const b64 = await desktop.captureBrowserPage(wv.getWebContentsId());
-        if (b64) url = "data:image/png;base64," + b64;
+        const res = await desktop.captureBrowserPage(wv.getWebContentsId(), {
+          width: viewportWidth,
+          height: viewportHeight,
+        });
+        if (res && res.b64) {
+          url = "data:image/png;base64," + res.b64;
+          captureMeta = {
+            width: Number(res.width) || 0,
+            height: Number(res.height) || 0,
+            targetWidth: res.targetWidth != null ? Number(res.targetWidth) || null : null,
+            targetHeight: res.targetHeight != null ? Number(res.targetHeight) || null : null,
+          };
+        }
       } catch { /* fall through to DOM rasterization */ }
     }
 
@@ -1863,10 +2008,17 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     if (!url) {
       url = await evalInPage(`
       (() => {
-        // Cap at 1024x1024 so vision APIs don't downscale the image further:
-        // the coordinates the model reports then match the screenshot 1:1.
-        const MAX_W = 1024, MAX_H = 1024, MAX_CSS = 150000, MAX_IMGS = 24, MAX_HTML = 600000;
-        const vw = Math.min(document.documentElement.clientWidth || window.innerWidth || 1280, MAX_W);
+        // Cap well above any viewport preset (vision API accepts up to
+        // 8192px/side; 4096 when a request carries 15+ images) so the
+        // screenshot is never downscaled — the coordinates the model reports
+        // then match the screenshot pixels 1:1.
+        const MAX_W = 4096, MAX_H = 4096, MAX_CSS = 150000, MAX_IMGS = 24, MAX_HTML = 600000;
+        // Use innerWidth/innerHeight (the viewport INCLUDING the scrollbar),
+        // not clientWidth/clientHeight — the recorded viewport basis and the
+        // marker's fixed-position space are both inner*, so the rasterized
+        // screenshot must be in the same space or clicks drift by the
+        // scrollbar width.
+        const vw = Math.min(window.innerWidth || document.documentElement.clientWidth || 1280, MAX_W);
         const vh = Math.min(window.innerHeight || document.documentElement.clientHeight || 800, MAX_H);
 
         // Resolve any URL (relative or absolute) through the same-origin proxy.
@@ -2037,7 +2189,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     }
 
     if (!url.startsWith("data:image/") || url.startsWith("data:image/svg")) {
-      return { url, imageW: 0, imageH: 0 };
+      return { url, imageW: 0, imageH: 0, viewportW: 0, viewportH: 0 };
     }
 
     // Record the image's pixel size and the guest viewport size so coordinate
@@ -2051,14 +2203,69 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     if (size) {
       let viewportW = 0;
       let viewportH = 0;
-      const vs = await evalInPage(`[window.innerWidth, window.innerHeight].join('x')`).catch(() => "");
-      const m = String(vs || "").match(/^(\d+)x(\d+)$/);
-      if (m) { viewportW = Number(m[1]); viewportH = Number(m[2]); }
+      const vs = await evalInPage(`[window.innerWidth, window.innerHeight, document.documentElement.clientWidth, document.documentElement.clientHeight, window.devicePixelRatio].join('x')`).catch(() => "");
+      const m = String(vs || "").match(/^(\d+)x(\d+)x(\d+)x(\d+)x([\d.]+)$/);
+      if (m) {
+        const iw = Number(m[1]), ih = Number(m[2]);
+        const cw = Number(m[3]), ch = Number(m[4]);
+        const dpr = Number(m[5]) || 1;
+        if (captureMeta && captureMeta.width > 0 && captureMeta.height > 0) {
+          // FAST PATH (new): main.cjs was given targetW/targetH (CSS viewport
+          // preset dims) and already resized the PNG to exactly those pixels.
+          // In this case imageW === viewportW CSS pixels, so the browser
+          // sub-agent's screenshot coordinates map 1:1 to the CSS-pixel
+          // space wc.sendInputEvent() expects. No DPR heuristics needed.
+          const tw = Number(captureMeta.targetWidth) || 0;
+          const th = Number(captureMeta.targetHeight) || 0;
+          const noCapApplied = size.w === tw && size.h === th;
+          if (tw > 0 && th > 0 && noCapApplied) {
+            viewportW = tw;
+            viewportH = th;
+          } else {
+            // FALLBACK: MAX_SIDE resize kicked in (rare for viewport presets),
+            // or an older main.cjs without targetSize support. Use the
+            // distance-based pick() to infer which guest CSS space the capture
+            // maps to. viewportW/H MUST stay in CSS pixels (never DPR×scaled).
+            const pick = (capturedPx: number, a: number, b: number): number => {
+              const cands: Array<{ cssPx: number; distance: number }> = [
+                { cssPx: a, distance: Math.abs(capturedPx - a) },
+                { cssPx: b, distance: Math.abs(capturedPx - b) },
+                { cssPx: a, distance: Math.abs(capturedPx - a * dpr) },
+                { cssPx: b, distance: Math.abs(capturedPx - b * dpr) },
+              ];
+              let best = cands[0];
+              for (let i = 1; i < cands.length; i++) if (cands[i].distance < best.distance) best = cands[i];
+              return best.cssPx;
+            };
+            // Prefer targetWidth/targetHeight as the strong hint (they equal
+            // the preset's CSS size when passed). Otherwise infer from the
+            // raw capture size against inner/client.
+            const basisW = tw > 0 ? tw : (iw >= cw ? iw : cw);
+            const basisH = th > 0 ? th : (ih >= ch ? ih : ch);
+            viewportW = tw > 0 && Math.abs(size.w - tw) < Math.abs(size.w - iw * dpr) && Math.abs(size.w - tw) < Math.abs(size.w - cw * dpr)
+              ? tw
+              : pick(captureMeta.width, iw, basisW);
+            viewportH = th > 0 && Math.abs(size.h - th) < Math.abs(size.h - ih * dpr) && Math.abs(size.h - th) < Math.abs(size.h - ch * dpr)
+              ? th
+              : pick(captureMeta.height, ih, basisH);
+          }
+          // #region debug-point A:pick-viewport-dims
+          fetch("http://127.0.0.1:7777/event", { method: "POST", body: JSON.stringify({ sessionId: "browser-coordinate-mismatch", runId: "post-v2-cssScreenshot", hypothesisId: "A", location: "BrowserView.tsx:captureScreenshotImage:viewport", msg: "[DEBUG] viewportW/H resolved (V2: main.cjs resizes screenshot to CSS pixels 1:1 when possible)", data: { captureMeta_w_physical: captureMeta.width, captureMeta_h_physical: captureMeta.height, captureMeta_targetW_css: captureMeta.targetWidth ?? null, captureMeta_targetH_css: captureMeta.targetHeight ?? null, imageW_after: size.w, imageH_after: size.h, iw_css: iw, ih_css: ih, cw_css: cw, ch_css: ch, dpr, preset_viewportWidth_css: viewportWidth, preset_viewportHeight_css: viewportHeight, viewportW_stored_css: viewportW, viewportH_stored_css: viewportH, ratio_image_to_viewport_shouldBe_1point0: size.w / (viewportW || 1), ratio_imageH_to_viewportH_shouldBe_1point0: size.h / (viewportH || 1), fastPath_hit: noCapApplied && tw > 0, verify: "viewportW/H stored as CSS pixels AND imageW/H === viewportW/H when fast path" }, ts: Date.now() }) }).catch(() => {});
+          // #endregion
+        } else {
+          // Web mode: the rasterized image was built at inner*, so map 1:1.
+          viewportW = iw;
+          viewportH = ih;
+        }
+      }
       lastCaptureRef.current = { imageW: size.w, imageH: size.h, viewportW, viewportH };
-      return { url, imageW: size.w, imageH: size.h };
+      // #region debug-point B:last-capture-recorded
+      fetch("http://127.0.0.1:7777/event", { method: "POST", body: JSON.stringify({ sessionId: "browser-coordinate-mismatch", runId: "post", hypothesisId: "B", location: "BrowserView.tsx:captureScreenshotImage:lastCapture", msg: "[DEBUG] lastCaptureRef committed (FIXED)", data: { imageW: size.w, imageH: size.h, viewportW_cssPx: viewportW, viewportH_cssPx: viewportH, captureMeta_exists: !!(captureMeta && captureMeta.width), ratio_imageW_viewportW: size.w / (viewportW || 1), ratio_imageH_viewportH: size.h / (viewportH || 1) }, ts: Date.now() }) }).catch(() => {});
+      // #endregion
+      return { url, imageW: size.w, imageH: size.h, viewportW, viewportH };
     }
-    return { url, imageW: 0, imageH: 0 };
-  }, [evalInPage, getWebview]);
+    return { url, imageW: 0, imageH: 0, viewportW: 0, viewportH: 0 };
+  }, [evalInPage, getWebview, viewportWidth, viewportHeight]);
 
   // Wait for an element matching a CSS selector to appear. Returns text content of first match.
   const waitForElement = useCallback(async (selector: string, timeoutMs: number = 5000): Promise<string> => {
@@ -2144,32 +2351,70 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     return result.startsWith("cleared") ? "Cleared element." : result;
   }, [typeIntoElement]);
 
-  // ── Coordinate-based mouse ──
-  // Uses enhanced event properties (pointerId, pointerType, button, buttons) so that
-  // React/Vue and other frameworks properly recognize the synthetic events.
-  // Clicks/right-clicks snap to the nearest interactive element's center so the
-  // vision model's small coordinate errors don't cause misses.
+  // ── Coordinate-based mouse (industry-standard flow, adapted to the webview) ──
+  // Desktop (Electron webview): resolve the element at the point via CDP
+  // hit-testing (webContents.debugger / DOM.getNodeForLocation — the same
+  // mechanism Playwright/DevTools use, piercing shadow roots), snap the click
+  // to the resolved element's center, then inject REAL trusted input via
+  // webContents.sendInputEvent (== CDP Input.dispatchMouseEvent): isTrusted
+  // events, CSS :hover, native click synthesis and focus. Web mode (iframe)
+  // has no CDP/trusted channel, so it falls back to synthetic dispatch at the
+  // exact coordinates.
   const mouseEvent = useCallback(async (x: number, y: number, eventType: string): Promise<string> => {
-    // Anchor scale: captured image width / guest viewport width. hResolveTarget
-    // searches around this to absorb CSS-zoom / meta-viewport / DPR scaling.
-    const c = lastCaptureRef.current;
-    const priorScale = c && c.imageW > 0 && c.viewportW > 0 ? c.viewportW / c.imageW : 1;
+    const markerKind = eventType === "click" ? "click" : eventType === "contextmenu" ? "contextmenu" : "move";
+    // Show the marker at the model's point immediately (it can be moved to the
+    // snapped element center below). The flag is re-armed so the marker always
+    // renders while an agent tool is executing.
+    await evalInPage(`(() => { ${PAGE_TARGET_HELPERS} window.__hPointerEnabled = true; hShowPointer(${x}, ${y}, ${JSON.stringify(markerKind)}); })()`).catch(() => {});
+
+    // Desktop: CDP hit-test → snap → trusted input.
+    const wv = getWebview() as (BrowserGuest & { getWebContentsId?: () => number }) | null;
+    const desktop = (window as any).hDesktop;
+    if (wv && desktop && typeof desktop.resolveElementAtPoint === "function" && typeof wv.getWebContentsId === "function") {
+      try {
+        // #region debug-point D:coords-sent-to-cdp-trusted
+        fetch("http://127.0.0.1:7777/event", { method: "POST", body: JSON.stringify({ sessionId: "browser-coordinate-mismatch", runId: "post", hypothesisId: "D", location: "BrowserView.tsx:mouseEvent:pre-cdp-trusted", msg: "[DEBUG] coords to CDP + sendInputEvent (NOW CSS px per FIX)", data: { x_css_in: x, y_css_in: y, eventType, webContentsId: typeof wv.getWebContentsId === "function" ? wv.getWebContentsId() : null }, ts: Date.now() }) }).catch(() => {});
+        // #endregion
+        const hit = await desktop.resolveElementAtPoint(wv.getWebContentsId(), x, y);
+        let tx = x, ty = y;
+        // Click/right-click aim at the resolved element's center (absorbs the
+        // model's small coordinate error). Hover stays at the exact point.
+        if (eventType !== "move" && hit && hit.quads && hit.quads.right > hit.quads.left && hit.quads.bottom > hit.quads.top) {
+          tx = Math.round((hit.quads.left + hit.quads.right) / 2);
+          ty = Math.round((hit.quads.top + hit.quads.bottom) / 2);
+        }
+        if (tx !== x || ty !== y) {
+          await evalInPage(`(() => { ${PAGE_TARGET_HELPERS} window.__hPointerEnabled = true; hShowPointer(${tx}, ${ty}, ${JSON.stringify(markerKind)}); })()`).catch(() => {});
+        }
+        const events: TrustedInputEvent[] = [];
+        if (eventType === "move") {
+          events.push({ type: "mouseMove", x, y, clickCount: 1 });
+        } else {
+          const button = eventType === "contextmenu" ? "right" : "left";
+          events.push({ type: "mouseMove", x: tx, y: ty, clickCount: 1 });
+          events.push({ type: "mouseDown", x: tx, y: ty, button, clickCount: 1 });
+          events.push({ type: "mouseUp", x: tx, y: ty, button, clickCount: 1 });
+        }
+        if (await sendTrustedInput(events)) {
+          // Give Chromium a beat to process the input before reporting.
+          await new Promise((r) => setTimeout(r, 80));
+          const verb = eventType === "click" ? "clicked" : eventType === "contextmenu" ? "right-clicked" : "hovered";
+          // Report both the requested point and where the click actually
+          // landed (element-center snap) so the model can calibrate.
+          const landed = tx !== x || ty !== y ? ` (landed ${tx},${ty})` : "";
+          return `${verb} at (${x},${y})${landed}${hit && hit.label ? " " + hit.label : ""}`;
+        }
+      } catch { /* fall through to synthetic dispatch */ }
+    }
+
+    // Web / fallback: synthetic dispatch at the exact coordinates.
     return evalInPage(`
       (() => {
         ${PAGE_TARGET_HELPERS}
         const px = ${x}, py = ${y};
-        const res = hResolveTarget(px, py, ${priorScale});
-        const target = res.el;
-        // Click/contextmenu: aim at the resolved element's center. Hover stays
-        // at the exact point (hover effects depend on the precise position).
-        let dx = px, dy = py;
-        if (${JSON.stringify(eventType)} !== 'move') {
-          const rect = target.getBoundingClientRect();
-          if (rect && rect.width > 0 && rect.height > 0) {
-            dx = Math.max(0, Math.min(rect.left + rect.width / 2, window.innerWidth - 1));
-            dy = Math.max(0, Math.min(rect.top + rect.height / 2, window.innerHeight - 1));
-          }
-        }
+        const dx = Math.max(0, Math.min(px, window.innerWidth - 1));
+        const dy = Math.max(0, Math.min(py, window.innerHeight - 1));
+        const target = hPointElement(dx, dy);
         const mouseOpts = { clientX: dx, clientY: dy, screenX: dx, screenY: dy, bubbles: true, cancelable: true, button: 0, buttons: 1, view: window };
         const pointerOpts = { clientX: dx, clientY: dy, screenX: dx, screenY: dy, bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', button: 0, buttons: 1, view: window };
         let r;
@@ -2182,28 +2427,55 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
           target.dispatchEvent(new MouseEvent('click', mouseOpts));
           // Fallback: native click() for handlers that require isTrusted
           try { target.click(); } catch(_) {}
-          r = 'clicked ' + hElLabel(target);
+          r = 'clicked at (${x},${y}) ' + hElLabel(target);
         } else if (${JSON.stringify(eventType)} === 'contextmenu') {
           target.dispatchEvent(new PointerEvent('pointerdown', pointerOpts));
           target.dispatchEvent(new MouseEvent('mousedown', { ...mouseOpts, button: 2, buttons: 2 }));
           target.dispatchEvent(new MouseEvent('contextmenu', mouseOpts));
           target.dispatchEvent(new MouseEvent('mouseup', { ...mouseOpts, button: 2, buttons: 0 }));
-          r = 'right-clicked ' + hElLabel(target);
+          r = 'right-clicked at (${x},${y}) ' + hElLabel(target);
         } else {
           target.dispatchEvent(new MouseEvent('mousemove', mouseOpts));
           target.dispatchEvent(new PointerEvent('pointermove', pointerOpts));
-          r = 'hovered on ' + hElLabel(target);
+          r = 'hovered at (${x},${y}) ' + hElLabel(target);
         }
-        hShowPointer(dx, dy, ${JSON.stringify(eventType === "click" ? "click" : eventType === "contextmenu" ? "contextmenu" : "move")});
         return r;
       })()
     `);
+  }, [evalInPage, sendTrustedInput, getWebview]);
+
+  // Fingerprint the current page state cheaply (URL + focused element + DOM
+  // serialized length) so we can verify a click actually took effect. The
+  // guest-side pointer marker is excluded — it lives in <body> and would
+  // otherwise mask real DOM changes.
+  const getPageFingerprint = useCallback(async (): Promise<string> => {
+    return evalInPage(`(function(){try{var m=window.__hPointerMarker;var had=!!(m&&m.parentNode);if(had)m.parentNode.removeChild(m);var a=document.activeElement;var s=window.location.href+'|'+(a?a.tagName+(a.id?'#'+a.id:''):'')+'|'+(document.body?document.body.innerHTML.length:0);if(had&&m&&document.body)document.body.appendChild(m);return s;}catch(e){return '';}})()`).catch(() => "");
   }, [evalInPage]);
 
   const clickCoords = useCallback(async (x: number, y: number): Promise<string> => {
     const { x: vx, y: vy } = scaleToViewport(x, y);
-    const result = await mouseEvent(vx, vy, "click");
-    const finalResult = await handleNavigationError(result, "click at (" + x + "," + y + ")");
+    const before = await getPageFingerprint();
+    const doClick = async (): Promise<string> => {
+      const r = await mouseEvent(vx, vy, "click");
+      return handleNavigationError(r, `click at (${x},${y})`);
+    };
+    let finalResult = await doClick();
+    if (before) {
+      // Industry-style verification: wait a beat, then confirm the page state
+      // changed (navigation, focus, or any DOM mutation). If nothing changed,
+      // the click likely didn't register (e.g. dropped trusted input) — retry
+      // once before reporting.
+      await new Promise((r) => setTimeout(r, 250));
+      const after = await getPageFingerprint();
+      if (after && after === before) {
+        finalResult = await doClick();
+        await new Promise((r) => setTimeout(r, 250));
+        const after2 = await getPageFingerprint();
+        if (after2 && after2 === after) {
+          return `click at (${x},${y}): ${finalResult} (page state unchanged after retry — take a browser_screenshot to verify)`;
+        }
+      }
+    }
     // Give the page a moment to process the click (framework state updates,
     // navigation, re-renders) before the agent's verification screenshot —
     // mirrors the old index-based click behavior. Without this, the screenshot
@@ -2214,7 +2486,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
     // Report the screenshot-image coordinates the agent chose (not the scaled
     // viewport ones) plus which element was actually clicked.
     return finalResult.startsWith("clicked") ? `click at (${x},${y}): ${finalResult}` : finalResult;
-  }, [mouseEvent, handleNavigationError, scaleToViewport]);
+  }, [mouseEvent, handleNavigationError, scaleToViewport, getPageFingerprint]);
 
   const moveMouse = useCallback(async (x: number, y: number): Promise<string> => {
     const { x: vx, y: vy } = scaleToViewport(x, y);
@@ -2231,10 +2503,37 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   const scrollPage = useCallback(async (x: number, y: number, to?: string): Promise<string> => {
     if (to === "top") return evalInPage(`window.scrollTo(0, 0); 'Scrolled to top.';`);
     if (to === "bottom") return evalInPage(`window.scrollTo(0, document.body.scrollHeight); 'Scrolled to bottom.';`);
-    return evalInPage(`window.scrollBy(${x || 0}, ${y || 0}); 'Scrolled by ${x || 0},${y || 0}.';`);
-  }, [evalInPage]);
+    const dx = x || 0, dy = y || 0;
+    if (dx || dy) {
+      // Desktop: trusted mouse wheel at the viewport center — real scrolling
+      // that fires wheel/scroll handlers and lazy-loading like a user's cursor.
+      const dims = await evalInPage(`[window.innerWidth, window.innerHeight].join('x')`).catch(() => "");
+      const m = String(dims).match(/^(\d+)x(\d+)$/);
+      const cx = m ? Math.round(Number(m[1]) / 2) : 640;
+      const cy = m ? Math.round(Number(m[2]) / 2) : 480;
+      const ok = await sendTrustedInput([
+        { type: "mouseMove", x: cx, y: cy },
+        { type: "mouseWheel", x: cx, y: cy, deltaX: dx, deltaY: dy, wheelTicksX: Math.round(dx / 120), wheelTicksY: Math.round(dy / 120) },
+      ]);
+      if (ok) {
+        await new Promise((r) => setTimeout(r, 120));
+        return `Scrolled by ${dx},${dy}.`;
+      }
+    }
+    // Web / fallback: JS scroll.
+    return evalInPage(`window.scrollBy(${dx}, ${dy}); 'Scrolled by ${dx},${dy}.';`);
+  }, [evalInPage, sendTrustedInput]);
 
   const pressKey = useCallback(async (key: string): Promise<string> => {
+    // Desktop: trusted keyboard events — isTrusted, browser shortcuts and IME
+    // behave exactly as if the user pressed the key.
+    const electronKeyCode = key === "Space" ? " " : key === "ArrowUp" ? "Up" : key === "ArrowDown" ? "Down" : key === "ArrowLeft" ? "Left" : key === "ArrowRight" ? "Right" : key;
+    const ok = await sendTrustedInput([
+      { type: "keyDown", keyCode: electronKeyCode },
+      { type: "keyUp", keyCode: electronKeyCode },
+    ]);
+    if (ok) return `Pressed ${key}.`;
+    // Web / fallback: synthetic keyboard events.
     return evalInPage(`
       (() => {
         const el = document.activeElement || document.body;
@@ -2270,7 +2569,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
         return 'Pressed ${key}.';
       })()
     `);
-  }, [evalInPage]);
+  }, [sendTrustedInput, evalInPage]);
 
   const uploadFile = useCallback(async (x: number | null, y: number | null, paths: string[]): Promise<string> => {
     // Read files as ArrayBuffer and transfer to the iframe context
@@ -2395,9 +2694,9 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
 
   useImperativeHandle(ref, () => ({
     evalInPage, typeIntoElement, clearElement, clickCoords, moveMouse, rightClick, scrollPage, pressKey, uploadFile, getScreenshotHeader, captureScreenshotImage, navigateTo,
-    waitForElement, getConsoleEntries, getRequestErrors, getInfo, selectOption,
+    waitForElement, getConsoleEntries, getRequestErrors, getInfo, selectOption, setAgentActive,
   }), [evalInPage, typeIntoElement, clearElement, clickCoords, moveMouse, rightClick, scrollPage, pressKey, uploadFile, getScreenshotHeader, captureScreenshotImage, navigateTo,
-    waitForElement, getConsoleEntries, getRequestErrors, getInfo, selectOption]);
+    waitForElement, getConsoleEntries, getRequestErrors, getInfo, selectOption, setAgentActive]);
 
   return (
     <div className="browser-iframe-container">

@@ -8,6 +8,8 @@ contextBridge.exposeInMainWorld("hDesktop", {
   openFolder: () => ipcRenderer.invoke("h:openFolder"),
   openFile: () => ipcRenderer.invoke("h:openFile"),
   captureBrowserPage: (webContentsId) => ipcRenderer.invoke("h:captureBrowserPage", webContentsId),
+  sendBrowserInput: (webContentsId, events) => ipcRenderer.invoke("h:sendBrowserInput", webContentsId, events),
+  resolveElementAtPoint: (webContentsId, x, y) => ipcRenderer.invoke("h:resolveElementAtPoint", webContentsId, x, y),
   onBrowserOpenUrl: (callback) => {
     if (typeof callback !== "function") return () => {};
     const listener = (_event, url) => callback(url);

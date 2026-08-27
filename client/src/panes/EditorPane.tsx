@@ -441,6 +441,10 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   useEffect(() => { settingsOpenRef.current = settingsOpen; }, [settingsOpen]);
   const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
   const browserViewRef = useRef<BrowserViewHandle>(null);
+  // Grace period before the guest-page pointer marker hides after the last
+  // browser tool call, so back-to-back agent actions look continuous.
+  const browserPointerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (browserPointerTimerRef.current) clearTimeout(browserPointerTimerRef.current); }, []);
   const welcomeClickLockRef = useRef(0);
   const [browserConsoleMap, setBrowserConsoleMap] = useState<Record<string, BrowserConsoleEntry[]>>({});
   const [nameDialog, setNameDialog] = useState<{
@@ -1909,6 +1913,17 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   // Execute a browser tool on behalf of the agent.
   // Returns the text result plus (for browser_screenshot) the captured page image.
   const executeBrowserAction = useCallback(async (toolName: string, params: Record<string, unknown>): Promise<{ text: string; image?: string }> => {
+    // Show the guest-page pointer marker while the agent drives the browser.
+    // Awaited so the guest flag is set before the tool runs (no race with the
+    // marker). The marker hides ~10s after the last tool call — long enough to
+    // survive model "thinking" pauses between actions, short enough to clear
+    // once the agent stops.
+    await browserViewRef.current?.setAgentActive?.(true);
+    if (browserPointerTimerRef.current) clearTimeout(browserPointerTimerRef.current);
+    browserPointerTimerRef.current = setTimeout(() => {
+      browserPointerTimerRef.current = null;
+      browserViewRef.current?.setAgentActive?.(false);
+    }, 10000);
     const done = (text: string): { text: string; image?: string } => ({ text });
 
     // browser_navigate doesn't need an existing loaded page — it creates/opens a tab
@@ -1951,11 +1966,16 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
         // Primary output is the pixel image. The text is only a short header
         // (URL, title) plus the image size, which fixes the coordinate space
         // the agent should use when clicking on the screenshot.
-        const cap = await bv.captureScreenshotImage().catch(() => ({ url: "Error: capture threw", imageW: 0, imageH: 0 }));
+        const cap = await bv.captureScreenshotImage().catch(() => ({ url: "Error: capture threw", imageW: 0, imageH: 0, viewportW: 0, viewportH: 0 }));
         const header = await bv.getScreenshotHeader();
         const image = cap.url.startsWith("data:image/") && !cap.url.startsWith("data:image/svg") ? cap.url : undefined;
         if (image) {
-          const sizeLine = cap.imageW > 0 ? `\nScreenshot: ${cap.imageW}x${cap.imageH}` : "";
+          // Show the screenshot size AND the guest viewport it maps to, so the
+          // model knows the scale (e.g. 1024px screenshot == 1920px webview →
+          // 1px screenshot = 1.875px viewport) and its clicks land correctly.
+          const sizeLine = cap.imageW > 0
+            ? `\nScreenshot: ${cap.imageW}x${cap.imageH}${cap.viewportW > 0 ? ` | Viewport: ${cap.viewportW}x${cap.viewportH} | 1px screenshot = ${(cap.viewportW / cap.imageW).toFixed(3)}px viewport` : ""}`
+            : "";
           return { text: `${header}${sizeLine}`, image };
         }
         const reason = cap.url.startsWith("Error:") ? cap.url.replace(/^Error:\s*/, "").slice(0, 200) : "no image captured";

@@ -951,27 +951,134 @@ function registerIpc() {
   // Capture the browser webview as a base64 PNG. Done in the main process
   // because the <webview> element's own capturePage throws
   // "An object could not be cloned" over IPC (structured-clone limitation).
-  ipcMain.handle("h:captureBrowserPage", async (_event, webContentsId) => {
+  ipcMain.handle("h:captureBrowserPage", async (_event, webContentsId, targetSize) => {
     try {
       const wc = webContents.fromId(Number(webContentsId));
       if (!wc || wc.isDestroyed() || !isBrowserContents(wc)) return null;
       let image = await wc.capturePage();
       if (!image || image.isEmpty()) return null;
       const size = image.getSize();
-      // Cap at 1024x1024 so vision APIs don't downscale the image further:
-      // the coordinates the model reports then match the screenshot pixels 1:1.
-      const scale = Math.min(1, 1024 / (size.width || 1), 1024 / (size.height || 1));
-      if (scale < 1) {
+      const MAX_SIDE = 4096;
+      // ── Step 1: resize to TARGET CSS dimensions (if provided) ──
+      // When the renderer passes the guest viewport's CSS size
+      // (innerWidth × innerHeight), we force the output PNG to exactly
+      // those CSS pixels. This eliminates DPR leakage from the capture
+      // pipeline: the screenshot header "Screenshot: WxH" the browser
+      // sub-agent reads matches 1:1 the CSS-pixel coordinate space
+      // wc.sendInputEvent() expects — so coords the sub-agent reports
+      // from the screenshot are the same coords we click at (no scale,
+      // no drift, no DPR bugs). Target size takes precedence over any
+      // raw DPR-multiplied capture resolution.
+      let tw = 0, th = 0;
+      if (targetSize && typeof targetSize === "object") {
+        tw = Number(targetSize.width)  || 0;
+        th = Number(targetSize.height) || 0;
+      }
+      if (tw > 0 && th > 0 && (tw !== size.width || th !== size.height)) {
+        image = image.resize({ width: tw, height: th, quality: "best" });
+      }
+      const afterCss = image.getSize();
+      // ── Step 2: API safety cap (4096 px/side) — rare ──
+      const cap = Math.min(1, MAX_SIDE / (afterCss.width || 1), MAX_SIDE / (afterCss.height || 1));
+      if (cap < 1) {
         image = image.resize({
-          width: Math.round(size.width * scale),
-          height: Math.round(size.height * scale),
+          width:  Math.round(afterCss.width  * cap),
+          height: Math.round(afterCss.height * cap),
+          quality: "best",
         });
       }
       const png = image.toPNG();
       if (!png || png.length === 0) return null;
-      return png.toString("base64");
+      // Return the pre-resize (raw capture) size AND the CSS target size
+      // (when provided) so the renderer can fully reconstruct which guest
+      // coordinate space the image corresponds to. In the common case
+      // (targetSize provided + no MAX_SIDE cap) the returned PNG has
+      // dimensions === targetSize === CSS viewport === 1:1 coords.
+      return {
+        b64: png.toString("base64"),
+        width: size.width,
+        height: size.height,
+        targetWidth:  tw || null,
+        targetHeight: th || null,
+      };
     } catch {
       return null;
+    }
+  });
+
+  // Inject REAL trusted input (mouse / keyboard / wheel) into a browser webview
+  // so agent actions behave exactly like a user's: isTrusted events, CSS
+  // :hover, native click & text-input synthesis, IME and focus changes.
+  // Coordinates are guest-page CSS pixels (the webview renders the page at 1:1;
+  // host-side zoom only scales the visual frame). Returns false if the guest
+  // is unavailable.
+  ipcMain.handle("h:sendBrowserInput", async (_event, webContentsId, events) => {
+    try {
+      const wc = webContents.fromId(Number(webContentsId));
+      if (!wc || wc.isDestroyed() || !isBrowserContents(wc)) return false;
+      // Trusted input only reaches the page when the guest has focus; without
+      // this the events are silently dropped (the click "does nothing").
+      wc.focus();
+      const list = Array.isArray(events) ? events : [];
+      for (const ev of list) {
+        if (!ev || typeof ev.type !== "string") continue;
+        const out = { type: ev.type };
+        if (typeof ev.x === "number") out.x = ev.x;
+        if (typeof ev.y === "number") out.y = ev.y;
+        if (typeof ev.keyCode === "string" || typeof ev.keyCode === "number") out.keyCode = ev.keyCode;
+        if (Array.isArray(ev.modifiers)) out.modifiers = ev.modifiers;
+        if (typeof ev.button === "string") out.button = ev.button === "right" ? "right" : "left";
+        if (typeof ev.clickCount === "number") out.clickCount = ev.clickCount;
+        if (typeof ev.deltaX === "number") out.deltaX = ev.deltaX;
+        if (typeof ev.deltaY === "number") out.deltaY = ev.deltaY;
+        if (typeof ev.wheelTicksX === "number") out.wheelTicksX = ev.wheelTicksX;
+        if (typeof ev.wheelTicksY === "number") out.wheelTicksY = ev.wheelTicksY;
+        wc.sendInputEvent(out);
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  });
+
+  // Resolve the real element at a guest-page point using CDP hit-testing
+  // (DOM.getNodeForLocation pierces shadow roots — the same mechanism DevTools
+  // and Playwright use; works on webview guests via webContents.debugger).
+  // Returns the element label + its bounding quads so the caller can aim a
+  // trusted click at the element's center. Null on failure (caller falls back
+  // to raw coordinates).
+  ipcMain.handle("h:resolveElementAtPoint", async (_event, webContentsId, x, y) => {
+    const wc = webContents.fromId(Number(webContentsId));
+    if (!wc || wc.isDestroyed() || !isBrowserContents(wc)) return null;
+    const dbg = wc.debugger;
+    try {
+      if (!dbg.isAttached()) dbg.attach("1.3");
+      await dbg.sendCommand("DOM.enable");
+      await dbg.sendCommand("DOM.getDocument", { depth: 2 });
+      const { nodeId } = await dbg.sendCommand("DOM.getNodeForLocation", { x, y });
+      if (!nodeId) return null;
+      let quads = null;
+      try {
+        const q = await dbg.sendCommand("DOM.getContentQuads", { nodeId });
+        if (q && q.quads && q.quads.length) {
+          const quad = q.quads[0];
+          const xs = [quad[0], quad[2], quad[4], quad[6]];
+          const ys = [quad[1], quad[3], quad[5], quad[7]];
+          quads = { left: Math.min(...xs), top: Math.min(...ys), right: Math.max(...xs), bottom: Math.max(...ys) };
+        }
+      } catch { /* quads optional */ }
+      let label = "";
+      try {
+        const { object } = await dbg.sendCommand("DOM.resolveNode", { nodeId });
+        const fn = "function(){const el=this;if(!el||!el.tagName)return '<none>';const tag=el.tagName.toLowerCase();const id=el.id?'#'+el.id:'';let cls='';if(el.className&&typeof el.className==='string'){const c=el.className.trim().split(' ').filter(Boolean).slice(0,2).join('.');if(c)cls='.'+c;}const raw=(el.value!=null&&String(el.value)!==''?String(el.value):(el.textContent||''));const txt=String(raw).trim().split(' ').filter(Boolean).join(' ').slice(0,50);return '<'+tag+id+cls+'>'+(txt?' \"'+txt+'\"':'');}";
+        const r = await dbg.sendCommand("Runtime.callFunctionOn", { objectId: object.objectId, functionDeclaration: fn, returnByValue: true });
+        label = String((r && r.result && r.result.value) || "");
+      } catch { /* label optional */ }
+      return { label, quads };
+    } catch {
+      return null;
+    } finally {
+      try { dbg.detach(); } catch { /* already detached */ }
     }
   });
 
