@@ -121,14 +121,27 @@ const PAGE_TARGET_HELPERS = `
 const hResolveTarget = function(px, py, priorScale) {
   const INTERACTIVE = 'a[href], button, input, select, textarea, summary, label, [role="button"], [role="link"], [role="menuitem"], [role="tab"], [role="checkbox"], [role="radio"], [role="switch"], [role="option"], [contenteditable="true"], [tabindex], [onclick]';
   const rects = [];
-  const all = document.querySelectorAll(INTERACTIVE);
-  for (let i = 0; i < all.length && rects.length < 800; i++) {
-    const el = all[i];
-    const r = el.getBoundingClientRect();
-    if (r && r.width > 0 && r.height > 0) {
-      rects.push({ el: el, left: r.left, top: r.top, right: r.right, bottom: r.bottom });
+  // Walk the document, piercing shadow roots and same-origin frames so
+  // controls inside web components / iframes are reachable too. Elements
+  // inside frames report viewport-relative rects, so we carry an offset.
+  const collect = function(root, dx, dy) {
+    const all = root.querySelectorAll('*');
+    for (let i = 0; i < all.length && rects.length < 2000; i++) {
+      const el = all[i];
+      if (el.shadowRoot) collect(el.shadowRoot, dx, dy);
+      if (el.contentDocument && el.contentDocument !== root && el.contentDocument !== document) {
+        const fr = el.getBoundingClientRect();
+        collect(el.contentDocument, dx + fr.left, dy + fr.top);
+      }
+      if (el.matches && el.matches(INTERACTIVE)) {
+        const r = el.getBoundingClientRect();
+        if (r && r.width > 0 && r.height > 0) {
+          rects.push({ el: el, left: r.left + dx, top: r.top + dy, right: r.right + dx, bottom: r.bottom + dy });
+        }
+      }
     }
-  }
+  };
+  collect(document, 0, 0);
   if (rects.length > 0) {
     // Screenshot pixel -> page layout pixel scale. Anchored at the ratio from
     // the captured image size / guest viewport, then widened to absorb zoom and
@@ -167,6 +180,61 @@ const hElLabel = function(el) {
   const txt = String(raw).trim().split(' ').filter(Boolean).join(' ').slice(0, 50);
   return '<' + tag + id + cls + '>' + (txt ? ' "' + txt + '"' : '');
 };
+// Renders a transient marker INSIDE the guest page at viewport coords x,y so it
+// is guaranteed to be visible over the webview content (host-side overlays can
+// be hidden behind the <webview> guest layer). kind: move | click | type |
+// contextmenu. Auto-removes after a short pulse. Screenshots clear it first
+// (see captureScreenshotImage) so markers never pollute vision-model input.
+const hShowPointer = function(x, y, kind) {
+  try {
+    var el = window.__hPointerMarker;
+    if (!el) {
+      el = document.createElement('div');
+      el.style.cssText = 'position:fixed;z-index:2147483647;pointer-events:none;width:26px;height:26px;border-radius:50%;transform:translate(-50%,-50%);box-shadow:0 0 0 4px rgba(0,0,0,0.25);';
+      var dot = document.createElement('div');
+      dot.style.cssText = 'position:absolute;left:50%;top:50%;width:4px;height:4px;border-radius:50%;background:#fff;transform:translate(-50%,-50%);box-shadow:0 0 4px rgba(0,0,0,0.9);';
+      el.appendChild(dot);
+      (document.body || document.documentElement).appendChild(el);
+      window.__hPointerMarker = el;
+      el.__hTimer = null;
+    }
+    if (kind === 'move') {
+      el.style.width = '24px'; el.style.height = '24px';
+      el.style.border = '2px solid rgba(225,37,27,0.9)';
+      el.style.background = 'rgba(225,37,27,0.12)';
+    } else if (kind === 'type') {
+      el.style.width = '30px'; el.style.height = '30px';
+      el.style.border = '2px solid rgba(174,133,45,0.95)';
+      el.style.background = 'rgba(174,133,45,0.25)';
+    } else if (kind === 'contextmenu') {
+      el.style.width = '30px'; el.style.height = '30px';
+      el.style.border = '2px dashed rgba(83,87,90,0.95)';
+      el.style.background = 'rgba(83,87,90,0.18)';
+    } else {
+      el.style.width = '30px'; el.style.height = '30px';
+      el.style.border = '2px solid rgba(225,37,27,0.95)';
+      el.style.background = 'rgba(225,37,27,0.28)';
+    }
+    el.style.left = x + 'px';
+    el.style.top = y + 'px';
+    // Restart the pulse animation (force a reflow so it replays on repeat calls).
+    el.style.animation = 'none';
+    void el.offsetWidth;
+    el.style.animation = 'hPointerPulse ' + (kind === 'move' ? '0.9' : '1.5') + 's ease-out forwards';
+    if (el.__hTimer) clearTimeout(el.__hTimer);
+    el.__hTimer = setTimeout(function() {
+      var m = window.__hPointerMarker;
+      if (m && m.parentNode) m.parentNode.removeChild(m);
+      window.__hPointerMarker = null;
+    }, kind === 'move' ? 900 : 1500);
+    if (!document.getElementById('h-pointer-keyframes')) {
+      var st = document.createElement('style');
+      st.id = 'h-pointer-keyframes';
+      st.textContent = '@keyframes hPointerPulse{0%{opacity:1;transform:translate(-50%,-50%) scale(0.6)}100%{opacity:0;transform:translate(-50%,-50%) scale(1.8)}}';
+      (document.head || document.documentElement).appendChild(st);
+    }
+  } catch (e) {}
+};
 `;
 
 function isUrlLike(input: string): boolean {
@@ -177,55 +245,6 @@ function isUrlLike(input: string): boolean {
   if (/^\[.*\]/.test(input)) return true;
   if (input.includes(".") && !input.includes(" ")) return true;
   return false;
-}
-
-// Draw a coordinate grid over a screenshot data URL so the vision model can
-// read pixel positions off the image instead of estimating them. Axis labels
-// along the top and left every 100px; faint minor lines every 50px. The
-// returned image keeps the same pixel size, so coordinate mapping is unchanged.
-function addCoordinateGrid(dataUrl: string, w: number, h: number): Promise<string> {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => {
-      try {
-        const canvas = document.createElement("canvas");
-        canvas.width = w;
-        canvas.height = h;
-        const ctx = canvas.getContext("2d");
-        if (!ctx) { resolve(dataUrl); return; }
-        ctx.drawImage(img, 0, 0, w, h);
-
-        // Minor grid every 50px, major every 100px.
-        ctx.lineWidth = 1;
-        for (let x = 50; x < w; x += 50) {
-          ctx.strokeStyle = x % 100 === 0 ? "rgba(0,0,0,0.55)" : "rgba(0,0,0,0.18)";
-          ctx.beginPath(); ctx.moveTo(x + 0.5, 0); ctx.lineTo(x + 0.5, h); ctx.stroke();
-        }
-        for (let y = 50; y < h; y += 50) {
-          ctx.strokeStyle = y % 100 === 0 ? "rgba(0,0,0,0.55)" : "rgba(0,0,0,0.18)";
-          ctx.beginPath(); ctx.moveTo(0, y + 0.5); ctx.lineTo(w, y + 0.5); ctx.stroke();
-        }
-        // Axis labels every 100px (halo for readability on any background).
-        ctx.font = "9px monospace";
-        ctx.textBaseline = "top";
-        const label = (s: string, x: number, y: number) => {
-          ctx.fillStyle = "rgba(255,255,255,0.9)";
-          ctx.fillText(s, x + 1, y + 1);
-          ctx.fillText(s, x + 2, y + 2);
-          ctx.fillStyle = "rgba(0,0,0,0.9)";
-          ctx.fillText(s, x + 1, y + 1);
-        };
-        for (let x = 0; x <= w - 100; x += 100) label(String(x), x + 3, 3);
-        for (let y = 100; y <= h - 50; y += 100) label(String(y), 3, y + 3);
-
-        resolve(canvas.toDataURL("image/png"));
-      } catch {
-        resolve(dataUrl);
-      }
-    };
-    img.onerror = () => resolve(dataUrl);
-    img.src = dataUrl;
-  });
 }
 
 function isHttps(url: string): boolean {
@@ -1756,6 +1775,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
         field.dispatchEvent(new MouseEvent('mouseup', mouseOpts));
         field.dispatchEvent(new MouseEvent('click', mouseOpts));
         try { field.focus(); } catch(_) {}
+        hShowPointer(fvx, fvy, 'type');
 
         const text = ${JSON.stringify(text)};
         if (field.isContentEditable) {
@@ -1825,6 +1845,9 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
   // The image and guest viewport sizes are recorded so coordinate tools can
   // map screenshot pixels to viewport pixels.
   const captureScreenshotImage = useCallback(async (): Promise<{ url: string; imageW: number; imageH: number }> => {
+    // Remove any live pointer marker so the transient click/hover indicator
+    // never shows up in the screenshot handed to the vision model.
+    await evalInPage(`(function(){try{var m=window.__hPointerMarker;if(m&&m.parentNode)m.parentNode.removeChild(m);window.__hPointerMarker=null;}catch(e){}})()`).catch(() => {});
     // ── Desktop: main-process webview capture (no taint possible) ──
     const desktop = (window as any).hDesktop;
     const wv = getWebview() as (BrowserGuest & { getWebContentsId?: () => number }) | null;
@@ -2032,11 +2055,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
       const m = String(vs || "").match(/^(\d+)x(\d+)$/);
       if (m) { viewportW = Number(m[1]); viewportH = Number(m[2]); }
       lastCaptureRef.current = { imageW: size.w, imageH: size.h, viewportW, viewportH };
-      // Overlay a coordinate grid so the vision model can read pixel positions
-      // off the image instead of guessing them. Same pixel size, so the
-      // image→viewport mapping is unchanged.
-      const gridUrl = await addCoordinateGrid(url, size.w, size.h);
-      return { url: gridUrl, imageW: size.w, imageH: size.h };
+      return { url, imageW: size.w, imageH: size.h };
     }
     return { url, imageW: 0, imageH: 0 };
   }, [evalInPage, getWebview]);
@@ -2153,6 +2172,7 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
         }
         const mouseOpts = { clientX: dx, clientY: dy, screenX: dx, screenY: dy, bubbles: true, cancelable: true, button: 0, buttons: 1, view: window };
         const pointerOpts = { clientX: dx, clientY: dy, screenX: dx, screenY: dy, bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', button: 0, buttons: 1, view: window };
+        let r;
         if (${JSON.stringify(eventType)} === 'click') {
           try { if (typeof target.focus === 'function') target.focus(); } catch(_) {}
           target.dispatchEvent(new PointerEvent('pointerdown', pointerOpts));
@@ -2162,18 +2182,20 @@ export default forwardRef<BrowserViewHandle, Props>(function BrowserView({
           target.dispatchEvent(new MouseEvent('click', mouseOpts));
           // Fallback: native click() for handlers that require isTrusted
           try { target.click(); } catch(_) {}
-          return 'clicked ' + hElLabel(target);
+          r = 'clicked ' + hElLabel(target);
         } else if (${JSON.stringify(eventType)} === 'contextmenu') {
           target.dispatchEvent(new PointerEvent('pointerdown', pointerOpts));
           target.dispatchEvent(new MouseEvent('mousedown', { ...mouseOpts, button: 2, buttons: 2 }));
           target.dispatchEvent(new MouseEvent('contextmenu', mouseOpts));
           target.dispatchEvent(new MouseEvent('mouseup', { ...mouseOpts, button: 2, buttons: 0 }));
-          return 'right-clicked ' + hElLabel(target);
+          r = 'right-clicked ' + hElLabel(target);
         } else {
           target.dispatchEvent(new MouseEvent('mousemove', mouseOpts));
           target.dispatchEvent(new PointerEvent('pointermove', pointerOpts));
-          return 'hovered on ' + hElLabel(target);
+          r = 'hovered on ' + hElLabel(target);
         }
+        hShowPointer(dx, dy, ${JSON.stringify(eventType === "click" ? "click" : eventType === "contextmenu" ? "contextmenu" : "move")});
+        return r;
       })()
     `);
   }, [evalInPage]);
